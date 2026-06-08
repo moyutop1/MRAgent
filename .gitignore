@@ -1,0 +1,27 @@
+# datasets + generated artifacts (rewrite / keyword / embedding); keep loader .py
+data/*.json
+# the two benchmark datasets are tracked (dataset_LM.json via Git LFS, see .gitattributes)
+!data/dataset_locomo.json
+!data/dataset_LM.json
+data/LM/
+data/locomo/
+data/AR/
+
+# results / logs / caches
+result/
+log/
+*.log
+__pycache__/
+*.pyc
+*.pkl
+
+# secrets
+.env
+
+# local notes / scratch / experiment outputs (not part of the released code)
+MERGE_CHANGES.md
+judge_*.json
+result_judge_*.jsonl
+*_backup.json
+compare_*.json
+_b10test.py

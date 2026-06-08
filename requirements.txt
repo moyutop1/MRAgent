@@ -1,0 +1,12 @@
+# Core runtime (rewrite / embed / retrieve / answer pipeline)
+openai==1.108.2          # LLM + embeddings via OpenRouter (OpenAI-compatible API)
+numpy==1.26.4
+torch==2.8.0             # embedding tensor ops (L2 normalization); CPU build is sufficient
+requests==2.32.5
+regex==2022.4.24
+jsonschema==4.25.1       # rewrite / keyword JSON-schema validation
+python-dotenv==1.1.1     # load OPENROUTER_API_KEY from .env
+tqdm==4.67.1
+
+# Evaluation only (eval/*.py)
+nltk==3.9.1

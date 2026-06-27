@@ -45,7 +45,7 @@ class LLM:
             temperature=temperature,
             top_p=top_p,
         )
-        if config.API_PROVIDER != "deepseek" and seed is not None:
+        if config.API_PROVIDER not in {"deepseek", "ofox"} and seed is not None:
             req["seed"] = seed
         if use_tool:
             req["tools"] = tools
@@ -153,7 +153,7 @@ class LLM:
                 tool_choice=tool_choice,
                 stream=False,  # important: receive the full message first
                 # keep if the SDK supports parallel tool calls; ignore otherwise
-                **({} if config.API_PROVIDER == "deepseek" else {"parallel_tool_calls": True}),
+                **({} if config.API_PROVIDER in {"deepseek", "ofox"} else {"parallel_tool_calls": True}),
                 temperature=temperature,
                 **extra
             )

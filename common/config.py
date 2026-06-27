@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()  # read API key from .env
 parser = argparse.ArgumentParser(description="Configure dataset and model parameters.")
 parser.add_argument("--data", type=str, default="locomo", help="Dataset name, e.g., AR / LM / locomo")
-parser.add_argument("--model", type=str, default="deepseek", help="Model name, e.g., deepseek / deepseek-pro / ofox")
+parser.add_argument("--model", type=str, default="gemini", help="Model name, e.g., gemini / deepseek / ofox")
 parser.add_argument("--file", type=str, default="0", help="Run/experiment tag appended to result filenames")
 parser.add_argument("--sample", type=int, default=None, help="Sample id to run (e.g. 42). Omit to run all samples.")
 parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / LM / locomo")
@@ -18,28 +18,45 @@ parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-ori
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
 args, _ = parser.parse_known_args()
 
-SUPPORTED_MODEL_ALIASES = {"deepseek", "deepseek-pro", "deepseek-chat", "deepseek-reasoner", "ofox"}
+OPENROUTER_MODEL_ALIASES = {"gpt4.1mini", "gpt4omini", "claude", "gpt4o", "claude3.5", "qwen", "gemini"}
+DEEPSEEK_MODEL_ALIASES = {"deepseek", "deepseek-pro", "deepseek-chat", "deepseek-reasoner"}
+SUPPORTED_MODEL_ALIASES = OPENROUTER_MODEL_ALIASES | DEEPSEEK_MODEL_ALIASES | {"ofox"}
 if args.model not in SUPPORTED_MODEL_ALIASES:
-    raise ValueError("Use --model deepseek, --model deepseek-pro, or --model ofox.")
+    raise ValueError("Use --model gemini, --model deepseek, --model deepseek-pro, or --model ofox.")
 if args.re_model and args.re_model not in SUPPORTED_MODEL_ALIASES:
-    raise ValueError("Use --re_model deepseek, --re_model deepseek-pro, or --re_model ofox.")
+    raise ValueError("Use --re_model gemini, --re_model deepseek, --re_model deepseek-pro, or --re_model ofox.")
 
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 DEEPSEEK_URL = "https://api.deepseek.com"
-CHAT_BASE_URL = DEEPSEEK_URL
-API_PROVIDER = "deepseek"
+CHAT_BASE_URL = OPENROUTER_URL
+API_PROVIDER = "openrouter"
 if args.model == "gpt4.1mini":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "openai/gpt-4.1-mini"
 elif args.model == "gpt4omini":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "gpt-4o-mini-2024-07-18"
 elif args.model == "claude":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "anthropic/claude-sonnet-4.5"
 elif args.model == "gpt4o":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "openai/gpt-4o"
 elif args.model == "claude3.5":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "anthropic/claude-3.5-haiku"
 elif args.model == "qwen":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "qwen/qwen3-max"
 elif args.model == "gemini":
+    API_PROVIDER = "openrouter"
+    CHAT_BASE_URL = OPENROUTER_URL
     MODEL = "google/gemini-2.5-flash"
 elif args.model == "deepseek":
     API_PROVIDER = "deepseek"
@@ -62,7 +79,7 @@ elif args.model == "ofox":
     CHAT_BASE_URL = os.getenv("OFOX_BASE_URL", "").rstrip("/")
     MODEL = os.getenv("OFOX_MODEL", "gpt-4o-mini")
 else:
-    raise ValueError("Use --model deepseek, --model deepseek-pro, or --model ofox.")
+    raise ValueError("Use --model gemini, --model deepseek, --model deepseek-pro, or --model ofox.")
 CHOOSE_MODEL = MODEL
 MODEL_NAME = args.model  # short name (gemini/claude/...), used by the LM temporal method answer_question_with_time_lm
 if args.re_model:
@@ -94,7 +111,12 @@ if args.re_model:
         RE_MODEL = MODEL
 else:
     RE_MODEL = MODEL
-API_KEY = os.getenv("OFOX_API_KEY") if API_PROVIDER == "ofox" else os.getenv("DEEPSEEK_API_KEY")
+if API_PROVIDER == "ofox":
+    API_KEY = os.getenv("OFOX_API_KEY")
+elif API_PROVIDER == "deepseek":
+    API_KEY = os.getenv("DEEPSEEK_API_KEY")
+else:
+    API_KEY = os.getenv("OPENROUTER_API_KEY")
 if API_PROVIDER == "ofox" and not CHAT_BASE_URL:
     raise ValueError("OFOX_BASE_URL is empty. Set it in .env when using --model ofox.")
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"
@@ -120,7 +142,12 @@ dataset = args.data
 DATASET = dataset
 datapath = f"data/dataset_{dataset}.json"
 ADDITIONAL_TK = f"_{args.model}"#"_gpt4o-mini"
-ADDITIONAL_EM = f"_{args.model}_local_bge"#
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
+EMBEDDING_TAG = os.getenv(
+    "EMBEDDING_TAG",
+    "text_embedding_3_large" if EMBEDDING_PROVIDER == "openrouter" else "local_bge"
+)
+ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
 ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}" #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"
 base_dir_k = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/"

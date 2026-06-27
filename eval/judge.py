@@ -11,15 +11,19 @@ from common.utils import extract_json_from_content
 from dotenv import load_dotenv
 import os
 load_dotenv()  # read API key from .env
-JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", os.getenv("CHAT_PROVIDER", "deepseek")).lower()
+JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", os.getenv("CHAT_PROVIDER", "openrouter")).lower()
 if JUDGE_PROVIDER == "ofox":
     API_KEY = os.getenv("OFOX_API_KEY")
     JUDGE_MODEL = os.getenv("OFOX_JUDGE_MODEL", os.getenv("OFOX_MODEL", "gpt-4o-mini"))
     JUDGE_BASE_URL = os.getenv("OFOX_BASE_URL", "").rstrip("/")
-else:
+elif JUDGE_PROVIDER == "deepseek":
     API_KEY = os.getenv("DEEPSEEK_API_KEY")
     JUDGE_MODEL = os.getenv("DEEPSEEK_JUDGE_MODEL", "deepseek-v4-flash")
     JUDGE_BASE_URL = "https://api.deepseek.com"
+else:
+    API_KEY = os.getenv("OPENROUTER_API_KEY")
+    JUDGE_MODEL = os.getenv("OPENROUTER_JUDGE_MODEL", "openai/gpt-4o-mini")
+    JUDGE_BASE_URL = "https://openrouter.ai/api/v1"
 client = OpenAI(api_key=API_KEY, base_url=JUDGE_BASE_URL)
 
 ACCURACY_PROMPT = """
@@ -52,7 +56,10 @@ Just return the label CORRECT or WRONG in a json format with the key as "label".
 def evaluate_llm_judge(question, gold_answer, generated_answer):
     """Evaluate the generated answer against the gold answer using an LLM judge."""
     if not API_KEY:
-        raise RuntimeError("Judge API key is empty. Set DEEPSEEK_API_KEY or OFOX_API_KEY in .env before running LLM judge.")
+        raise RuntimeError(
+            "Judge API key is empty. Set OPENROUTER_API_KEY, DEEPSEEK_API_KEY, "
+            "or OFOX_API_KEY in .env before running LLM judge."
+        )
     if not JUDGE_BASE_URL:
         raise RuntimeError("Judge base URL is empty. Set OFOX_BASE_URL in .env when JUDGE_PROVIDER=ofox.")
     req = {

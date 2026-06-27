@@ -19,7 +19,17 @@ OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "text-embed
 OPENROUTER_EMBEDDING_BATCH_SIZE = int(os.getenv("OPENROUTER_EMBEDDING_BATCH_SIZE", "96"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-EMBEDDING_BATCH_SIZE = OPENROUTER_EMBEDDING_BATCH_SIZE if EMBEDDING_PROVIDER == "openrouter" else LOCAL_EMBEDDING_BATCH_SIZE
+OFOX_EMBEDDING_MODEL = os.getenv("OFOX_EMBEDDING_MODEL", "text-embedding-3-large")
+OFOX_EMBEDDING_BATCH_SIZE = int(os.getenv("OFOX_EMBEDDING_BATCH_SIZE", "96"))
+OFOX_API_KEY = os.getenv("OFOX_API_KEY")
+OFOX_BASE_URL = os.getenv("OFOX_BASE_URL", "").rstrip("/")
+EMBEDDING_BATCH_SIZE = (
+    OPENROUTER_EMBEDDING_BATCH_SIZE
+    if EMBEDDING_PROVIDER == "openrouter"
+    else OFOX_EMBEDDING_BATCH_SIZE
+    if EMBEDDING_PROVIDER == "ofox"
+    else LOCAL_EMBEDDING_BATCH_SIZE
+)
 
 
 @lru_cache(maxsize=1)
@@ -58,31 +68,73 @@ def get_openrouter_embedding(
         max_retries: int = 5,
         initial_backoff: float = 1.0,
 ) -> np.ndarray:
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is empty. Set it in .env for text-embedding-3-large.")
+    return get_openai_compatible_embedding(
+        texts=texts,
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+        model=OPENROUTER_EMBEDDING_MODEL,
+        batch_size=batch_size or OPENROUTER_EMBEDDING_BATCH_SIZE,
+        provider_name="OpenRouter",
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+    )
+
+
+def get_ofox_embedding(
+        texts: Sequence[str],
+        batch_size: int = None,
+        max_retries: int = 5,
+        initial_backoff: float = 1.0,
+) -> np.ndarray:
+    return get_openai_compatible_embedding(
+        texts=texts,
+        api_key=OFOX_API_KEY,
+        base_url=OFOX_BASE_URL,
+        model=OFOX_EMBEDDING_MODEL,
+        batch_size=batch_size or OFOX_EMBEDDING_BATCH_SIZE,
+        provider_name="Ofox",
+        max_retries=max_retries,
+        initial_backoff=initial_backoff,
+    )
+
+
+def get_openai_compatible_embedding(
+        texts: Sequence[str],
+        api_key: str,
+        base_url: str,
+        model: str,
+        batch_size: int,
+        provider_name: str,
+        max_retries: int,
+        initial_backoff: float,
+) -> np.ndarray:
+    if not api_key:
+        raise RuntimeError(f"{provider_name} API key is empty. Set it in .env for {model}.")
+    if not base_url:
+        raise RuntimeError(f"{provider_name} base URL is empty. Set it in .env for {model}.")
     if not isinstance(texts, (list, tuple)):
         raise TypeError("texts must be a list/tuple of strings")
     clean_texts = [("" if t is None else str(t)).replace("\n", " ").strip() for t in texts]
     if not clean_texts:
         return np.empty((0, 0), dtype=np.float32)
 
-    client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL, timeout=60.0)
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
     out = []
-    step = batch_size or OPENROUTER_EMBEDDING_BATCH_SIZE
+    step = batch_size
     for start in range(0, len(clean_texts), step):
         batch = clean_texts[start:start + step]
         attempt = 0
         backoff = initial_backoff
         while True:
             try:
-                resp = client.embeddings.create(model=OPENROUTER_EMBEDDING_MODEL, input=batch)
+                resp = client.embeddings.create(model=model, input=batch)
                 out.extend(item.embedding for item in resp.data)
                 break
             except (RateLimitError, APIStatusError, OpenAIError, TimeoutError) as e:
                 attempt += 1
                 if attempt > max_retries:
                     raise RuntimeError(
-                        f"OpenRouter embedding request failed after {max_retries} retries "
+                        f"{provider_name} embedding request failed after {max_retries} retries "
                         f"at batch [{start}:{start + len(batch)}]: {e}"
                     ) from e
                 time.sleep(backoff)
@@ -93,4 +145,8 @@ def get_openrouter_embedding(
 def get_embedding(texts: Sequence[str], batch_size: int = None) -> np.ndarray:
     if EMBEDDING_PROVIDER == "openrouter":
         return get_openrouter_embedding(texts, batch_size=batch_size)
-    return get_local_embedding(texts, batch_size=batch_size)
+    if EMBEDDING_PROVIDER == "ofox":
+        return get_ofox_embedding(texts, batch_size=batch_size)
+    if EMBEDDING_PROVIDER == "local":
+        return get_local_embedding(texts, batch_size=batch_size)
+    raise ValueError("Use EMBEDDING_PROVIDER=local, EMBEDDING_PROVIDER=openrouter, or EMBEDDING_PROVIDER=ofox.")

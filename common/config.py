@@ -145,7 +145,7 @@ ADDITIONAL_TK = f"_{args.model}"#"_gpt4o-mini"
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 EMBEDDING_TAG = os.getenv(
     "EMBEDDING_TAG",
-    "text_embedding_3_large" if EMBEDDING_PROVIDER == "openrouter" else "local_bge"
+    "text_embedding_3_large" if EMBEDDING_PROVIDER in {"openrouter", "ofox"} else "local_bge"
 )
 ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
 ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}" #"_gpt4o-mini"

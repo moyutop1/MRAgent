@@ -11,7 +11,7 @@ from common.utils import topk_answers_by_similarity
 from common import config
 from llm.controller import LLM
 from memory.controller import MemoryController
-from memory.system import MemorySystem, KeyNode, EpisodeEvent, Link
+from memory.system import MemorySystem, KeyNode, EpisodeEvent, Link, EAESMemoryNote
 from agent.tools import TOOLS, ToolBridge
 import logging
 logger = logging.getLogger(__name__)
@@ -445,9 +445,220 @@ class Agent:
                     key_candidates.append({"key": key, "tags": tag})
         return key_candidates, key_tag_sentences_id, key_tag_sentences
 
+    @staticmethod
+    def _eaes_safe_path(prefix, text):
+        text = (text or "").lower().strip()
+        text = re.sub(r"[^a-z0-9]+", "_", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        if not text:
+            return None
+        return f"{prefix}.{text}"
+
+    @staticmethod
+    def _eaes_memory_id(event_id):
+        return "M_" + re.sub(r"[^A-Za-z0-9]+", "_", event_id).strip("_")
+
+    @staticmethod
+    def _eaes_infer_lifecycle(text, explicit=None):
+        explicit = (explicit or "").lower().strip()
+        if explicit in {"planned", "current", "historical"}:
+            return explicit
+        t = (text or "").lower()
+        planned_markers = [
+            "will ", "going to", "plans to", "planned to", "planning to", "hopes to",
+            "expects to", "scheduled", "upcoming", "next ", "tomorrow", "looking forward"
+        ]
+        historical_markers = [
+            "attended", "went", "visited", "had ", "did ", "was ", "were ", "finished",
+            "completed", "joined", "shared", "talked", "met", "bought", "made", "created"
+        ]
+        current_markers = [
+            "currently", "now", "still", "is working", "is living", "lives", "works",
+            "likes", "prefers", "enjoys", "has a", "has an", "is a", "are a"
+        ]
+        if any(m in t for m in planned_markers):
+            return "planned"
+        if any(m in t for m in historical_markers):
+            return "historical"
+        if any(m in t for m in current_markers):
+            return "current"
+        return "historical"
+
+    @staticmethod
+    def _eaes_entities_from_keywords(keywords, raw_text):
+        stop = {
+            "i", "you", "he", "she", "we", "they", "it", "me", "him", "her", "them",
+            "user", "assistant", "the", "a", "an", "and", "or", "to", "of", "in", "on",
+            "at", "for", "with", "from", "about", "this", "that"
+        }
+        entities = []
+        for kw in keywords or []:
+            k = str(kw).strip()
+            if not k or k.lower() in stop:
+                continue
+            if re.search(r"[A-Z][a-z]+", k) or " " in k:
+                entities.append(k)
+        for match in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", raw_text or ""):
+            if match.lower() not in stop:
+                entities.append(match)
+        out = []
+        seen = set()
+        for ent in entities:
+            key = ent.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(ent)
+        return out[:8]
+
+    def _eaes_build_notes_for_session(self, events, keyword_by_sentence, conversation_time):
+        for ee in events.get("sentence") or []:
+            event_id = ee.get("id")
+            if event_id not in self.memory.episode_events:
+                continue
+            ev = self.memory.episode_events[event_id]
+            keywords = keyword_by_sentence.get(event_id, [])
+            entities = self._eaes_entities_from_keywords(keywords, ev.text)
+            attribute_paths = []
+            tag_path = self._eaes_safe_path("tag", ee.get("tag"))
+            if tag_path:
+                attribute_paths.append(tag_path)
+            for kw in keywords[:8]:
+                kw_path = self._eaes_safe_path("keyword", kw)
+                if kw_path:
+                    attribute_paths.append(kw_path)
+            for topic_id in ee.get("topic") or []:
+                topic_path = self._eaes_safe_path("topic", topic_id)
+                if topic_path:
+                    attribute_paths.append(topic_path)
+            attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
+            note = EAESMemoryNote(
+                memory_id=self._eaes_memory_id(event_id),
+                event_id=event_id,
+                entities=entities,
+                attribute_paths=attribute_paths,
+                raw_text=ev.text,
+                rewrite_content=ee.get("text") or ev.text,
+                time_interval={
+                    "type": "conversation_time",
+                    "start": conversation_time,
+                    "end": conversation_time,
+                },
+                event_lifecycle=self._eaes_infer_lifecycle(ee.get("text") or ev.text, ee.get("event_lifecycle")),
+                origin=ev.origin,
+                embedding=ev.embedding,
+            )
+            self.memory.add_eaes_memory_note(note)
+
+    def parse_eaes_query(self, question, question_keys):
+        query_out = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({"question": question}, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL
+        )
+        if isinstance(query_out, dict):
+            return query_out
+        return {
+            "entities": [k.get("id") for k in question_keys.get("keywords", []) if isinstance(k, dict)],
+            "attribute_hints": [],
+            "answer_type": "unknown",
+            "temporal_intent": "none",
+            "required_lifecycle": "unknown",
+            "keywords": [k.get("id") for k in question_keys.get("keywords", []) if isinstance(k, dict)],
+        }
+
+    def _enrich_eaes_package(self, package):
+        if not isinstance(package, dict):
+            return {"answer_items": []}
+        enriched_items = []
+        for item in package.get("answer_items") or []:
+            enriched_evidence = []
+            for ev in item.get("evidence") or []:
+                mid = ev.get("memory_id")
+                note = self.memory.get_eaes_note(mid)
+                if note is None:
+                    continue
+                enriched_evidence.append({**ev, **note.to_dict(include_raw=False)})
+            if enriched_evidence:
+                enriched_items.append({
+                    "item": item.get("item"),
+                    "score": item.get("score"),
+                    "evidence": enriched_evidence,
+                })
+        return {
+            "need_raw_expansion": package.get("need_raw_expansion", False),
+            "reason": package.get("reason", ""),
+            "answer_items": enriched_items,
+        }
+
+    def select_eaes_evidence(self, question, query_plan, candidates):
+        selection_input = {
+            "question": question,
+            "query_plan": query_plan,
+            "candidates": candidates[:config.EAES_SELECTION_LIMIT],
+        }
+        package = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.EAES_EVIDENCE_SELECTION_PROMPT},
+                {"role": "user", "content": json.dumps(selection_input, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL
+        )
+        if not isinstance(package, dict):
+            package = {"answer_items": []}
+        raw_ids = package.get("memory_ids_to_expand") or []
+        if package.get("need_raw_expansion") and raw_ids:
+            selection_input["expanded_raw_notes"] = self.memory_controller.expand_eaes_raw_text(raw_ids)
+            package2 = self.llm.chat_text(
+                messages=[
+                    {"role": "system", "content": Prompts.EAES_EVIDENCE_SELECTION_PROMPT},
+                    {"role": "user", "content": json.dumps(selection_input, ensure_ascii=False)},
+                ],
+                model=config.RE_MODEL
+            )
+            if isinstance(package2, dict):
+                package = package2
+        return self._enrich_eaes_package(package)
+
+    def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
+        question_keys = self.extract_question_keys(question)
+        query_plan = self.parse_eaes_query(question, question_keys)
+        candidates = self.memory_controller.retrieve_eaes_candidates(
+            query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+        if not candidates:
+            return "no information available", []
+        evidence_package = self.select_eaes_evidence(question, query_plan, candidates)
+        final_input = {
+            "question": question,
+            "query_plan": query_plan,
+            "evidence_package": evidence_package,
+        }
+        if lm_current_date:
+            final_input["current_date"] = lm_current_date
+        answer_obj = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
+                {"role": "user", "content": json.dumps(final_input, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL
+        )
+        if not isinstance(answer_obj, dict):
+            return "no information available", []
+        supports = answer_obj.get("supports") or []
+        if not supports:
+            for item in evidence_package.get("answer_items") or []:
+                for ev in item.get("evidence") or []:
+                    mid = ev.get("memory_id")
+                    if mid and mid not in supports:
+                        supports.append(mid)
+        return answer_obj.get("answer", "no information available"), self.memory.get_eaes_support_origin(supports)
+
 
 
     def answer_question(self, question: str, category=0, question_emb=None, override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
+        if config.EAES_MODE:
+            return self.answer_question_eaes(question, category, question_emb, lm_current_date)
         self.memory_controller.question_emb = question_emb
         question_keys = self.extract_question_keys(question)
         self.memory_controller.set_queried_keywords(question_keys.get("keywords"))
@@ -830,11 +1041,13 @@ class Agent:
 
         # [guard] keys=None (the keyword file line is null) means no keyword links; skip this block; topic/episode already registered above
         keywords = keys.get("sentence") if keys is not None else None
+        keyword_by_sentence = {}
 
         i = 0
         for s in (keywords or []):
             sentence_id = s.get("sentence_id")
             ks = s.get("keyword")
+            keyword_by_sentence[sentence_id] = ks or []
             if sentence_id not in self.memory.episode_events.keys():
                 continue
             tag = self.memory.episode_events[sentence_id].tag_t #s.get("tag")
@@ -860,6 +1073,8 @@ class Agent:
                 i += 1
 
         self.episode_link_num = self.episode_link_num + i
+        if config.EAES_MODE:
+            self._eaes_build_notes_for_session(events, keyword_by_sentence, conversation_time)
 
     def store_raw_text(self, raw_text, conv_embeddings=None, topic_id_list=None, topic_embeddings=None):
         self.memory.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)

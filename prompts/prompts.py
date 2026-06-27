@@ -229,6 +229,72 @@ Schema:
             RAW_TEXT=raw_text,
         )
 
+    EAES_QUERY_SYSTEM_PROMPT = """You are a query parser for long-term conversational memory. Only output valid JSON.
+Extract fields for answer-oriented evidence selection.
+Schema:
+{
+  "entities": ["person or entity names"],
+  "attribute_hints": ["semantic.attribute.path"],
+  "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
+  "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
+  "required_lifecycle": "planned | current | historical | unknown",
+  "keywords": ["important lexical constraints"]
+}
+Rules:
+- Use "historical" when the question asks what happened, what someone did, or what events someone attended.
+- Use "planned" when the question asks about intentions, plans, scheduled future events, or going to do something.
+- Use "current" when the question asks about now, currently, still, preferences, roles, residence, or ongoing state.
+- attribute_hints should be short semantic paths such as activity.event_attendance, activity.picnic, topic.LGBTQ, location.home, preference.food.
+- Do not answer the question."""
+
+    EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.
+Goal: select valid answer evidence, not merely related memories.
+Consider entity match, attribute match, answer type, lifecycle compatibility, temporal usability, facet specificity, answer density, low redundancy, and coverage.
+Use planned/current/historical carefully:
+- planned evidence can support plan/future questions.
+- current evidence can support current-state questions.
+- historical evidence can support happened/attended/did questions.
+- For list-answer questions, cluster memories by possible answer item.
+Output schema:
+{
+  "need_raw_expansion": true,
+  "memory_ids_to_expand": ["M_D1_2_1"],
+  "reason": "short reason",
+  "answer_items": [
+    {
+      "item": "candidate answer item",
+      "score": 0.0,
+      "evidence": [
+        {
+          "memory_id": "M_D1_2_1",
+          "role": "direct_evidence | specificity_evidence | temporal_anchor | lifecycle_evidence | background",
+          "rationale": "short reason"
+        }
+      ]
+    }
+  ]
+}
+Limits:
+- Select at most 8 answer_items.
+- Select at most 3 memories per answer_item.
+- Prefer direct evidence; use complementary pairs only when one memory supplies specificity and another supplies lifecycle/completion."""
+
+    EAES_FINAL_ANSWER_PROMPT = """You answer from an EAES evidence package. Only output valid JSON.
+Use the structured evidence package as the primary context.
+Rules:
+- Give the minimal answer requested by the question.
+- For list questions, return a concise comma-separated list.
+- For time questions, combine rewrite_content temporal phrases with time_interval conversation-time anchors when needed.
+- Do not use planned-only evidence to answer a historical/completed question unless paired with historical evidence.
+- If evidence is insufficient, answer "no information available".
+Schema:
+{
+  "mode": "answer",
+  "answer": "...",
+  "supports": ["memory_id"],
+  "confidence": 0.0
+}"""
+
     # -------- fact extraction --------
 
 

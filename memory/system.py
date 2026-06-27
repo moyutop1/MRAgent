@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import json
 import re
 from datetime import datetime, date
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Any
 from collections import defaultdict
 
 
@@ -104,6 +104,46 @@ class Link:
         self.tag = tag
 
 
+class EAESMemoryNote:
+    def __init__(
+            self,
+            memory_id: str,
+            event_id: str,
+            entities: List[str],
+            attribute_paths: List[str],
+            raw_text: str,
+            rewrite_content: str,
+            time_interval: Dict[str, Any],
+            event_lifecycle: str,
+            origin: str,
+            embedding=None,
+    ):
+        self.memory_id = memory_id
+        self.event_id = event_id
+        self.entities = entities
+        self.attribute_paths = attribute_paths
+        self.raw_text = raw_text
+        self.rewrite_content = rewrite_content
+        self.time_interval = time_interval
+        self.event_lifecycle = event_lifecycle
+        self.origin = origin
+        self.embedding = embedding
+
+    def to_dict(self, include_raw: bool = False):
+        data = {
+            "memory_id": self.memory_id,
+            "event_id": self.event_id,
+            "entities": self.entities,
+            "attribute_paths": self.attribute_paths,
+            "rewrite_content": self.rewrite_content,
+            "time_interval": self.time_interval,
+            "event_lifecycle": self.event_lifecycle,
+        }
+        if include_raw:
+            data["raw_text"] = self.raw_text
+        return data
+
+
 class MemorySystem:
     def __init__(self):
         self.keys: Dict[str, KeyNode] = {}  # key -> meta {'aliases': set(), ...}
@@ -126,6 +166,10 @@ class MemorySystem:
         self.embeddings = {}
         self.topic_dict: Dict[str, Topic] = {}
         self.tid2emb = {}
+        self.eaes_notes: Dict[str, EAESMemoryNote] = {}
+        self.eaes_event_to_memory: Dict[str, str] = {}
+        self.eaes_by_entity: Dict[str, Set[str]] = defaultdict(set)
+        self.eaes_by_attribute: Dict[str, Set[str]] = defaultdict(set)
 
     # ----- Node ops -----
 
@@ -283,6 +327,36 @@ class MemorySystem:
         if person not in self.persona_list:
             self.persona_list[person] = Persona(person)
         self.persona_list[person].add_information(pid, ptext, ptag, porigin)
+
+    @staticmethod
+    def _eaes_norm(text: str):
+        text = (text or "").lower().strip()
+        text = re.sub(r"[^a-z0-9_./\s-]+", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text
+
+    def add_eaes_memory_note(self, note: EAESMemoryNote):
+        self.eaes_notes[note.memory_id] = note
+        self.eaes_event_to_memory[note.event_id] = note.memory_id
+        for entity in note.entities:
+            norm_entity = self._eaes_norm(entity)
+            if norm_entity:
+                self.eaes_by_entity[norm_entity].add(note.memory_id)
+        for attr in note.attribute_paths:
+            norm_attr = self._eaes_norm(attr)
+            if norm_attr:
+                self.eaes_by_attribute[norm_attr].add(note.memory_id)
+
+    def get_eaes_note(self, memory_id: str):
+        return self.eaes_notes.get(memory_id)
+
+    def get_eaes_support_origin(self, memory_ids):
+        origins = []
+        for mid in memory_ids or []:
+            note = self.eaes_notes.get(mid)
+            if note is not None and note.origin not in origins:
+                origins.append(note.origin)
+        return origins
 
 
 

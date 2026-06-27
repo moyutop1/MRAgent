@@ -128,6 +128,95 @@ class MemoryController:
     def query_personal_aspect(self, person, aspect):
         return self.memory.query_personal_aspect( person, aspect)
 
+    @staticmethod
+    def _eaes_words(text: str) -> Set[str]:
+        text = MemoryController._snake_norm(text).replace("_", " ")
+        return set(t for t in text.split() if t)
+
+    @staticmethod
+    def _eaes_overlap_score(left: Set[str], right: Set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        return len(left & right) / max(1, len(left))
+
+    def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
+        limit = limit or config.EAES_CANDIDATE_LIMIT
+        query_entities = query_plan.get("entities") or []
+        attr_hints = query_plan.get("attribute_hints") or []
+        keywords = query_plan.get("keywords") or []
+        required_lifecycle = (query_plan.get("required_lifecycle") or "").lower().strip()
+
+        entity_words = [self._eaes_words(e) for e in query_entities]
+        attr_words = set()
+        for attr in attr_hints:
+            attr_words |= self._eaes_words(attr)
+        keyword_words = set()
+        for kw in keywords:
+            keyword_words |= self._eaes_words(kw)
+
+        scored = []
+        for note in self.memory.eaes_notes.values():
+            note_entity_words = set()
+            for entity in note.entities:
+                note_entity_words |= self._eaes_words(entity)
+            note_attr_words = set()
+            for attr in note.attribute_paths:
+                note_attr_words |= self._eaes_words(attr)
+            note_text_words = self._eaes_words(note.rewrite_content)
+
+            if entity_words:
+                entity_score = max(
+                    self._eaes_overlap_score(qe, note_entity_words | note_text_words)
+                    for qe in entity_words
+                )
+            else:
+                entity_score = 0.2
+            attr_score = self._eaes_overlap_score(attr_words, note_attr_words | note_text_words)
+            keyword_score = self._eaes_overlap_score(keyword_words, note_text_words | note_attr_words)
+
+            lifecycle_score = 0.0
+            if required_lifecycle in {"planned", "current", "historical"}:
+                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else -0.25
+
+            emb_score = 0.0
+            if question_emb is not None and note.embedding is not None:
+                try:
+                    emb_score = float(np.dot(question_emb.reshape(-1), note.embedding.reshape(-1)))
+                except Exception:
+                    emb_score = 0.0
+
+            score = (
+                2.0 * entity_score
+                + 1.4 * attr_score
+                + 1.2 * keyword_score
+                + 0.7 * lifecycle_score
+                + 0.2 * emb_score
+            )
+            if score <= 0 and not query_entities:
+                continue
+            scored.append((score, {
+                **note.to_dict(include_raw=False),
+                "score": round(score, 4),
+                "score_parts": {
+                    "entity": round(entity_score, 3),
+                    "attribute": round(attr_score, 3),
+                    "keyword": round(keyword_score, 3),
+                    "lifecycle": round(lifecycle_score, 3),
+                    "embedding": round(emb_score, 3),
+                }
+            }))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    def expand_eaes_raw_text(self, memory_ids: List[str]):
+        expanded = []
+        for mid in memory_ids[:config.EAES_RAW_EXPANSION_LIMIT]:
+            note = self.memory.get_eaes_note(mid)
+            if note is not None:
+                expanded.append(note.to_dict(include_raw=True))
+        return expanded
+
     def _parse_md(self,s: str):
         MD_RE = re.compile(r"^\s*(\d{2})-(\d{2})\s*$")  # MM-DD
         YMD_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})\s*$")

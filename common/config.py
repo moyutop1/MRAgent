@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()  # read API key from .env
 parser = argparse.ArgumentParser(description="Configure dataset and model parameters.")
 parser.add_argument("--data", type=str, default="locomo", help="Dataset name, e.g., AR / LM / locomo")
-parser.add_argument("--model", type=str, default="gemini", help="Model name, e.g., gemini / claude / gpt4o / qwen")
+parser.add_argument("--model", type=str, default="deepseek", help="Model name, e.g., deepseek / deepseek-pro")
 parser.add_argument("--file", type=str, default="0", help="Run/experiment tag appended to result filenames")
 parser.add_argument("--sample", type=int, default=None, help="Sample id to run (e.g. 42). Omit to run all samples.")
 parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / LM / locomo")
@@ -18,8 +18,15 @@ parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-ori
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
 args, _ = parser.parse_known_args()
 
+DEEPSEEK_MODEL_ALIASES = {"deepseek", "deepseek-pro", "deepseek-chat", "deepseek-reasoner"}
+if args.model not in DEEPSEEK_MODEL_ALIASES:
+    raise ValueError("This fork is configured for DeepSeek official API. Use --model deepseek or --model deepseek-pro.")
+if args.re_model and args.re_model not in DEEPSEEK_MODEL_ALIASES:
+    raise ValueError("This fork is configured for DeepSeek official API. Use --re_model deepseek or --re_model deepseek-pro.")
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1"
+DEEPSEEK_URL = "https://api.deepseek.com"
+CHAT_BASE_URL = DEEPSEEK_URL
+API_PROVIDER = "deepseek"
 if args.model == "gpt4.1mini":
     MODEL = "openai/gpt-4.1-mini"
 elif args.model == "gpt4omini":
@@ -34,6 +41,24 @@ elif args.model == "qwen":
     MODEL = "qwen/qwen3-max"
 elif args.model == "gemini":
     MODEL = "google/gemini-2.5-flash"
+elif args.model == "deepseek":
+    API_PROVIDER = "deepseek"
+    CHAT_BASE_URL = DEEPSEEK_URL
+    MODEL = "deepseek-v4-flash"
+elif args.model == "deepseek-pro":
+    API_PROVIDER = "deepseek"
+    CHAT_BASE_URL = DEEPSEEK_URL
+    MODEL = "deepseek-v4-pro"
+elif args.model == "deepseek-chat":
+    API_PROVIDER = "deepseek"
+    CHAT_BASE_URL = DEEPSEEK_URL
+    MODEL = "deepseek-chat"
+elif args.model == "deepseek-reasoner":
+    API_PROVIDER = "deepseek"
+    CHAT_BASE_URL = DEEPSEEK_URL
+    MODEL = "deepseek-reasoner"
+else:
+    raise ValueError("This fork is configured for DeepSeek official API. Use --model deepseek or --model deepseek-pro.")
 CHOOSE_MODEL = MODEL
 MODEL_NAME = args.model  # short name (gemini/claude/...), used by the LM temporal method answer_question_with_time_lm
 if args.re_model:
@@ -51,11 +76,19 @@ if args.re_model:
         RE_MODEL = "qwen/qwen3-max"
     elif args.re_model == "gemini":
         RE_MODEL = "google/gemini-2.5-flash"
+    elif args.re_model == "deepseek":
+        RE_MODEL = "deepseek-v4-flash"
+    elif args.re_model == "deepseek-pro":
+        RE_MODEL = "deepseek-v4-pro"
+    elif args.re_model == "deepseek-chat":
+        RE_MODEL = "deepseek-chat"
+    elif args.re_model == "deepseek-reasoner":
+        RE_MODEL = "deepseek-reasoner"
     else:
         RE_MODEL = MODEL
 else:
     RE_MODEL = MODEL
-API_KEY = os.getenv("OPENROUTER_API_KEY")
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"
 K1=80                 # coarse retrieval breadth (embedding similarity)
 K2=20                 # fine retrieval breadth (LLM re-ranking)
@@ -79,7 +112,7 @@ dataset = args.data
 DATASET = dataset
 datapath = f"data/dataset_{dataset}.json"
 ADDITIONAL_TK = f"_{args.model}"#"_gpt4o-mini"
-ADDITIONAL_EM = f"_{args.model}"#
+ADDITIONAL_EM = f"_{args.model}_local_bge"#
 ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}" #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"
 base_dir_k = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/"

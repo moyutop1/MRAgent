@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class LLM:
     def __init__(self):
         self.client = OpenAI(api_key=config.API_KEY,
-                             base_url=config.OPENROUTER_URL,
+                             base_url=config.CHAT_BASE_URL,
                              timeout=120.0,
                              max_retries=3)
         self.model = config.MODEL
@@ -44,8 +44,9 @@ class LLM:
             messages=messages,
             temperature=temperature,
             top_p=top_p,
-            seed=seed,
         )
+        if config.API_PROVIDER != "deepseek" and seed is not None:
+            req["seed"] = seed
         if use_tool:
             req["tools"] = tools
             req["tool_choice"] = tool_choice
@@ -152,7 +153,7 @@ class LLM:
                 tool_choice=tool_choice,
                 stream=False,  # important: receive the full message first
                 # keep if the SDK supports parallel tool calls; ignore otherwise
-                parallel_tool_calls=True,
+                **({} if config.API_PROVIDER == "deepseek" else {"parallel_tool_calls": True}),
                 temperature=temperature,
                 **extra
             )

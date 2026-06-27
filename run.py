@@ -207,7 +207,7 @@ def main():
             result_path = config.result_template.format(dataset=dataset, sample_id=sample_id)
             get_question(dataset, agent, question_list, sample_id, memory_system, result_path, question_embeddings)
 
-def log_config(config_module, exclude=("API_KEY","OPENROUTER_URL")):
+def log_config(config_module, exclude=("API_KEY", "CHAT_BASE_URL", "DEEPSEEK_URL")):
     logging.info("========== CONFIGURATION ==========")
     for name in dir(config_module):
         if not re.match(r'^[A-Z0-9_]+$', name):

@@ -5,14 +5,15 @@ import json
 from collections import defaultdict
 
 import numpy as np
-import openai
 from openai import OpenAI
+from common.utils import extract_json_from_content
 
 from dotenv import load_dotenv
 import os
 load_dotenv()  # read API key from .env
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-client = OpenAI(api_key=API_KEY, base_url="https://openrouter.ai/api/v1")
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
+JUDGE_MODEL = os.getenv("DEEPSEEK_JUDGE_MODEL", "deepseek-v4-flash")
+client = OpenAI(api_key=API_KEY, base_url="https://api.deepseek.com")
 
 ACCURACY_PROMPT = """
 Your task is to label an answer to a question as ’CORRECT’ or ’WRONG’. You will be given the following data:
@@ -43,9 +44,11 @@ Just return the label CORRECT or WRONG in a json format with the key as "label".
 
 def evaluate_llm_judge(question, gold_answer, generated_answer):
     """Evaluate the generated answer against the gold answer using an LLM judge."""
-    response = client.chat.completions.create(
-        model="openai/gpt-4o-mini",
-        messages=[
+    if not API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY is empty. Set it in .env before running LLM judge.")
+    req = {
+        "model": JUDGE_MODEL,
+        "messages": [
             {
                 "role": "user",
                 "content": ACCURACY_PROMPT.format(
@@ -53,9 +56,12 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
                 ),
             }
         ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
-    )
+        "temperature": 0.0,
+    }
+    try:
+        response = client.chat.completions.create(**req, response_format={"type": "json_object"})
+    except Exception:
+        response = client.chat.completions.create(**req)
     # print([
     #         {
     #             "role": "user",
@@ -64,7 +70,11 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
     #         }
     #     ])
     # print(response.choices[0].message.content)
-    label = json.loads(response.choices[0].message.content)["label"]
+    content = response.choices[0].message.content
+    try:
+        label = json.loads(content)["label"]
+    except Exception:
+        label = extract_json_from_content(content).get("label")
     return 1 if label == "CORRECT" else 0
 
 

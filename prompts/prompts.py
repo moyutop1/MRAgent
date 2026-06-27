@@ -250,6 +250,7 @@ Rules:
     EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.
 Goal: select valid answer evidence, not merely related memories.
 Consider entity match, attribute match, answer type, lifecycle compatibility, temporal usability, facet specificity, answer density, low redundancy, and coverage.
+Be recall-friendly: if at least one candidate plausibly helps answer the question, select it. Do not return an empty answer_items list merely because the evidence is imperfect.
 Use planned/current/historical carefully:
 - planned evidence can support plan/future questions.
 - current evidence can support current-state questions.
@@ -286,7 +287,9 @@ Rules:
 - For list questions, return a concise comma-separated list.
 - For time questions, combine rewrite_content temporal phrases with time_interval conversation-time anchors when needed.
 - Do not use planned-only evidence to answer a historical/completed question unless paired with historical evidence.
-- If evidence is insufficient, answer "no information available".
+- If evidence_package has answer_items or backup_candidates, make the best answer supported by them instead of saying "no information available".
+- Use "no information available" only when there is no relevant evidence at all.
+- If the exact wording differs from the gold answer, prefer a short normalized phrase over a full sentence.
 Schema:
 {
   "mode": "answer",

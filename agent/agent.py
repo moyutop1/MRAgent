@@ -592,6 +592,28 @@ class Agent:
             "answer_items": enriched_items,
         }
 
+    def _fallback_eaes_package(self, candidates, reason="selector returned no usable evidence"):
+        answer_items = []
+        for cand in candidates[:8]:
+            mid = cand.get("memory_id")
+            if not mid:
+                continue
+            answer_items.append({
+                "item": cand.get("rewrite_content", "")[:80],
+                "score": cand.get("score", 0.0),
+                "evidence": [{
+                    "memory_id": mid,
+                    "role": "candidate_evidence",
+                    "rationale": "Top retrieved memory used as fallback evidence.",
+                    **cand,
+                }],
+            })
+        return {
+            "need_raw_expansion": False,
+            "reason": reason,
+            "answer_items": answer_items,
+        }
+
     def select_eaes_evidence(self, question, query_plan, candidates):
         selection_input = {
             "question": question,
@@ -619,7 +641,10 @@ class Agent:
             )
             if isinstance(package2, dict):
                 package = package2
-        return self._enrich_eaes_package(package)
+        enriched = self._enrich_eaes_package(package)
+        if not enriched.get("answer_items"):
+            return self._fallback_eaes_package(candidates)
+        return enriched
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
         question_keys = self.extract_question_keys(question)
@@ -633,6 +658,7 @@ class Agent:
             "question": question,
             "query_plan": query_plan,
             "evidence_package": evidence_package,
+            "backup_candidates": candidates[:12],
         }
         if lm_current_date:
             final_input["current_date"] = lm_current_date
@@ -644,7 +670,23 @@ class Agent:
             model=config.RE_MODEL
         )
         if not isinstance(answer_obj, dict):
-            return "no information available", []
+            evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
+            fallback_input = {
+                "question": question,
+                "query_plan": query_plan,
+                "evidence_package": evidence_package,
+                "backup_candidates": candidates[:12],
+            }
+            answer_obj = self.llm.chat_text(
+                messages=[
+                    {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
+                    {"role": "user", "content": json.dumps(fallback_input, ensure_ascii=False)},
+                ],
+                model=config.RE_MODEL
+            )
+            if not isinstance(answer_obj, dict):
+                return "no information available", self.memory.get_eaes_support_origin(
+                    [c.get("memory_id") for c in candidates[:3]])
         supports = answer_obj.get("supports") or []
         if not supports:
             for item in evidence_package.get("answer_items") or []:

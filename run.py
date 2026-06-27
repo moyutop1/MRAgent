@@ -112,6 +112,116 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
             f.write(json.dumps(evaluation, ensure_ascii=False, default=list) + "\n")
 
 
+def _normalize_evidence_ids(items):
+    out = []
+    for item in items or []:
+        for m in re.findall(r"D\d+:\d+(?:-\d+)?", str(item)):
+            out.append(m.split("-", 1)[0])
+    seen = set()
+    deduped = []
+    for item in out:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
+def _retrieval_metrics(gold_evidence, retrieved_origins):
+    gold = _normalize_evidence_ids(gold_evidence)
+    retrieved = _normalize_evidence_ids(retrieved_origins)
+    if not gold:
+        return {
+            "gold_evidence_norm": gold,
+            "retrieved_origins_norm": retrieved,
+            "hit": None,
+            "recall": None,
+            "exact_cover": None,
+            "mrr": None,
+        }
+    gold_set = set(gold)
+    retrieved_set = set(retrieved)
+    covered = gold_set & retrieved_set
+    first_rank = None
+    for idx, item in enumerate(retrieved, start=1):
+        if item in gold_set:
+            first_rank = idx
+            break
+    return {
+        "gold_evidence_norm": gold,
+        "retrieved_origins_norm": retrieved,
+        "hit": 1 if covered else 0,
+        "recall": len(covered) / len(gold_set),
+        "exact_cover": 1 if gold_set.issubset(retrieved_set) else 0,
+        "mrr": 0.0 if first_rank is None else 1.0 / first_rank,
+    }
+
+
+def get_question_retrieval(dataset, agent, question_list, sample_id, result_path, question_embeddings=None):
+    logger.info(f"---------------retrieval-only {sample_id}-------------------")
+    qa_list = question_list[sample_id]
+
+    done_count = 0
+    if os.path.exists(result_path):
+        with open(result_path, encoding="utf-8") as _f:
+            done_count = sum(1 for line in _f if line.strip())
+    if done_count >= len(qa_list):
+        logger.info(f"All {len(qa_list)} retrieval rows already done for {sample_id}, skipping.")
+        return
+    if done_count > 0:
+        logger.info(f"Resuming retrieval {sample_id} from question {done_count + 1} (already done: {done_count})")
+
+    metric_rows = []
+    for i, qa in list(enumerate(qa_list, start=1))[done_count:]:
+        category = qa.get("category")
+        question = Agent.question_format(dataset, qa)
+        override_question_time = None
+        lm_current_date = None
+        if dataset == "LM" and category == "temporal-reasoning":
+            qdr = qa.get("question_date")
+            if qdr:
+                lm_current_date = qdr.split(" ")[0].replace("/", "-")
+        try:
+            question_emb = question_embeddings[i - 1]
+            retrieval = agent.retrieve_question_evidence(
+                question, category, question_emb, override_question_time, lm_current_date)
+            metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("retrieved_origins"))
+            row = {
+                "sample": sample_id,
+                "question_index": i,
+                "question": qa.get("question"),
+                "category": category,
+                "answer": qa.get("answer"),
+                "evidence": qa.get("evidence"),
+                **metrics,
+                "retrieval": retrieval,
+            }
+            metric_rows.append(row)
+        except Exception as e:
+            logger.error(f"retrieval question{i} failed: {e}", exc_info=True)
+            row = {
+                "sample": sample_id,
+                "question_index": i,
+                "question": qa.get("question"),
+                "category": category,
+                "answer": qa.get("answer"),
+                "evidence": qa.get("evidence"),
+                "error": str(e),
+            }
+
+        with open(result_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, default=list) + "\n")
+
+    scored = [r for r in metric_rows if r.get("hit") is not None]
+    if scored:
+        hit = sum(r["hit"] for r in scored) / len(scored)
+        recall = sum(r["recall"] for r in scored) / len(scored)
+        exact = sum(r["exact_cover"] for r in scored) / len(scored)
+        mrr = sum(r["mrr"] for r in scored) / len(scored)
+        logger.info(
+            f"[retrieval-only] {sample_id}: n={len(scored)} "
+            f"Hit@K={hit:.4f} Recall@K={recall:.4f} ExactCover@K={exact:.4f} MRR={mrr:.4f}"
+        )
+
 
 
 
@@ -205,7 +315,10 @@ def main():
             agent.store_keyword(keyword_path, rewrite_path)
 
             result_path = config.result_template.format(dataset=dataset, sample_id=sample_id)
-            get_question(dataset, agent, question_list, sample_id, memory_system, result_path, question_embeddings)
+            if config.RETRIEVAL_ONLY:
+                get_question_retrieval(dataset, agent, question_list, sample_id, result_path, question_embeddings)
+            else:
+                get_question(dataset, agent, question_list, sample_id, memory_system, result_path, question_embeddings)
 
 def log_config(config_module, exclude=("API_KEY", "CHAT_BASE_URL", "DEEPSEEK_URL")):
     logging.info("========== CONFIGURATION ==========")

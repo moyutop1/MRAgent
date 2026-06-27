@@ -697,6 +697,159 @@ class Agent:
         return answer_obj.get("answer", "no information available"), self.memory.get_eaes_support_origin(supports)
 
 
+    @staticmethod
+    def _unique_keep_order(items):
+        seen = set()
+        out = []
+        for item in items or []:
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
+
+    def _origins_for_event_ids(self, event_ids):
+        origins = []
+        for eid in event_ids or []:
+            if eid in self.memory.episode_events:
+                origins.append(self.memory.episode_events[eid].origin)
+            elif re.match(r"^D\d+:\d+$", str(eid)) and f"{eid}-1" in self.memory.episode_events:
+                origins.append(self.memory.episode_events[f"{eid}-1"].origin)
+            else:
+                origins.append(eid)
+        return self._unique_keep_order(origins)
+
+    @staticmethod
+    def _event_ids_from_texts(texts):
+        event_ids = []
+        for text in texts or []:
+            m = re.search(r"\b(D\d+:\d+(?:-\d+)?)\s*:", str(text))
+            if m:
+                event_ids.append(m.group(1))
+        return event_ids
+
+    def retrieve_question_evidence(self, question: str, category=0, question_emb=None,
+                                   override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
+        """Return retrieval candidates without generating a final answer."""
+        if config.EAES_MODE:
+            question_keys = self.extract_question_keys(question)
+            query_plan = self.parse_eaes_query(question, question_keys)
+            candidates = self.memory_controller.retrieve_eaes_candidates(
+                query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+            event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
+            origins = self._unique_keep_order([c.get("origin") for c in candidates])
+            return {
+                "mode": "eaes",
+                "question_keys": question_keys,
+                "query_plan": query_plan,
+                "retrieved_event_ids": event_ids,
+                "retrieved_origins": origins,
+                "candidates": candidates,
+            }
+
+        self.memory_controller.question_emb = question_emb
+        question_keys = self.extract_question_keys(question)
+        self.memory_controller.set_queried_keywords(question_keys.get("keywords"))
+        query_answers = self.memory_controller.evaluate_relations_over_graph(question_keys.get("keywords"))
+
+        question_time = override_question_time if override_question_time else question_keys.get("question_time")
+        if question_time:
+            question_time = self.get_time(question_time)
+
+        ans_input = {}
+        retrieved_ids = []
+        retrieved_texts = []
+        _lm_time_done = False
+        if question_time:
+            if config.dataset == "LM":
+                ans_input, retrieved_ids = self.answer_question_with_time_lm(
+                    question, question_emb, query_answers, question_time, question_keys, category)
+                _lm_time_done = len(ans_input.get("key_sentences", [])) > 0
+                retrieved_texts = ans_input.get("key_sentences", [])
+            else:
+                ans_input = self.answer_question_with_time(question, question_time, question_keys, category)
+                retrieved_texts = ans_input.get("similar_sentence", [])
+                retrieved_ids = self._event_ids_from_texts(retrieved_texts)
+
+        if (not _lm_time_done) and ((not question_time) or len(ans_input.get("similar_sentence", [])) == 0):
+            similar_sentence = []
+            similar_sentence_embs = []
+            similar_sentence_ids = []
+
+            def _collect(m):
+                similar_sentence.append(m.get("value_id") + ":" + m.get("value_text"))
+                similar_sentence_embs.append(self.memory.episode_events[m.get("value_id")].embedding)
+                similar_sentence_ids.append(m.get("value_id"))
+
+            for m in query_answers.get("full_matches"):
+                _collect(m)
+            for m in query_answers.get("partial_matches"):
+                if m.get("matched_keys") >= 2:
+                    _collect(m)
+
+            if len(similar_sentence_embs) > config.K1:
+                similar_sentence_embs = np.vstack(similar_sentence_embs)
+                top_ids, _, top_embs, top_texts = topk_answers_by_similarity(
+                    question_emb, similar_sentence_embs, similar_sentence_ids,
+                    k=config.K1, answer_texts=similar_sentence)
+            else:
+                top_texts = similar_sentence
+                top_ids = similar_sentence_ids
+                top_embs = similar_sentence_embs
+
+            seen_prefixes = set()
+            pattern = re.compile(r'^(.+)-\d+$')
+            deduplicated_ids, deduplicated_texts, deduplicated_embs = [], [], []
+            for idx, tid in enumerate(top_ids):
+                match = pattern.match(tid)
+                prefix = match.group(1) if match else tid
+                if prefix in seen_prefixes:
+                    continue
+                seen_prefixes.add(prefix)
+                deduplicated_ids.append(tid)
+                deduplicated_texts.append(top_texts[idx])
+                if len(top_embs) > 0:
+                    deduplicated_embs.append(top_embs[idx])
+            top_ids, top_texts, top_embs = deduplicated_ids, deduplicated_texts, deduplicated_embs
+
+            top_topic_texts = self.select_topic(question_emb)
+
+            if len(top_ids) > config.K2:
+                top_ids, top_embs, top_texts = self.select_finegrained_sentence(
+                    question, question_emb, top_texts, top_ids, top_embs)
+                top_ids2, top_embs2, top_texts2 = self.select_finegrained_sentence_sort(
+                    question, question_emb, top_texts, top_ids, top_embs)
+                merged = {}
+                for i, t in zip(top_ids + top_ids2, top_texts + top_texts2):
+                    merged.setdefault(i, t)
+                top_ids = list(merged.keys())
+                top_texts = list(merged.values())
+
+            queried_similar_sentence_ids = self.extract_id_prefixes(top_ids)
+            key_candidates, key_tag_ids, key_tag_sentences = self.select_key_tag(
+                question, question_keys, queried_similar_sentence_ids)
+
+            retrieved_ids = self._unique_keep_order(top_ids + key_tag_ids)
+            retrieved_texts = top_texts + key_tag_sentences
+            ans_input = {
+                "question": question,
+                "key_sentences": top_texts,
+                "keys_candidates": key_candidates,
+                "key_tag_sentences": key_tag_sentences,
+                "similar_topic": top_topic_texts
+            }
+            if lm_current_date:
+                ans_input["current_date"] = lm_current_date
+
+        origins = self._origins_for_event_ids(retrieved_ids)
+        return {
+            "mode": "graph",
+            "question_keys": question_keys,
+            "retrieved_event_ids": retrieved_ids,
+            "retrieved_origins": origins,
+            "retrieved_texts": retrieved_texts,
+            "answer_input": ans_input,
+        }
+
 
     def answer_question(self, question: str, category=0, question_emb=None, override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
         if config.EAES_MODE:

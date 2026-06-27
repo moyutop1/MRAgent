@@ -13,6 +13,7 @@ parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
 parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged per rewrite call. 1=per-session (key=session_i, compatible with existing files/per-session readers); >1=merged (key=session_first-session_last)")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
+parser.add_argument("--retrieval_only", action="store_true", help="Only evaluate retrieval evidence; skip final answer generation and LLM judge.")
 
 # parse_known_args (not parse_args) so importing this module under a foreign argv
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
@@ -130,6 +131,7 @@ RERANK_LIMIT=20      # event_by_tag: re-rank events only when more than this man
 MAX_ROUNDS=8         # tool-calling loop: max assistant rounds
 MAX_TOOL_CALLS=50    # tool-calling loop: safety cap on total tool calls
 EAES_MODE = args.eaes
+RETRIEVAL_ONLY = args.retrieval_only
 EAES_CANDIDATE_LIMIT = 60
 EAES_SELECTION_LIMIT = 30
 EAES_RAW_EXPANSION_LIMIT = 3
@@ -148,7 +150,7 @@ EMBEDDING_TAG = os.getenv(
     "text_embedding_3_large" if EMBEDDING_PROVIDER in {"openrouter", "ofox"} else "local_bge"
 )
 ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
-ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}" #"_gpt4o-mini"
+ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}{'_retrieval' if RETRIEVAL_ONLY else ''}" #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"
 base_dir_k = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/"
 base_dir_emb = f"data/{{dataset}}/embedding/gpt{ADDITIONAL_EM}/"

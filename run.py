@@ -33,6 +33,9 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
     logger.info(f"---------------{sample_id}-------------------")
 
     qa_list = question_list[sample_id]
+    if config.MAX_QUESTIONS is not None:
+        qa_list = qa_list[:config.MAX_QUESTIONS]
+        logger.info(f"Limiting {sample_id} to first {len(qa_list)} questions.")
     memory_system = agent.memory  # shared read-only after store_raw_text / store_keyword
 
     # resumable: use the line count of result_path as the cursor, skip already-done questions
@@ -159,6 +162,9 @@ def _retrieval_metrics(gold_evidence, retrieved_origins):
 def get_question_retrieval(dataset, agent, question_list, sample_id, result_path, question_embeddings=None):
     logger.info(f"---------------retrieval-only {sample_id}-------------------")
     qa_list = question_list[sample_id]
+    if config.MAX_QUESTIONS is not None:
+        qa_list = qa_list[:config.MAX_QUESTIONS]
+        logger.info(f"Limiting retrieval {sample_id} to first {len(qa_list)} questions.")
 
     done_count = 0
     if os.path.exists(result_path):

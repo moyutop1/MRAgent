@@ -9,6 +9,7 @@ parser.add_argument("--data", type=str, default="locomo", help="Dataset name, e.
 parser.add_argument("--model", type=str, default="gemini", help="Model name, e.g., gemini / deepseek / ofox")
 parser.add_argument("--file", type=str, default="0", help="Run/experiment tag appended to result filenames")
 parser.add_argument("--sample", type=int, default=None, help="Sample id to run (e.g. 42). Omit to run all samples.")
+parser.add_argument("--max_questions", type=int, default=None, help="Run at most the first N questions per selected sample.")
 parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
@@ -139,6 +140,9 @@ EAES_CANDIDATE_LIMIT = 60
 EAES_SELECTION_LIMIT = 30
 EAES_RAW_EXPANSION_LIMIT = 3
 sample_id = args.sample
+MAX_QUESTIONS = args.max_questions
+if MAX_QUESTIONS is not None and MAX_QUESTIONS <= 0:
+    raise ValueError("--max_questions must be a positive integer.")
 qu = args.qu
 ca = args.ca
 LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call
@@ -153,7 +157,12 @@ EMBEDDING_TAG = os.getenv(
     "text_embedding_3_large" if EMBEDDING_PROVIDER in {"openrouter", "ofox"} else "local_bge"
 )
 ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
-ADDITIONAL_RE = f"_{args.model}_{args.file}{'_eaes' if EAES_MODE else ''}{'_retrieval' if RETRIEVAL_ONLY else ''}" #"_gpt4o-mini"
+ADDITIONAL_RE = (
+    f"_{args.model}_{args.file}"
+    f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
+    f"{'_eaes' if EAES_MODE else ''}"
+    f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
+) #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"
 base_dir_k = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/"
 base_dir_emb = f"data/{{dataset}}/embedding/gpt{ADDITIONAL_EM}/"

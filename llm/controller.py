@@ -11,6 +11,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _format_exception_chain(exc: Exception) -> str:
+    parts = [f"{type(exc).__name__}: {exc}"]
+    seen = {id(exc)}
+    cur = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return " <- ".join(parts)
+
+
 def _is_deepseek_v4_model(model: str) -> bool:
     return config.API_PROVIDER == "deepseek" and str(model).startswith("deepseek-v4")
 
@@ -84,7 +95,10 @@ class LLM:
 
 
             except (APIConnectionError, APIResponseValidationError) as e:
-                logger.warning(f"Connection/Validation error: {repr(e)}")
+                logger.warning(
+                    "Connection/Validation error on attempt "
+                    f"{attempt}/{max_retries}: {_format_exception_chain(e)}"
+                )
                 if attempt < max_retries:
                     time.sleep(backoff ** attempt)
                     continue

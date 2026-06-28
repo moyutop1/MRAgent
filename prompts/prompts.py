@@ -229,6 +229,41 @@ Schema:
             RAW_TEXT=raw_text,
         )
 
+    QUESTION_KEY_INVENTORY_SYSTEM_PROMPT = """You select retrieval keys for a question from an existing memory-key inventory. Only output valid JSON.
+Rules:
+- You MUST choose keywords only from the provided candidates' "key" values. Copy the key exactly.
+- Do not invent, paraphrase, translate, stem, or normalize keys.
+- Prefer keys that are likely to retrieve answer-bearing evidence, including entity keys and concrete field/topic/action keys.
+- Avoid selecting too many generic keys. Select 2-12 keys when useful.
+- If no candidate is useful, return an empty keywords list.
+- If the question contains a time limit, return it in "question_time" as "YYYY-MM-DD, YYYY-MM-DD". If no time info, set "question_time" as "".
+- If no year appears, do not guess a year. Use only "MM-DD, MM-DD".
+Schema:
+{
+  "question_time": "YYYY-MM-DD, YYYY-MM-DD or '' or MM-DD, MM-DD",
+  "keywords": [
+    {
+      "id": "exact candidate key",
+      "alternatives": []
+    }
+  ]
+}"""
+
+    QUESTION_KEY_INVENTORY_USER_PROMPT = """QUESTION:
+<<<
+{QUESTION}
+>>>
+
+CANDIDATE_KEYS:
+{CANDIDATES}"""
+
+    @classmethod
+    def select_question_key_prompt(cls, question: str, candidates: str) -> str:
+        return cls.QUESTION_KEY_INVENTORY_USER_PROMPT.format(
+            QUESTION=question,
+            CANDIDATES=candidates,
+        )
+
     EAES_QUERY_SYSTEM_PROMPT = """You are a query parser for long-term conversational memory. Only output valid JSON.
 Extract fields for answer-oriented evidence selection.
 Schema:

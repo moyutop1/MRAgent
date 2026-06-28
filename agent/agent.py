@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import json
 import random
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List
 import numpy as np
 from prompts import schema as json_scheme
 from prompts.prompts import Prompts
@@ -647,7 +647,7 @@ class Agent:
         return enriched
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
-        question_keys = self.extract_question_keys(question)
+        question_keys = self.extract_question_keys(question, question_emb)
         query_plan = self.parse_eaes_query(question, question_keys)
         candidates = self.memory_controller.retrieve_eaes_candidates(
             query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
@@ -748,7 +748,7 @@ class Agent:
                                    override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
         """Return retrieval candidates without generating a final answer."""
         if config.EAES_MODE:
-            question_keys = self.extract_question_keys(question)
+            question_keys = self.extract_question_keys(question, question_emb)
             query_plan = self.parse_eaes_query(question, question_keys)
             candidates = self.memory_controller.retrieve_eaes_candidates(
                 query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
@@ -764,7 +764,7 @@ class Agent:
             }
 
         self.memory_controller.question_emb = question_emb
-        question_keys = self.extract_question_keys(question)
+        question_keys = self.extract_question_keys(question, question_emb)
         self.memory_controller.set_queried_keywords(question_keys.get("keywords"))
         query_answers = self.memory_controller.evaluate_relations_over_graph(question_keys.get("keywords"))
 
@@ -885,7 +885,7 @@ class Agent:
         if config.EAES_MODE:
             return self.answer_question_eaes(question, category, question_emb, lm_current_date)
         self.memory_controller.question_emb = question_emb
-        question_keys = self.extract_question_keys(question)
+        question_keys = self.extract_question_keys(question, question_emb)
         self.memory_controller.set_queried_keywords(question_keys.get("keywords"))
         query_answers = self.memory_controller.evaluate_relations_over_graph(question_keys.get("keywords"))
         # if an override is given (LM temporal question_date anchor) use it; otherwise use the LLM-extracted time
@@ -999,7 +999,19 @@ class Agent:
         support_origin = self.memory.get_support_origin(evidence_support)
         return ans_messages, support_origin
 
-    def extract_question_keys(self, questions: str):
+    @staticmethod
+    def _key_tokens(text: str):
+        stop = {
+            "what", "which", "would", "could", "should", "likely", "the", "and", "for", "with",
+            "from", "into", "about", "that", "this", "have", "has", "had", "her", "his", "their",
+            "your", "you", "she", "him", "who", "when", "where", "why", "how", "did", "does", "educaton",
+        }
+        return {
+            t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(t) > 2 and t not in stop
+        }
+
+    def _legacy_extract_question_keys(self, questions: str):
         question_prompt = Prompts.extract_question_key_prompt(json.dumps(questions, ensure_ascii=False))
         question_out = self.llm.chat_text(
             messages=[{"role": "system", "content": Prompts.QUESTION_KEY_SYSTEM_PROMPT},
@@ -1007,6 +1019,91 @@ class Agent:
             model=config.RE_MODEL
         )
         return question_out
+
+    def _candidate_key_records(self, question: str, question_emb=None) -> List[Dict[str, Any]]:
+        q_tokens = self._key_tokens(question)
+        scores: Dict[str, float] = {}
+        dense_ids, _, _, _ = self._dense_episode_retrieval(question_emb, k=config.KEY_CANDIDATE_DENSE_K)
+
+        for rank, event_id in enumerate(dense_ids):
+            weight = 1.0 / (rank + 1)
+            for key in self.memory.event_to_keys.get(event_id, set()):
+                scores[key] = scores.get(key, 0.0) + weight
+
+        for key in self.memory.keys.keys():
+            key_tokens = self._key_tokens(key)
+            if not key_tokens:
+                continue
+            overlap = len(q_tokens & key_tokens)
+            if overlap:
+                scores[key] = scores.get(key, 0.0) + 2.0 + overlap / max(len(key_tokens), 1)
+
+        ordered_keys = sorted(scores, key=lambda k: (scores[k], k), reverse=True)[:config.KEY_CANDIDATE_LIMIT]
+        records = []
+        dense_set = set(dense_ids)
+        for key in ordered_keys:
+            examples = []
+            linked_ids = [eid for eid in dense_ids if key in self.memory.event_to_keys.get(eid, set())]
+            if not linked_ids:
+                linked_ids = [vid for vid, _ in list(self.memory.key_to_values.get(key, set()))[:3]]
+            for event_id in linked_ids:
+                if event_id in self.memory.episode_events:
+                    text = self.memory.episode_events[event_id].text
+                    examples.append(f"{event_id}: {text[:180]}")
+                if len(examples) >= 2:
+                    break
+            records.append({
+                "key": key,
+                "tags": self.memory.get_tag_list(key)[:8],
+                "score": round(scores[key], 4),
+                "source": "dense" if any(eid in dense_set for eid in linked_ids) else "lexical",
+                "examples": examples,
+            })
+        return records
+
+    def _select_question_keys_from_inventory(self, questions: str, question_emb=None):
+        candidates = self._candidate_key_records(questions, question_emb)
+        if not candidates:
+            return self._legacy_extract_question_keys(questions)
+
+        prompt = Prompts.select_question_key_prompt(
+            questions,
+            json.dumps(candidates, ensure_ascii=False)
+        )
+        out = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.QUESTION_KEY_INVENTORY_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            model=config.RE_MODEL
+        )
+        if not isinstance(out, dict):
+            return self._legacy_extract_question_keys(questions)
+
+        valid = {c["key"] for c in candidates}
+        selected = []
+        seen = set()
+        for item in out.get("keywords") or []:
+            key = item.get("id") if isinstance(item, dict) else str(item)
+            if key in valid and key not in seen:
+                seen.add(key)
+                selected.append({"id": key, "alternatives": []})
+
+        if not selected:
+            logger.info("inventory key selection returned no valid keys; falling back to extracted question keys.")
+            return self._legacy_extract_question_keys(questions)
+
+        return {
+            "question_time": out.get("question_time", ""),
+            "keywords": selected,
+            "candidate_count": len(candidates),
+            "query_key_mode": "inventory",
+        }
+
+    def extract_question_keys(self, questions: str, question_emb=None):
+        if config.QUERY_KEY_MODE == "inventory":
+            return self._select_question_keys_from_inventory(questions, question_emb)
+        return self._legacy_extract_question_keys(questions)
 
     @staticmethod
     def _normalize_sentence_ids(rewrite_out):

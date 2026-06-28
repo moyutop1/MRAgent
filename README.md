@@ -151,6 +151,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--ca` | (LM) category index: `0`=multi-session, `1`=single-session-user, `2`=temporal-reasoning | `1` |
 | `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
 | `--workers` | concurrent question workers per selected sample | `10` |
+| `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
 
 ### 5.2 LoCoMo
 
@@ -170,6 +171,9 @@ python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_qu
 # retrieval-only diagnostics with global dense fallback mixed in
 python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
+
+# compare against the older free keyword extraction path
+python run.py --data locomo --model deepseek-chat --file retr50_extract --sample 26 --max_questions 50 --workers 1 --retrieval_only --query_key_mode extract
 ```
 
 ### 5.3 LongMemEval (LM)

@@ -16,6 +16,9 @@ parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=mult
 parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged per rewrite call. 1=per-session (key=session_i, compatible with existing files/per-session readers); >1=merged (key=session_first-session_last)")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
+parser.add_argument("--query_key_mode", choices=["inventory", "extract"], default=os.getenv("QUERY_KEY_MODE", "inventory"), help="Question-key strategy: select from stored keys or freely extract keywords.")
+parser.add_argument("--key_candidate_dense_k", type=int, default=int(os.getenv("KEY_CANDIDATE_DENSE_K", "40")), help="Dense events used to build the stored-key candidate pool.")
+parser.add_argument("--key_candidate_limit", type=int, default=int(os.getenv("KEY_CANDIDATE_LIMIT", "120")), help="Maximum stored-key candidates shown to the LLM.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
 parser.add_argument("--retrieval_only", action="store_true", help="Only evaluate retrieval evidence; skip final answer generation and LLM judge.")
 
@@ -156,6 +159,13 @@ if QUESTION_WORKERS <= 0:
 DENSE_RETRIEVAL_K = args.dense_k
 if DENSE_RETRIEVAL_K <= 0:
     raise ValueError("--dense_k must be a positive integer.")
+QUERY_KEY_MODE = args.query_key_mode
+KEY_CANDIDATE_DENSE_K = args.key_candidate_dense_k
+if KEY_CANDIDATE_DENSE_K <= 0:
+    raise ValueError("--key_candidate_dense_k must be a positive integer.")
+KEY_CANDIDATE_LIMIT = args.key_candidate_limit
+if KEY_CANDIDATE_LIMIT <= 0:
+    raise ValueError("--key_candidate_limit must be a positive integer.")
 qu = args.qu
 ca = args.ca
 LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call

@@ -94,8 +94,17 @@ cp .env.example .env
 | Component | File | Model |
 | --- | --- | --- |
 | Chat / reasoning | `common/config.py` (`--model` → `MODEL`) | e.g. `gemini` → `google/gemini-2.5-flash` |
-| Embedding | `llm/embeddings.py` | `text-embedding-3-large` (3072-d) |
+| Embedding | `llm/embeddings.py` | `openai/text-embedding-3-large` (3072-d) |
 | LLM-as-judge | `eval/judge.py` | `openai/gpt-4o-mini` |
+
+Quick connectivity check:
+
+```bash
+python try.py
+```
+
+If the account has no balance yet, this command should still distinguish config/network
+errors from OpenRouter billing or authentication errors.
 
 ---
 

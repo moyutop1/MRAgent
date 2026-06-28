@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from openai._exceptions import OpenAIError, RateLimitError, APIStatusError
 from sentence_transformers import SentenceTransformer
+from common.openrouter import OPENROUTER_BASE_URL, get_openrouter_headers
 
 load_dotenv()
 
@@ -15,10 +16,9 @@ DEFAULT_LOCAL_EMBEDDING_MODEL = "/autodl-pub/models/bge-large-en-v1.5"
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", DEFAULT_LOCAL_EMBEDDING_MODEL)
 LOCAL_EMBEDDING_BATCH_SIZE = int(os.getenv("LOCAL_EMBEDDING_BATCH_SIZE", "32"))
-OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "text-embedding-3-large")
+OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "openai/text-embedding-3-large")
 OPENROUTER_EMBEDDING_BATCH_SIZE = int(os.getenv("OPENROUTER_EMBEDDING_BATCH_SIZE", "96"))
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OFOX_EMBEDDING_MODEL = os.getenv("OFOX_EMBEDDING_MODEL", "text-embedding-3-large")
 OFOX_EMBEDDING_BATCH_SIZE = int(os.getenv("OFOX_EMBEDDING_BATCH_SIZE", "96"))
 OFOX_API_KEY = os.getenv("OFOX_API_KEY")
@@ -118,7 +118,10 @@ def get_openai_compatible_embedding(
     if not clean_texts:
         return np.empty((0, 0), dtype=np.float32)
 
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+    client_kwargs = {"api_key": api_key, "base_url": base_url, "timeout": 60.0}
+    if provider_name == "OpenRouter":
+        client_kwargs["default_headers"] = get_openrouter_headers()
+    client = OpenAI(**client_kwargs)
     out = []
     step = batch_size
     for start in range(0, len(clean_texts), step):

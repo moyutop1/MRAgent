@@ -7,6 +7,7 @@ from collections import defaultdict
 import numpy as np
 from openai import OpenAI
 from common.utils import extract_json_from_content
+from common.openrouter import OPENROUTER_BASE_URL, get_openrouter_headers
 
 from dotenv import load_dotenv
 import os
@@ -23,8 +24,12 @@ elif JUDGE_PROVIDER == "deepseek":
 else:
     API_KEY = os.getenv("OPENROUTER_API_KEY")
     JUDGE_MODEL = os.getenv("OPENROUTER_JUDGE_MODEL", "openai/gpt-4o-mini")
-    JUDGE_BASE_URL = "https://openrouter.ai/api/v1"
-client = OpenAI(api_key=API_KEY, base_url=JUDGE_BASE_URL)
+    JUDGE_BASE_URL = OPENROUTER_BASE_URL
+client = OpenAI(
+    api_key=API_KEY,
+    base_url=JUDGE_BASE_URL,
+    default_headers=get_openrouter_headers() if JUDGE_PROVIDER == "openrouter" else None,
+)
 
 ACCURACY_PROMPT = """
 Your task is to label an answer to a question as ’CORRECT’ or ’WRONG’. You will be given the following data:

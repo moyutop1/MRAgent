@@ -2,6 +2,7 @@ import logging
 import os
 import argparse
 from dotenv import load_dotenv
+from common.openrouter import OPENROUTER_BASE_URL, get_openrouter_headers
 load_dotenv()  # read API key from .env
 parser = argparse.ArgumentParser(description="Configure dataset and model parameters.")
 parser.add_argument("--data", type=str, default="locomo", help="Dataset name, e.g., AR / LM / locomo")
@@ -27,10 +28,11 @@ if args.model not in SUPPORTED_MODEL_ALIASES:
 if args.re_model and args.re_model not in SUPPORTED_MODEL_ALIASES:
     raise ValueError("Use --re_model gemini, --re_model deepseek, --re_model deepseek-pro, or --re_model ofox.")
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_URL = OPENROUTER_BASE_URL
 DEEPSEEK_URL = "https://api.deepseek.com"
 CHAT_BASE_URL = OPENROUTER_URL
 API_PROVIDER = "openrouter"
+OPENAI_COMPAT_DEFAULT_HEADERS = None
 if args.model == "gpt4.1mini":
     API_PROVIDER = "openrouter"
     CHAT_BASE_URL = OPENROUTER_URL
@@ -38,7 +40,7 @@ if args.model == "gpt4.1mini":
 elif args.model == "gpt4omini":
     API_PROVIDER = "openrouter"
     CHAT_BASE_URL = OPENROUTER_URL
-    MODEL = "gpt-4o-mini-2024-07-18"
+    MODEL = "openai/gpt-4o-mini"
 elif args.model == "claude":
     API_PROVIDER = "openrouter"
     CHAT_BASE_URL = OPENROUTER_URL
@@ -87,7 +89,7 @@ if args.re_model:
     if args.re_model == "gpt4.1mini":
         RE_MODEL = "openai/gpt-4.1-mini"
     elif args.re_model == "gpt4omini":
-        RE_MODEL = "gpt-4o-mini-2024-07-18"
+        RE_MODEL = "openai/gpt-4o-mini"
     elif args.re_model == "claude":
         RE_MODEL = "anthropic/claude-sonnet-4.5"
     elif args.re_model == "gpt4o":
@@ -118,6 +120,7 @@ elif API_PROVIDER == "deepseek":
     API_KEY = os.getenv("DEEPSEEK_API_KEY")
 else:
     API_KEY = os.getenv("OPENROUTER_API_KEY")
+    OPENAI_COMPAT_DEFAULT_HEADERS = get_openrouter_headers()
 if API_PROVIDER == "ofox" and not CHAT_BASE_URL:
     raise ValueError("OFOX_BASE_URL is empty. Set it in .env when using --model ofox.")
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"

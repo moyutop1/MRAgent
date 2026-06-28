@@ -282,6 +282,81 @@ Rules:
 - attribute_hints should be short semantic paths such as activity.event_attendance, activity.picnic, topic.LGBTQ, location.home, preference.food.
 - Do not answer the question."""
 
+    EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
+For each memory sentence, identify:
+- entities: people, organizations, communities, named objects, or concrete concepts central to retrieving the memory.
+- attributes: small answer-bearing relation clauses connecting an entity to the memory. Each attribute must include a compact semantic path and a natural-language description.
+
+Rules:
+- Use only information present in the given memory sentence/raw text.
+- Keep entity names explicit, e.g. "Caroline", not pronouns.
+- Attribute names should be short dotted paths, e.g. career.interest, education.field, mental_health.counseling, adoption.plan, event.attendance.
+- Attribute descriptions should be concise clauses preserving important nouns and verbs, e.g. "Caroline is interested in counseling and mental health as a career."
+- Include 1-6 entities and 1-8 attributes per memory.
+- Copy event_id exactly from input.
+- event_lifecycle is one of: planned, current, historical.
+
+Schema:
+{
+  "memories": [
+    {
+      "event_id": "D1:9-1",
+      "entities": ["Caroline"],
+      "attributes": [
+        {"name": "career.interest", "description": "Caroline is interested in counseling and mental health as a career."}
+      ],
+      "event_lifecycle": "current"
+    }
+  ]
+}"""
+
+    EAES_INDEX_USER_PROMPT = """MEMORY_SENTENCES:
+{MEMORIES}"""
+
+    @classmethod
+    def eaes_index_prompt(cls, memories: str) -> str:
+        return cls.EAES_INDEX_USER_PROMPT.format(MEMORIES=memories)
+
+    EAES_QUERY_INVENTORY_SYSTEM_PROMPT = """You choose retrieval entry points from an existing entity-attribute memory inventory. Only output valid JSON.
+Rules:
+- Choose entities only from CANDIDATE_ENTITIES "entity" values. Copy exactly.
+- Choose attribute_hints only from CANDIDATE_ATTRIBUTES "attribute" values. Copy exactly.
+- Do not invent, paraphrase, stem, or normalize entities/attributes.
+- Prefer entity + attribute combinations that are likely to retrieve answer-bearing memories.
+- If the question asks for a field, career, education, interest, plan, or preference, select concrete attributes with similar meaning even if wording differs.
+- Return 1-6 entities when useful and 1-10 attribute_hints when useful.
+- Use keywords only for important residual lexical constraints from the question.
+- If no candidate is useful, return empty entities/attribute_hints but still infer answer_type and lifecycle.
+
+Schema:
+{
+  "entities": ["exact candidate entity"],
+  "attribute_hints": ["exact candidate attribute"],
+  "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
+  "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
+  "required_lifecycle": "planned | current | historical | unknown",
+  "keywords": ["important lexical constraints"]
+}"""
+
+    EAES_QUERY_INVENTORY_USER_PROMPT = """QUESTION:
+<<<
+{QUESTION}
+>>>
+
+CANDIDATE_ENTITIES:
+{ENTITIES}
+
+CANDIDATE_ATTRIBUTES:
+{ATTRIBUTES}"""
+
+    @classmethod
+    def eaes_query_inventory_prompt(cls, question: str, entities: str, attributes: str) -> str:
+        return cls.EAES_QUERY_INVENTORY_USER_PROMPT.format(
+            QUESTION=question,
+            ENTITIES=entities,
+            ATTRIBUTES=attributes,
+        )
+
     EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.
 Goal: select valid answer evidence, not merely related memories.
 Consider entity match, attribute match, answer type, lifecycle compatibility, temporal usability, facet specificity, answer density, low redundancy, and coverage.

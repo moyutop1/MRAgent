@@ -152,6 +152,8 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
+| `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
+| `--eaes_query_mode` | EAES query strategy (`inventory` selects from existing entities/attributes; `extract` freely parses) | `inventory` |
 
 ### 5.2 LoCoMo
 
@@ -171,6 +173,10 @@ python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_qu
 # retrieval-only diagnostics with global dense fallback mixed in
 python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
+
+# entity-attribute-memory retrieval diagnostics
+python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_query_mode inventory
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
 
 # compare against the older free keyword extraction path
 python run.py --data locomo --model deepseek-chat --file retr50_extract --sample 26 --max_questions 50 --workers 1 --retrieval_only --query_key_mode extract

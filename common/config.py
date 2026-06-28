@@ -19,6 +19,11 @@ parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVA
 parser.add_argument("--query_key_mode", choices=["inventory", "extract"], default=os.getenv("QUERY_KEY_MODE", "inventory"), help="Question-key strategy: select from stored keys or freely extract keywords.")
 parser.add_argument("--key_candidate_dense_k", type=int, default=int(os.getenv("KEY_CANDIDATE_DENSE_K", "40")), help="Dense events used to build the stored-key candidate pool.")
 parser.add_argument("--key_candidate_limit", type=int, default=int(os.getenv("KEY_CANDIDATE_LIMIT", "120")), help="Maximum stored-key candidates shown to the LLM.")
+parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
+parser.add_argument("--eaes_query_mode", choices=["inventory", "extract"], default=os.getenv("EAES_QUERY_MODE", "inventory"), help="EAES query strategy: select from existing entity/attribute inventory or freely parse.")
+parser.add_argument("--eaes_query_candidate_dense_k", type=int, default=int(os.getenv("EAES_QUERY_CANDIDATE_DENSE_K", "80")), help="Dense notes used to build EAES entity/attribute query candidates.")
+parser.add_argument("--eaes_query_entity_limit", type=int, default=int(os.getenv("EAES_QUERY_ENTITY_LIMIT", "80")), help="Maximum EAES entity candidates shown to the LLM.")
+parser.add_argument("--eaes_query_attribute_limit", type=int, default=int(os.getenv("EAES_QUERY_ATTRIBUTE_LIMIT", "120")), help="Maximum EAES attribute candidates shown to the LLM.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
 parser.add_argument("--retrieval_only", action="store_true", help="Only evaluate retrieval evidence; skip final answer generation and LLM judge.")
 
@@ -166,6 +171,17 @@ if KEY_CANDIDATE_DENSE_K <= 0:
 KEY_CANDIDATE_LIMIT = args.key_candidate_limit
 if KEY_CANDIDATE_LIMIT <= 0:
     raise ValueError("--key_candidate_limit must be a positive integer.")
+EAES_INDEX_MODE = args.eaes_index_mode
+EAES_QUERY_MODE = args.eaes_query_mode
+EAES_QUERY_CANDIDATE_DENSE_K = args.eaes_query_candidate_dense_k
+if EAES_QUERY_CANDIDATE_DENSE_K <= 0:
+    raise ValueError("--eaes_query_candidate_dense_k must be a positive integer.")
+EAES_QUERY_ENTITY_LIMIT = args.eaes_query_entity_limit
+if EAES_QUERY_ENTITY_LIMIT <= 0:
+    raise ValueError("--eaes_query_entity_limit must be a positive integer.")
+EAES_QUERY_ATTRIBUTE_LIMIT = args.eaes_query_attribute_limit
+if EAES_QUERY_ATTRIBUTE_LIMIT <= 0:
+    raise ValueError("--eaes_query_attribute_limit must be a positive integer.")
 qu = args.qu
 ca = args.ca
 LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call

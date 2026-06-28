@@ -510,15 +510,84 @@ class Agent:
                 out.append(ent)
         return out[:8]
 
+    @staticmethod
+    def _eaes_attribute_text(attr):
+        if isinstance(attr, str):
+            return attr.strip()
+        if not isinstance(attr, dict):
+            return ""
+        name = str(attr.get("name") or "").strip()
+        desc = str(attr.get("description") or "").strip()
+        if name and desc:
+            return f"{name}: {desc}"
+        return name or desc
+
+    def _eaes_llm_index_for_session(self, events, keyword_by_sentence):
+        memories = []
+        for ee in events.get("sentence") or []:
+            event_id = ee.get("id")
+            if event_id not in self.memory.episode_events:
+                continue
+            ev = self.memory.episode_events[event_id]
+            memories.append({
+                "event_id": event_id,
+                "rewrite_content": ee.get("text") or ev.text,
+                "raw_text": ev.text,
+                "tag": ee.get("tag"),
+                "keywords": keyword_by_sentence.get(event_id, [])[:12],
+                "time": ee.get("time"),
+            })
+        if not memories:
+            return {}
+        out = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.EAES_INDEX_SYSTEM_PROMPT},
+                {"role": "user", "content": Prompts.eaes_index_prompt(json.dumps(memories, ensure_ascii=False))},
+            ],
+            model=config.RE_MODEL,
+        )
+        if not isinstance(out, dict):
+            logger.warning("EAES LLM index returned non-dict; falling back to heuristic index.")
+            return {}
+        indexed = {}
+        valid_ids = {m["event_id"] for m in memories}
+        for item in out.get("memories") or []:
+            if not isinstance(item, dict):
+                continue
+            event_id = item.get("event_id")
+            if event_id not in valid_ids:
+                continue
+            entities = [str(e).strip() for e in item.get("entities") or [] if str(e).strip()]
+            attributes = [
+                self._eaes_attribute_text(attr)
+                for attr in (item.get("attributes") or [])
+            ]
+            attributes = [a for a in attributes if a]
+            lifecycle = str(item.get("event_lifecycle") or "").lower().strip()
+            indexed[event_id] = {
+                "entities": list(dict.fromkeys(entities))[:8],
+                "attribute_paths": list(dict.fromkeys(attributes))[:12],
+                "event_lifecycle": lifecycle if lifecycle in {"planned", "current", "historical"} else None,
+            }
+        return indexed
+
     def _eaes_build_notes_for_session(self, events, keyword_by_sentence, conversation_time):
+        llm_index = {}
+        if config.EAES_INDEX_MODE == "llm":
+            try:
+                llm_index = self._eaes_llm_index_for_session(events, keyword_by_sentence)
+            except Exception as e:
+                logger.warning(f"EAES LLM index failed; falling back to heuristic index: {e}", exc_info=True)
+                llm_index = {}
         for ee in events.get("sentence") or []:
             event_id = ee.get("id")
             if event_id not in self.memory.episode_events:
                 continue
             ev = self.memory.episode_events[event_id]
             keywords = keyword_by_sentence.get(event_id, [])
-            entities = self._eaes_entities_from_keywords(keywords, ev.text)
-            attribute_paths = []
+            index_item = llm_index.get(event_id) or {}
+            entities = index_item.get("entities") or self._eaes_entities_from_keywords(keywords, ev.text)
+            attribute_paths = list(index_item.get("attribute_paths") or [])
             tag_path = self._eaes_safe_path("tag", ee.get("tag"))
             if tag_path:
                 attribute_paths.append(tag_path)
@@ -543,13 +612,17 @@ class Agent:
                     "start": conversation_time,
                     "end": conversation_time,
                 },
-                event_lifecycle=self._eaes_infer_lifecycle(ee.get("text") or ev.text, ee.get("event_lifecycle")),
+                event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(ee.get("text") or ev.text, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
             )
             self.memory.add_eaes_memory_note(note)
 
-    def parse_eaes_query(self, question, question_keys):
+    def parse_eaes_query(self, question, question_keys, question_emb=None):
+        if config.EAES_QUERY_MODE == "inventory":
+            inventory_query = self._parse_eaes_query_from_inventory(question, question_emb)
+            if inventory_query:
+                return inventory_query
         query_out = self.llm.chat_text(
             messages=[
                 {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
@@ -566,6 +639,122 @@ class Agent:
             "temporal_intent": "none",
             "required_lifecycle": "unknown",
             "keywords": [k.get("id") for k in question_keys.get("keywords", []) if isinstance(k, dict)],
+        }
+
+    def _dense_eaes_note_ids(self, question_emb, k=None):
+        if question_emb is None:
+            return []
+        ids, embs = [], []
+        for mid, note in self.memory.eaes_notes.items():
+            if note.embedding is None:
+                continue
+            ids.append(mid)
+            embs.append(note.embedding)
+        if not embs:
+            return []
+        top_ids, _, _, _ = topk_answers_by_similarity(
+            question_emb, np.vstack(embs), ids, k=k or config.EAES_QUERY_CANDIDATE_DENSE_K)
+        return top_ids
+
+    def _eaes_inventory_candidates(self, question, question_emb=None):
+        q_tokens = self._key_tokens(question)
+        dense_mids = self._dense_eaes_note_ids(question_emb, config.EAES_QUERY_CANDIDATE_DENSE_K)
+        entity_scores, attr_scores = {}, {}
+        entity_examples, attr_examples = {}, {}
+        entity_dense_hits = set()
+
+        def add_example(target, key, text):
+            if not key:
+                return
+            bucket = target.setdefault(key, [])
+            if len(bucket) < 2:
+                bucket.append(text[:220])
+
+        for rank, mid in enumerate(dense_mids):
+            note = self.memory.get_eaes_note(mid)
+            if note is None:
+                continue
+            weight = 2.0 / (rank + 1)
+            example = f"{note.event_id}: {note.rewrite_content}"
+            for entity in note.entities:
+                entity_scores[entity] = entity_scores.get(entity, 0.0) + weight
+                entity_dense_hits.add(entity)
+                add_example(entity_examples, entity, example)
+            for attr in note.attribute_paths:
+                attr_scores[attr] = attr_scores.get(attr, 0.0) + weight
+                add_example(attr_examples, attr, example)
+
+        for note in self.memory.eaes_notes.values():
+            note_text = f"{note.rewrite_content} {' '.join(note.entities)} {' '.join(note.attribute_paths)}"
+            text_tokens = self._key_tokens(note_text)
+            overlap = len(q_tokens & text_tokens)
+            if not overlap:
+                continue
+            example = f"{note.event_id}: {note.rewrite_content}"
+            for entity in note.entities:
+                entity_scores[entity] = entity_scores.get(entity, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
+                add_example(entity_examples, entity, example)
+            for attr in note.attribute_paths:
+                attr_scores[attr] = attr_scores.get(attr, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
+                add_example(attr_examples, attr, example)
+
+        entity_records = [
+            {
+                "entity": entity,
+                "score": round(score, 4),
+                "source": "dense" if entity in entity_dense_hits else "lexical",
+                "examples": entity_examples.get(entity, []),
+            }
+            for entity, score in sorted(entity_scores.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+        ][:config.EAES_QUERY_ENTITY_LIMIT]
+
+        attr_records = [
+            {
+                "attribute": attr,
+                "score": round(score, 4),
+                "examples": attr_examples.get(attr, []),
+            }
+            for attr, score in sorted(attr_scores.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+        ][:config.EAES_QUERY_ATTRIBUTE_LIMIT]
+        return entity_records, attr_records
+
+    def _parse_eaes_query_from_inventory(self, question, question_emb=None):
+        entity_records, attr_records = self._eaes_inventory_candidates(question, question_emb)
+        if not entity_records and not attr_records:
+            return None
+        out = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": Prompts.EAES_QUERY_INVENTORY_SYSTEM_PROMPT},
+                {"role": "user", "content": Prompts.eaes_query_inventory_prompt(
+                    question,
+                    json.dumps(entity_records, ensure_ascii=False),
+                    json.dumps(attr_records, ensure_ascii=False),
+                )},
+            ],
+            model=config.RE_MODEL,
+        )
+        if not isinstance(out, dict):
+            return None
+        valid_entities = {r["entity"] for r in entity_records}
+        valid_attrs = {r["attribute"] for r in attr_records}
+        selected_entities = []
+        for entity in out.get("entities") or []:
+            if entity in valid_entities and entity not in selected_entities:
+                selected_entities.append(entity)
+        selected_attrs = []
+        for attr in out.get("attribute_hints") or []:
+            if attr in valid_attrs and attr not in selected_attrs:
+                selected_attrs.append(attr)
+        return {
+            "entities": selected_entities,
+            "attribute_hints": selected_attrs,
+            "answer_type": out.get("answer_type", "unknown"),
+            "temporal_intent": out.get("temporal_intent", "none"),
+            "required_lifecycle": out.get("required_lifecycle", "unknown"),
+            "keywords": out.get("keywords") or [],
+            "query_mode": "inventory",
+            "entity_candidate_count": len(entity_records),
+            "attribute_candidate_count": len(attr_records),
         }
 
     def _enrich_eaes_package(self, package):
@@ -648,7 +837,7 @@ class Agent:
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
         question_keys = self.extract_question_keys(question, question_emb)
-        query_plan = self.parse_eaes_query(question, question_keys)
+        query_plan = self.parse_eaes_query(question, question_keys, question_emb)
         candidates = self.memory_controller.retrieve_eaes_candidates(
             query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
         if not candidates:
@@ -749,7 +938,7 @@ class Agent:
         """Return retrieval candidates without generating a final answer."""
         if config.EAES_MODE:
             question_keys = self.extract_question_keys(question, question_emb)
-            query_plan = self.parse_eaes_query(question, question_keys)
+            query_plan = self.parse_eaes_query(question, question_keys, question_emb)
             candidates = self.memory_controller.retrieve_eaes_candidates(
                 query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])

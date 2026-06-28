@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 import os
 load_dotenv()  # read API key from .env
 JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", os.getenv("CHAT_PROVIDER", "openrouter")).lower()
+JUDGE_TIMEOUT = float(os.getenv("JUDGE_TIMEOUT", "300" if JUDGE_PROVIDER == "deepseek" else "60"))
+JUDGE_MAX_RETRIES = int(os.getenv("JUDGE_MAX_RETRIES", "5" if JUDGE_PROVIDER == "deepseek" else "2"))
+DEEPSEEK_THINKING_MODE = os.getenv("DEEPSEEK_THINKING_MODE", "disabled").lower()
 if JUDGE_PROVIDER == "ofox":
     API_KEY = os.getenv("OFOX_API_KEY")
     JUDGE_MODEL = os.getenv("OFOX_JUDGE_MODEL", os.getenv("OFOX_MODEL", "gpt-4o-mini"))
@@ -28,6 +31,8 @@ else:
 client = OpenAI(
     api_key=API_KEY,
     base_url=JUDGE_BASE_URL,
+    timeout=JUDGE_TIMEOUT,
+    max_retries=JUDGE_MAX_RETRIES,
     default_headers=get_openrouter_headers() if JUDGE_PROVIDER == "openrouter" else None,
 )
 
@@ -79,6 +84,8 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
         ],
         "temperature": 0.0,
     }
+    if JUDGE_PROVIDER == "deepseek" and JUDGE_MODEL.startswith("deepseek-v4") and DEEPSEEK_THINKING_MODE == "disabled":
+        req["extra_body"] = {"thinking": {"type": "disabled"}}
     try:
         response = client.chat.completions.create(**req, response_format={"type": "json_object"})
     except Exception:

@@ -150,6 +150,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--max_questions` | run at most the first N questions per selected sample | `None` |
 | `--ca` | (LM) category index: `0`=multi-session, `1`=single-session-user, `2`=temporal-reasoning | `1` |
 | `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
+| `--workers` | concurrent question workers per selected sample | `10` |
 
 ### 5.2 LoCoMo
 
@@ -162,6 +163,9 @@ python run.py --data locomo --model gemini --file myrun --sample 42
 
 # a quick partial run over the first 50 questions of one conversation
 python run.py --data locomo --model qwen --file smoke50 --sample 26 --max_questions 50
+
+# a conservative DeepSeek run for unstable networks
+python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_questions 50 --workers 1
 ```
 
 ### 5.3 LongMemEval (LM)

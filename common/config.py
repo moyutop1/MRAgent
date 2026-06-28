@@ -14,6 +14,7 @@ parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / 
 parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
 parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged per rewrite call. 1=per-session (key=session_i, compatible with existing files/per-session readers); >1=merged (key=session_first-session_last)")
+parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
 parser.add_argument("--retrieval_only", action="store_true", help="Only evaluate retrieval evidence; skip final answer generation and LLM judge.")
 
@@ -124,6 +125,11 @@ else:
     OPENAI_COMPAT_DEFAULT_HEADERS = get_openrouter_headers()
 if API_PROVIDER == "ofox" and not CHAT_BASE_URL:
     raise ValueError("OFOX_BASE_URL is empty. Set it in .env when using --model ofox.")
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300" if API_PROVIDER == "deepseek" else "120"))
+LLM_CLIENT_MAX_RETRIES = int(os.getenv("LLM_CLIENT_MAX_RETRIES", "3"))
+LLM_REQUEST_MAX_RETRIES = int(os.getenv("LLM_REQUEST_MAX_RETRIES", "8" if API_PROVIDER == "deepseek" else "3"))
+LLM_BACKOFF = float(os.getenv("LLM_BACKOFF", "1.8" if API_PROVIDER == "deepseek" else "1.5"))
+DEEPSEEK_THINKING_MODE = os.getenv("DEEPSEEK_THINKING_MODE", "disabled").lower()
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"
 K1=80                 # coarse retrieval breadth (embedding similarity)
 K2=20                 # fine retrieval breadth (LLM re-ranking)
@@ -143,6 +149,9 @@ sample_id = args.sample
 MAX_QUESTIONS = args.max_questions
 if MAX_QUESTIONS is not None and MAX_QUESTIONS <= 0:
     raise ValueError("--max_questions must be a positive integer.")
+QUESTION_WORKERS = args.workers
+if QUESTION_WORKERS <= 0:
+    raise ValueError("--workers must be a positive integer.")
 qu = args.qu
 ca = args.ca
 LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call

@@ -89,10 +89,9 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
         return i, evaluation
 
     # multithreaded execution: store results in a dict by index i, then read in order when writing
-    MAX_WORKERS = 10
     results_dict: dict = {}
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=config.QUESTION_WORKERS) as executor:
         future_to_i = {executor.submit(_run_one_question, i, qa): i for i, qa in remaining}
         for fut in as_completed(future_to_i):
             i = future_to_i[fut]

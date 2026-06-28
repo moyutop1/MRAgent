@@ -10,12 +10,22 @@ from common import config
 import logging
 logger = logging.getLogger(__name__)
 
+
+def _is_deepseek_v4_model(model: str) -> bool:
+    return config.API_PROVIDER == "deepseek" and str(model).startswith("deepseek-v4")
+
+
+def _add_deepseek_defaults(req: Dict[str, Any], model: str) -> None:
+    if _is_deepseek_v4_model(model) and config.DEEPSEEK_THINKING_MODE == "disabled":
+        req.setdefault("extra_body", {"thinking": {"type": "disabled"}})
+
+
 class LLM:
     def __init__(self):
         self.client = OpenAI(api_key=config.API_KEY,
                              base_url=config.CHAT_BASE_URL,
-                             timeout=120.0,
-                             max_retries=3,
+                             timeout=config.LLM_TIMEOUT,
+                             max_retries=config.LLM_CLIENT_MAX_RETRIES,
                              default_headers=config.OPENAI_COMPAT_DEFAULT_HEADERS)
         self.model = config.MODEL
 
@@ -30,8 +40,8 @@ class LLM:
             temperature: float = 0.0,
             top_p: float = 1.0,
             seed: Optional[int] = 66,
-            max_retries: int = 3,
-            backoff: float = 1.5,
+            max_retries: int = config.LLM_REQUEST_MAX_RETRIES,
+            backoff: float = config.LLM_BACKOFF,
             **extra  # extra params, e.g. response_format
     ):
         """
@@ -51,6 +61,7 @@ class LLM:
         if use_tool:
             req["tools"] = tools
             req["tool_choice"] = tool_choice
+        _add_deepseek_defaults(req, model)
         if extra:
             req.update(extra)
 

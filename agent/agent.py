@@ -727,6 +727,23 @@ class Agent:
                 event_ids.append(m.group(1))
         return event_ids
 
+    def _dense_episode_retrieval(self, question_emb, k=None):
+        if question_emb is None:
+            return [], [], [], []
+        ids, embs, texts = [], [], []
+        for event_id, event in self.memory.episode_events.items():
+            if event.embedding is None:
+                continue
+            ids.append(event_id)
+            embs.append(event.embedding)
+            texts.append(f"{event_id}:{event.text}")
+        if not embs:
+            return [], [], [], []
+        emb_matrix = np.vstack(embs)
+        top_ids, top_scores, _, top_texts = topk_answers_by_similarity(
+            question_emb, emb_matrix, ids, k=k or config.DENSE_RETRIEVAL_K, answer_texts=texts)
+        return top_ids, top_scores, top_texts or [], self._origins_for_event_ids(top_ids)
+
     def retrieve_question_evidence(self, question: str, category=0, question_emb=None,
                                    override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
         """Return retrieval candidates without generating a final answer."""
@@ -840,13 +857,26 @@ class Agent:
             if lm_current_date:
                 ans_input["current_date"] = lm_current_date
 
-        origins = self._origins_for_event_ids(retrieved_ids)
+        graph_ids = self._unique_keep_order(retrieved_ids)
+        graph_texts = list(retrieved_texts or [])
+        graph_origins = self._origins_for_event_ids(graph_ids)
+        dense_ids, dense_scores, dense_texts, dense_origins = self._dense_episode_retrieval(question_emb)
+        combined_ids = self._unique_keep_order(graph_ids + dense_ids)
+        combined_texts = graph_texts + [t for i, t in zip(dense_ids, dense_texts) if i not in set(graph_ids)]
+        origins = self._origins_for_event_ids(combined_ids)
         return {
             "mode": "graph",
             "question_keys": question_keys,
-            "retrieved_event_ids": retrieved_ids,
+            "retrieved_event_ids": combined_ids,
             "retrieved_origins": origins,
-            "retrieved_texts": retrieved_texts,
+            "retrieved_texts": combined_texts,
+            "graph_event_ids": graph_ids,
+            "graph_origins": graph_origins,
+            "graph_texts": graph_texts,
+            "dense_event_ids": dense_ids,
+            "dense_origins": dense_origins,
+            "dense_scores": dense_scores,
+            "dense_texts": dense_texts,
             "answer_input": ans_input,
         }
 

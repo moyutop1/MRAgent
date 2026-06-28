@@ -190,6 +190,8 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             retrieval = agent.retrieve_question_evidence(
                 question, category, question_emb, override_question_time, lm_current_date)
             metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("retrieved_origins"))
+            graph_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("graph_origins"))
+            dense_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("dense_origins"))
             row = {
                 "sample": sample_id,
                 "question_index": i,
@@ -198,6 +200,9 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "answer": qa.get("answer"),
                 "evidence": qa.get("evidence"),
                 **metrics,
+                "combined_metrics": metrics,
+                "graph_metrics": graph_metrics,
+                "dense_metrics": dense_metrics,
                 "retrieval": retrieval,
             }
             metric_rows.append(row)

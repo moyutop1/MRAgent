@@ -166,6 +166,10 @@ python run.py --data locomo --model qwen --file smoke50 --sample 26 --max_questi
 
 # a conservative DeepSeek run for unstable networks
 python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_questions 50 --workers 1
+
+# retrieval-only diagnostics with global dense fallback mixed in
+python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
 ```
 
 ### 5.3 LongMemEval (LM)

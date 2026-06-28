@@ -39,8 +39,11 @@ def load_rows(args):
     return rows
 
 
-def print_group(name, rows):
-    scored = [r for r in rows if r.get("hit") is not None and "error" not in r]
+def print_group(name, rows, metric_key=None):
+    if metric_key:
+        scored = [r[metric_key] for r in rows if r.get(metric_key, {}).get("hit") is not None and "error" not in r]
+    else:
+        scored = [r for r in rows if r.get("hit") is not None and "error" not in r]
     if not scored:
         print(f"{name}: n=0")
         return
@@ -63,11 +66,19 @@ def main():
         return
 
     print_group("OVERALL", rows)
+    if any("graph_metrics" in r for r in rows):
+        print_group("OVERALL graph", rows, "graph_metrics")
+        print_group("OVERALL dense", rows, "dense_metrics")
+        print_group("OVERALL combined", rows, "combined_metrics")
     by_cat = defaultdict(list)
     for row in rows:
         by_cat[row.get("category")].append(row)
     for cat in sorted(by_cat, key=str):
         print_group(f"category={cat}", by_cat[cat])
+        if any("graph_metrics" in r for r in by_cat[cat]):
+            print_group(f"category={cat} graph", by_cat[cat], "graph_metrics")
+            print_group(f"category={cat} dense", by_cat[cat], "dense_metrics")
+            print_group(f"category={cat} combined", by_cat[cat], "combined_metrics")
 
     errors = [r for r in rows if "error" in r]
     if errors:

@@ -141,7 +141,7 @@ def check_rewrite_json(text, dialogue_text):
 
   return True, ""
 
-def check_key_json(text, ref_obj=None):
+def check_key_json(text, ref_obj=None, replace=False):
   from jsonschema import Draft202012Validator, ValidationError
 
   schema = KEY_SCHEMA
@@ -183,6 +183,12 @@ def check_key_json(text, ref_obj=None):
   for i, s in enumerate(sentences):
     sid = s.get("sentence_id", "")
     if sid not in allowed_sentence_ids:
+      if replace:
+        text["sentence"] = [
+          item for item in sentences
+          if isinstance(item, dict) and item.get("sentence_id", "") in allowed_sentence_ids
+        ]
+        return True, ""
       msg = f"sentence[{i}].sentence_id({sid!r}) not found in allowed sentence.id set"
       return False, msg
 

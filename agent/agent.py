@@ -456,15 +456,6 @@ class Agent:
         return key_candidates, key_tag_sentences_id, key_tag_sentences
 
     @staticmethod
-    def _eaes_safe_path(prefix, text):
-        text = (text or "").lower().strip()
-        text = re.sub(r"[^a-z0-9]+", "_", text)
-        text = re.sub(r"_+", "_", text).strip("_")
-        if not text:
-            return None
-        return f"{prefix}.{text}"
-
-    @staticmethod
     def _as_list(value):
         if value is None:
             return []
@@ -531,16 +522,33 @@ class Agent:
         return out[:8]
 
     @staticmethod
-    def _eaes_attribute_text(attr):
+    def _eaes_short_text(text, max_chars=180):
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rsplit(" ", 1)[0].rstrip(" .,;:") + "..."
+
+    def _eaes_attribute_text(self, attr, fallback_text=None):
         if isinstance(attr, str):
-            return attr.strip()
+            text = attr.strip()
+            if not text:
+                return ""
+            if ":" in text:
+                return text
+            fallback = self._eaes_short_text(fallback_text)
+            return f"{text}: {fallback}" if fallback else text
         if not isinstance(attr, dict):
             return ""
         name = str(attr.get("name") or "").strip()
         desc = str(attr.get("description") or "").strip()
         if name and desc:
             return f"{name}: {desc}"
-        return name or desc
+        if desc:
+            return f"event.detail: {desc}"
+        if name:
+            fallback = self._eaes_short_text(fallback_text)
+            return f"{name}: {fallback}" if fallback else name
+        return ""
 
     def _eaes_llm_index_for_session(self, events, keyword_by_sentence):
         memories = []
@@ -580,8 +588,9 @@ class Agent:
             if event_id not in valid_ids:
                 continue
             entities = [str(e).strip() for e in self._as_list(item.get("entities")) if str(e).strip()]
+            memory_text = next((m["rewrite_content"] for m in memories if m["event_id"] == event_id), "")
             attributes = [
-                self._eaes_attribute_text(attr)
+                self._eaes_attribute_text(attr, memory_text)
                 for attr in self._as_list(item.get("attributes"))
             ]
             attributes = [a for a in attributes if a]
@@ -612,17 +621,16 @@ class Agent:
             index_item = llm_index.get(event_id) or {}
             entities = index_item.get("entities") or self._eaes_entities_from_keywords(keywords, ev.text)
             attribute_paths = list(index_item.get("attribute_paths") or [])
-            tag_path = self._eaes_safe_path("tag", ee.get("tag"))
-            if tag_path:
-                attribute_paths.append(tag_path)
-            for kw in keywords[:8]:
-                kw_path = self._eaes_safe_path("keyword", kw)
-                if kw_path:
-                    attribute_paths.append(kw_path)
-            for topic_id in self._as_list(ee.get("topic")):
-                topic_path = self._eaes_safe_path("topic", topic_id)
-                if topic_path:
-                    attribute_paths.append(topic_path)
+            rewrite_content = ee.get("text") or ev.text
+            attribute_paths = [
+                self._eaes_attribute_text(attr, rewrite_content)
+                for attr in attribute_paths
+            ]
+            attribute_paths = [attr for attr in attribute_paths if attr and ":" in attr]
+            if not attribute_paths:
+                short = self._eaes_short_text(rewrite_content)
+                if short:
+                    attribute_paths.append(f"event.summary: {short}")
             attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
             note = EAESMemoryNote(
                 memory_id=self._eaes_memory_id(event_id),
@@ -630,13 +638,13 @@ class Agent:
                 entities=entities,
                 attribute_paths=attribute_paths,
                 raw_text=ev.text,
-                rewrite_content=ee.get("text") or ev.text,
+                rewrite_content=rewrite_content,
                 time_interval={
                     "type": "conversation_time",
                     "start": conversation_time,
                     "end": conversation_time,
                 },
-                event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(ee.get("text") or ev.text, ee.get("event_lifecycle")),
+                event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
             )

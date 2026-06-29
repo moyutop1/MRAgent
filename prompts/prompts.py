@@ -279,7 +279,7 @@ Rules:
 - Use "historical" when the question asks what happened, what someone did, or what events someone attended.
 - Use "planned" when the question asks about intentions, plans, scheduled future events, or going to do something.
 - Use "current" when the question asks about now, currently, still, preferences, roles, residence, or ongoing state.
-- attribute_hints should be short semantic paths such as activity.event_attendance, activity.picnic, topic.LGBTQ, location.home, preference.food.
+- attribute_hints should be copied from inventory when available; each useful hint should be a compact relation clause like "event.attendance: Caroline attended an LGBTQ support group on 2023-05-07", not a bare keyword.
 - Do not answer the question."""
 
     EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
@@ -292,6 +292,7 @@ Rules:
 - Keep entity names explicit, e.g. "Caroline", not pronouns.
 - Attribute names should be short dotted paths, e.g. career.interest, education.field, mental_health.counseling, adoption.plan, event.attendance.
 - Attribute descriptions should be concise clauses preserving important nouns and verbs, e.g. "Caroline is interested in counseling and mental health as a career."
+- Do not output bare keywords, tags, topic ids, or one-word attributes. Every attribute must be useful as a small standalone evidence sentence.
 - Include 1-6 entities and 1-8 attributes per memory.
 - Copy event_id exactly from input.
 - event_lifecycle is one of: planned, current, historical.
@@ -323,6 +324,7 @@ Rules:
 - Choose attribute_hints only from CANDIDATE_ATTRIBUTES "attribute" values. Copy exactly.
 - Do not invent, paraphrase, stem, or normalize entities/attributes.
 - Prefer entity + attribute combinations that are likely to retrieve answer-bearing memories.
+- Prefer natural-language relation clauses over keyword/tag/topic-like attributes; a good attribute_hint should read like a short evidence sentence.
 - If the question asks for a field, career, education, interest, plan, or preference, select concrete attributes with similar meaning even if wording differs.
 - Return 1-6 entities when useful and 1-10 attribute_hints when useful.
 - Use keywords only for important residual lexical constraints from the question.

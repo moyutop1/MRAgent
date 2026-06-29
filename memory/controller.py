@@ -149,8 +149,8 @@ class MemoryController:
             return list(value)
         return [value]
 
-    def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
-        limit = limit or config.EAES_CANDIDATE_LIMIT
+    def score_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
+                              include_rank: bool = False):
         if not isinstance(query_plan, dict):
             query_plan = {}
         query_entities = self._as_list(query_plan.get("entities"))
@@ -219,7 +219,18 @@ class MemoryController:
             }))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [item for _, item in scored[:limit]]
+        ranked = []
+        for rank, (_, item) in enumerate(scored, start=1):
+            if include_rank:
+                item = {**item, "rank": rank}
+            ranked.append(item)
+        if limit is not None:
+            return ranked[:limit]
+        return ranked
+
+    def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
+        limit = limit or config.EAES_CANDIDATE_LIMIT
+        return self.score_eaes_candidates(query_plan, question_emb, limit=limit, include_rank=False)
 
     def expand_eaes_raw_text(self, memory_ids: List[str]):
         expanded = []

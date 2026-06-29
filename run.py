@@ -189,6 +189,10 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             question_emb = question_embeddings[i - 1]
             retrieval = agent.retrieve_question_evidence(
                 question, category, question_emb, override_question_time, lm_current_date)
+            gold_memory_diagnostics = None
+            if retrieval.get("mode") == "eaes":
+                gold_memory_diagnostics = agent.diagnose_eaes_gold_memories(
+                    qa.get("evidence"), retrieval, question_emb)
             metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("retrieved_origins"))
             graph_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("graph_origins"))
             dense_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("dense_origins"))
@@ -203,6 +207,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "combined_metrics": metrics,
                 "graph_metrics": graph_metrics,
                 "dense_metrics": dense_metrics,
+                "gold_memory_diagnostics": gold_memory_diagnostics,
                 "retrieval": retrieval,
             }
             metric_rows.append(row)

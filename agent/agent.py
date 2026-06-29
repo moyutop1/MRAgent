@@ -961,6 +961,105 @@ class Agent:
                 event_ids.append(m.group(1))
         return event_ids
 
+    @staticmethod
+    def _normalize_evidence_ids(items):
+        out = []
+        for item in items or []:
+            for match in re.findall(r"D\d+:\d+(?:-\d+)?", str(item)):
+                out.append(match.split("-", 1)[0])
+        return Agent._unique_keep_order(out)
+
+    def _episode_ids_for_origin(self, origin):
+        origin = str(origin or "")
+        if not origin:
+            return []
+        event_ids = []
+        for event_id, event in self.memory.episode_events.items():
+            event_origin = getattr(event, "origin", None)
+            if event_origin == origin or event_id == origin or event_id.startswith(f"{origin}-"):
+                event_ids.append(event_id)
+        return self._unique_keep_order(event_ids)
+
+    def diagnose_eaes_gold_memories(self, gold_evidence, retrieval, question_emb=None, window=2):
+        if not isinstance(retrieval, dict) or retrieval.get("mode") != "eaes":
+            return None
+        query_plan = retrieval.get("query_plan") or {}
+        ranked = self.memory_controller.score_eaes_candidates(
+            query_plan, question_emb, limit=None, include_rank=True)
+        by_memory_id = {item.get("memory_id"): item for item in ranked if item.get("memory_id")}
+        by_event_id = {item.get("event_id"): item for item in ranked if item.get("event_id")}
+        retrieved_memory_ids = {
+            item.get("memory_id") for item in self._as_list(retrieval.get("candidates")) if isinstance(item, dict)
+        }
+        retrieved_event_ids = {
+            item for item in self._as_list(retrieval.get("retrieved_event_ids")) if item
+        }
+
+        diagnostics = {
+            "candidate_limit": config.EAES_CANDIDATE_LIMIT,
+            "total_scored_memories": len(ranked),
+            "gold_origins": [],
+        }
+        for origin in self._normalize_evidence_ids(gold_evidence):
+            event_ids = self._episode_ids_for_origin(origin)
+            memory_ids = [
+                self.memory.eaes_event_to_memory.get(event_id)
+                for event_id in event_ids
+                if self.memory.eaes_event_to_memory.get(event_id)
+            ]
+            memory_entries = []
+            for event_id in event_ids:
+                memory_id = self.memory.eaes_event_to_memory.get(event_id)
+                note = self.memory.get_eaes_note(memory_id) if memory_id else None
+                scored = by_memory_id.get(memory_id) or by_event_id.get(event_id)
+                rank = scored.get("rank") if scored else None
+                neighbor_window = []
+                if rank is not None:
+                    start = max(0, rank - window - 1)
+                    end = min(len(ranked), rank + window)
+                    for neighbor in ranked[start:end]:
+                        neighbor_window.append({
+                            "rank": neighbor.get("rank"),
+                            "memory_id": neighbor.get("memory_id"),
+                            "event_id": neighbor.get("event_id"),
+                            "origin": neighbor.get("origin"),
+                            "score": neighbor.get("score"),
+                            "score_parts": neighbor.get("score_parts"),
+                        })
+                memory_entries.append({
+                    "event_id": event_id,
+                    "memory_id": memory_id,
+                    "indexed": note is not None,
+                    "in_retrieved_candidates": memory_id in retrieved_memory_ids or event_id in retrieved_event_ids,
+                    "candidate_rank": rank,
+                    "candidate_score": scored.get("score") if scored else None,
+                    "score_parts": scored.get("score_parts") if scored else None,
+                    "entities": note.entities if note is not None else [],
+                    "attribute_paths": note.attribute_paths if note is not None else [],
+                    "rewrite_content": note.rewrite_content if note is not None else None,
+                    "nearby_ranked_candidates": neighbor_window,
+                    "drop_reason": (
+                        "not_built_in_eaes_memory" if note is None else
+                        "not_scored_by_query_plan" if scored is None else
+                        "rank_beyond_candidate_limit" if rank and rank > config.EAES_CANDIDATE_LIMIT else
+                        "inside_candidate_limit"
+                    ),
+                })
+            diagnostics["gold_origins"].append({
+                "origin": origin,
+                "event_ids": event_ids,
+                "memory_ids": memory_ids,
+                "covered_by_retrieval": any(
+                    entry["in_retrieved_candidates"] for entry in memory_entries
+                ),
+                "best_rank": min(
+                    [entry["candidate_rank"] for entry in memory_entries if entry["candidate_rank"] is not None],
+                    default=None,
+                ),
+                "memories": memory_entries,
+            })
+        return diagnostics
+
     def _dense_episode_retrieval(self, question_emb, k=None):
         if question_emb is None:
             return [], [], [], []

@@ -138,6 +138,7 @@ class EAESMemoryNote:
             "rewrite_content": self.rewrite_content,
             "time_interval": self.time_interval,
             "event_lifecycle": self.event_lifecycle,
+            "origin": self.origin,
         }
         if include_raw:
             data["raw_text"] = self.raw_text

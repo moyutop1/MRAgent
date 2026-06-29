@@ -979,7 +979,11 @@ class Agent:
             candidates = self.memory_controller.retrieve_eaes_candidates(
                 query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
-            origins = self._unique_keep_order([c.get("origin") for c in candidates])
+            origins = self._unique_keep_order(
+                [c.get("origin") for c in candidates] or self._origins_for_event_ids(event_ids)
+            )
+            if not origins:
+                origins = self._origins_for_event_ids(event_ids)
             return {
                 "mode": "eaes",
                 "question_keys": question_keys,

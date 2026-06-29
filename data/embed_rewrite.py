@@ -30,6 +30,8 @@ def embed_sample(qa_list, rewrite_path, FILE_EMBEDDING):
     topic_embedding_list = []
     sentence_id_list = []
     topic_id_list = []
+    question_embeddings = embed_question(qa_list)
+    embedding_dim = question_embeddings.shape[1] if len(question_embeddings.shape) > 1 else 0
 
     for j in range(len(record_rewrite)):
         # a rewrite record key may be session_j or session_first-session_last,
@@ -37,31 +39,44 @@ def embed_sample(qa_list, rewrite_path, FILE_EMBEDDING):
         # note: topic_id still uses f"D{j+1}:" (record index), consistent with store_event_new's session_id=i+1.
         _sd = record_rewrite[j]
         session_data = next(iter(_sd.values())) if _sd else None
-        if session_data is None:
+        if not isinstance(session_data, dict):
             continue
-        sentences = session_data.get("sentence")
-        topics = session_data.get("topics")
+        sentences = session_data.get("sentence") or []
+        topics = session_data.get("topics") or {}
         sentence_list = []
         for s in sentences:
-            sentence_list.append(s.get("text"))
-            sentence_id_list.append(s.get("id"))
+            if not isinstance(s, dict):
+                continue
+            text = s.get("text")
+            sid = s.get("id")
+            if not text or not sid:
+                continue
+            sentence_list.append(text)
+            sentence_id_list.append(sid)
         # skip empty sessions (no sentences) entirely: no sentence_id/topic_id, no embedding,
         # to avoid embed_session([]) errors and misalignment with the store side.
         if len(sentence_list) == 0:
             continue
         topic_list = []
-        if topics is not None:
+        if isinstance(topics, dict):
             for t,text in topics.items():
+                if not text:
+                    continue
                 topic_list.append(text)
-                topic_id_list.append(f"D{j + 1}:" + t)
+                topic_id_list.append(f"D{j + 1}:" + str(t))
         session_embedding = embed_session(sentence_list)
         sample_embedding_list.append(session_embedding)
         if len(topic_list) != 0:
             topic_embedding = embed_session(topic_list)
             topic_embedding_list.append(topic_embedding)
-    sample_embedding_con = np.vstack(sample_embedding_list)
-    topic_embedding_con = np.vstack(topic_embedding_list)
-    question_embeddings = embed_question(qa_list)
+    sample_embedding_con = (
+        np.vstack(sample_embedding_list)
+        if sample_embedding_list else np.empty((0, embedding_dim))
+    )
+    topic_embedding_con = (
+        np.vstack(topic_embedding_list)
+        if topic_embedding_list else np.empty((0, embedding_dim))
+    )
 
     database = {'embeddings': sample_embedding_con,
                 'topic': topic_embedding_con,

@@ -234,7 +234,11 @@ class Agent:
         return prefixes
 
     def select_topic(self, question_emb):
+        if not self.memory.topic_id_list or len(self.memory.topic_embeddings) == 0:
+            return []
         similar_topic_embs = np.vstack(self.memory.topic_embeddings)
+        if similar_topic_embs.shape[0] == 0:
+            return []
         top_tids, _, top_tembs, top_topic_texts = topk_answers_by_similarity(question_emb, similar_topic_embs,
                                                                              self.memory.topic_id_list,
                                                                              k=config.TOPIC_K,
@@ -1540,8 +1544,12 @@ class Agent:
 
         if isinstance(episode_events, list):
             for ee in episode_events:
+                if not isinstance(ee, dict):
+                    continue
                 id = ee.get("id")
                 origin = ee.get("origin")
+                if not id or not origin:
+                    continue
                 time = ee.get("time")
                 topics = self._as_list(ee.get("topic"))
 

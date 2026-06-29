@@ -305,6 +305,8 @@ class MemorySystem:
 
 
     def add_topics(self, topic_sentences, eid_topic_dict, session_id):
+        if not isinstance(topic_sentences, dict):
+            topic_sentences = {}
 
         for ts in topic_sentences:
             tid = f"D{session_id}:"+ts
@@ -315,7 +317,7 @@ class MemorySystem:
             assert self.topic_id_list.index(tid) == self.topic_sentence_list.index(tid + ":" + ttext)
 
         for eid, topics in eid_topic_dict.items():
-            for tid in topics:
+            for tid in topics or []:
                 tid = f"D{session_id}:" + tid
                 # [guard] some samples' episode topic references a tid not in this session's topics -> get returns None; skip that link
                 t = self.topic_dict.get(tid)
@@ -338,11 +340,11 @@ class MemorySystem:
     def add_eaes_memory_note(self, note: EAESMemoryNote):
         self.eaes_notes[note.memory_id] = note
         self.eaes_event_to_memory[note.event_id] = note.memory_id
-        for entity in note.entities:
+        for entity in note.entities or []:
             norm_entity = self._eaes_norm(entity)
             if norm_entity:
                 self.eaes_by_entity[norm_entity].add(note.memory_id)
-        for attr in note.attribute_paths:
+        for attr in note.attribute_paths or []:
             norm_attr = self._eaes_norm(attr)
             if norm_attr:
                 self.eaes_by_attribute[norm_attr].add(note.memory_id)

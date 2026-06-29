@@ -393,10 +393,16 @@ class Agent:
         key_candidates = []
         key_tag_sentences = []
         key_tag_sentences_id = []
-        for s in question_keys.get("keywords"):
+        if not isinstance(question_keys, dict):
+            question_keys = {}
+        for s in self._as_list(question_keys.get("keywords")):
+            if not isinstance(s, dict):
+                continue
             # [fix] use the raw key (consistent with stored keys and qmap); lemmatize lowercases + stems,
             # which would mismatch the raw-stored keys (proper nouns / plurals / past tense missed).
-            key = s["id"]
+            key = s.get("id")
+            if not key:
+                continue
             tag = self.memory.get_tag_list(key)
             if len(tag) != 0:
                 if len(tag) > config.TAG_MAX:
@@ -453,6 +459,16 @@ class Agent:
         if not text:
             return None
         return f"{prefix}.{text}"
+
+    @staticmethod
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, (tuple, set)):
+            return list(value)
+        return [value]
 
     @staticmethod
     def _eaes_memory_id(event_id):
@@ -524,7 +540,9 @@ class Agent:
 
     def _eaes_llm_index_for_session(self, events, keyword_by_sentence):
         memories = []
-        for ee in events.get("sentence") or []:
+        for ee in self._as_list(events.get("sentence")):
+            if not isinstance(ee, dict):
+                continue
             event_id = ee.get("id")
             if event_id not in self.memory.episode_events:
                 continue
@@ -534,7 +552,7 @@ class Agent:
                 "rewrite_content": ee.get("text") or ev.text,
                 "raw_text": ev.text,
                 "tag": ee.get("tag"),
-                "keywords": keyword_by_sentence.get(event_id, [])[:12],
+                "keywords": self._as_list(keyword_by_sentence.get(event_id))[:12],
                 "time": ee.get("time"),
             })
         if not memories:
@@ -551,16 +569,16 @@ class Agent:
             return {}
         indexed = {}
         valid_ids = {m["event_id"] for m in memories}
-        for item in out.get("memories") or []:
+        for item in self._as_list(out.get("memories")):
             if not isinstance(item, dict):
                 continue
             event_id = item.get("event_id")
             if event_id not in valid_ids:
                 continue
-            entities = [str(e).strip() for e in item.get("entities") or [] if str(e).strip()]
+            entities = [str(e).strip() for e in self._as_list(item.get("entities")) if str(e).strip()]
             attributes = [
                 self._eaes_attribute_text(attr)
-                for attr in (item.get("attributes") or [])
+                for attr in self._as_list(item.get("attributes"))
             ]
             attributes = [a for a in attributes if a]
             lifecycle = str(item.get("event_lifecycle") or "").lower().strip()
@@ -579,12 +597,14 @@ class Agent:
             except Exception as e:
                 logger.warning(f"EAES LLM index failed; falling back to heuristic index: {e}", exc_info=True)
                 llm_index = {}
-        for ee in events.get("sentence") or []:
+        for ee in self._as_list(events.get("sentence")):
+            if not isinstance(ee, dict):
+                continue
             event_id = ee.get("id")
             if event_id not in self.memory.episode_events:
                 continue
             ev = self.memory.episode_events[event_id]
-            keywords = keyword_by_sentence.get(event_id, [])
+            keywords = self._as_list(keyword_by_sentence.get(event_id))
             index_item = llm_index.get(event_id) or {}
             entities = index_item.get("entities") or self._eaes_entities_from_keywords(keywords, ev.text)
             attribute_paths = list(index_item.get("attribute_paths") or [])
@@ -595,7 +615,7 @@ class Agent:
                 kw_path = self._eaes_safe_path("keyword", kw)
                 if kw_path:
                     attribute_paths.append(kw_path)
-            for topic_id in ee.get("topic") or []:
+            for topic_id in self._as_list(ee.get("topic")):
                 topic_path = self._eaes_safe_path("topic", topic_id)
                 if topic_path:
                     attribute_paths.append(topic_path)
@@ -632,13 +652,16 @@ class Agent:
         )
         if isinstance(query_out, dict):
             return query_out
+        if not isinstance(question_keys, dict):
+            question_keys = {}
+        key_items = self._as_list(question_keys.get("keywords"))
         return {
-            "entities": [k.get("id") for k in question_keys.get("keywords", []) if isinstance(k, dict)],
+            "entities": [k.get("id") for k in key_items if isinstance(k, dict)],
             "attribute_hints": [],
             "answer_type": "unknown",
             "temporal_intent": "none",
             "required_lifecycle": "unknown",
-            "keywords": [k.get("id") for k in question_keys.get("keywords", []) if isinstance(k, dict)],
+            "keywords": [k.get("id") for k in key_items if isinstance(k, dict)],
         }
 
     def _dense_eaes_note_ids(self, question_emb, k=None):
@@ -676,25 +699,27 @@ class Agent:
                 continue
             weight = 2.0 / (rank + 1)
             example = f"{note.event_id}: {note.rewrite_content}"
-            for entity in note.entities:
+            for entity in self._as_list(note.entities):
                 entity_scores[entity] = entity_scores.get(entity, 0.0) + weight
                 entity_dense_hits.add(entity)
                 add_example(entity_examples, entity, example)
-            for attr in note.attribute_paths:
+            for attr in self._as_list(note.attribute_paths):
                 attr_scores[attr] = attr_scores.get(attr, 0.0) + weight
                 add_example(attr_examples, attr, example)
 
         for note in self.memory.eaes_notes.values():
-            note_text = f"{note.rewrite_content} {' '.join(note.entities)} {' '.join(note.attribute_paths)}"
+            note_entities = [str(entity) for entity in self._as_list(note.entities) if entity is not None]
+            note_attributes = [str(attr) for attr in self._as_list(note.attribute_paths) if attr is not None]
+            note_text = f"{note.rewrite_content} {' '.join(note_entities)} {' '.join(note_attributes)}"
             text_tokens = self._key_tokens(note_text)
             overlap = len(q_tokens & text_tokens)
             if not overlap:
                 continue
             example = f"{note.event_id}: {note.rewrite_content}"
-            for entity in note.entities:
+            for entity in note_entities:
                 entity_scores[entity] = entity_scores.get(entity, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
                 add_example(entity_examples, entity, example)
-            for attr in note.attribute_paths:
+            for attr in note_attributes:
                 attr_scores[attr] = attr_scores.get(attr, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
                 add_example(attr_examples, attr, example)
 
@@ -738,11 +763,11 @@ class Agent:
         valid_entities = {r["entity"] for r in entity_records}
         valid_attrs = {r["attribute"] for r in attr_records}
         selected_entities = []
-        for entity in out.get("entities") or []:
+        for entity in self._as_list(out.get("entities")):
             if entity in valid_entities and entity not in selected_entities:
                 selected_entities.append(entity)
         selected_attrs = []
-        for attr in out.get("attribute_hints") or []:
+        for attr in self._as_list(out.get("attribute_hints")):
             if attr in valid_attrs and attr not in selected_attrs:
                 selected_attrs.append(attr)
         return {
@@ -751,7 +776,7 @@ class Agent:
             "answer_type": out.get("answer_type", "unknown"),
             "temporal_intent": out.get("temporal_intent", "none"),
             "required_lifecycle": out.get("required_lifecycle", "unknown"),
-            "keywords": out.get("keywords") or [],
+            "keywords": self._as_list(out.get("keywords")),
             "query_mode": "inventory",
             "entity_candidate_count": len(entity_records),
             "attribute_candidate_count": len(attr_records),
@@ -761,9 +786,13 @@ class Agent:
         if not isinstance(package, dict):
             return {"answer_items": []}
         enriched_items = []
-        for item in package.get("answer_items") or []:
+        for item in self._as_list(package.get("answer_items")):
+            if not isinstance(item, dict):
+                continue
             enriched_evidence = []
-            for ev in item.get("evidence") or []:
+            for ev in self._as_list(item.get("evidence")):
+                if not isinstance(ev, dict):
+                    continue
                 mid = ev.get("memory_id")
                 note = self.memory.get_eaes_note(mid)
                 if note is None:
@@ -876,10 +905,14 @@ class Agent:
             if not isinstance(answer_obj, dict):
                 return "no information available", self.memory.get_eaes_support_origin(
                     [c.get("memory_id") for c in candidates[:3]])
-        supports = answer_obj.get("supports") or []
+        supports = self._as_list(answer_obj.get("supports"))
         if not supports:
-            for item in evidence_package.get("answer_items") or []:
-                for ev in item.get("evidence") or []:
+            for item in self._as_list(evidence_package.get("answer_items")):
+                if not isinstance(item, dict):
+                    continue
+                for ev in self._as_list(item.get("evidence")):
+                    if not isinstance(ev, dict):
+                        continue
                     mid = ev.get("memory_id")
                     if mid and mid not in supports:
                         supports.append(mid)
@@ -1272,7 +1305,7 @@ class Agent:
         valid = {c["key"] for c in candidates}
         selected = []
         seen = set()
-        for item in out.get("keywords") or []:
+        for item in self._as_list(out.get("keywords")):
             key = item.get("id") if isinstance(item, dict) else str(item)
             if key in valid and key not in seen:
                 seen.add(key)
@@ -1497,8 +1530,8 @@ class Agent:
             logging.warning(f"store_event_new: session_{session_id} events is None; skipping this session")
             return
         conversation_time = events.get("conversation_time")
-        topic_sentences = events.get("topics")
-        personal_sentences = events.get("personal_sentences")
+        topic_sentences = events.get("topics") or {}
+        personal_sentences = self._as_list(events.get("personal_sentences"))
         # [removed] summary->semantic memory build: summary is never queried (query_semantic_information is not in the TOOLS given to the LLM), so the whole block is removed.
         # keys is still used by the keyword-link block below (keys.get("sentence")), so keys=None is guarded there.
 
@@ -1510,7 +1543,7 @@ class Agent:
                 id = ee.get("id")
                 origin = ee.get("origin")
                 time = ee.get("time")
-                topics = ee.get("topic")
+                topics = self._as_list(ee.get("topic"))
 
 
                 prefix = origin.split(":")[0]  # "D1"
@@ -1543,7 +1576,12 @@ class Agent:
         self.memory.add_topics(topic_sentences, eid_topic_dict, session_id)
 
         for ps in personal_sentences:
-            pid = f"D{session_id}:" + ps.get("id")
+            if not isinstance(ps, dict):
+                continue
+            personal_id = ps.get("id")
+            if not personal_id:
+                continue
+            pid = f"D{session_id}:" + str(personal_id)
             ptext = ps.get("text")
             porigin = ps.get("origin")
             ptag = ps.get("tag")

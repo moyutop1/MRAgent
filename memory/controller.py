@@ -139,11 +139,23 @@ class MemoryController:
             return 0.0
         return len(left & right) / max(1, len(left))
 
+    @staticmethod
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, (tuple, set)):
+            return list(value)
+        return [value]
+
     def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
         limit = limit or config.EAES_CANDIDATE_LIMIT
-        query_entities = query_plan.get("entities") or []
-        attr_hints = query_plan.get("attribute_hints") or []
-        keywords = query_plan.get("keywords") or []
+        if not isinstance(query_plan, dict):
+            query_plan = {}
+        query_entities = self._as_list(query_plan.get("entities"))
+        attr_hints = self._as_list(query_plan.get("attribute_hints"))
+        keywords = self._as_list(query_plan.get("keywords"))
         required_lifecycle = (query_plan.get("required_lifecycle") or "").lower().strip()
 
         entity_words = [self._eaes_words(e) for e in query_entities]
@@ -157,10 +169,10 @@ class MemoryController:
         scored = []
         for note in self.memory.eaes_notes.values():
             note_entity_words = set()
-            for entity in note.entities:
+            for entity in self._as_list(note.entities):
                 note_entity_words |= self._eaes_words(entity)
             note_attr_words = set()
-            for attr in note.attribute_paths:
+            for attr in self._as_list(note.attribute_paths):
                 note_attr_words |= self._eaes_words(attr)
             note_text_words = self._eaes_words(note.rewrite_content)
 

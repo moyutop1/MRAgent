@@ -1008,6 +1008,21 @@ class Agent:
                 if self.memory.eaes_event_to_memory.get(event_id)
             ]
             memory_entries = []
+            if not event_ids:
+                memory_entries.append({
+                    "event_id": None,
+                    "memory_id": None,
+                    "indexed": False,
+                    "in_retrieved_candidates": False,
+                    "candidate_rank": None,
+                    "candidate_score": None,
+                    "score_parts": None,
+                    "entities": [],
+                    "attribute_paths": [],
+                    "rewrite_content": None,
+                    "nearby_ranked_candidates": [],
+                    "drop_reason": "gold_origin_not_in_episode_events",
+                })
             for event_id in event_ids:
                 memory_id = self.memory.eaes_event_to_memory.get(event_id)
                 note = self.memory.get_eaes_note(memory_id) if memory_id else None
@@ -1045,17 +1060,31 @@ class Agent:
                         "inside_candidate_limit"
                     ),
                 })
+            covered_by_retrieval = any(
+                entry["in_retrieved_candidates"] for entry in memory_entries
+            )
+            rank_values = [
+                entry["candidate_rank"] for entry in memory_entries
+                if entry["candidate_rank"] is not None
+            ]
+            if not event_ids:
+                origin_drop_reason = "gold_origin_not_in_episode_events"
+            elif not memory_ids:
+                origin_drop_reason = "no_gold_memory_built_for_origin"
+            elif covered_by_retrieval:
+                origin_drop_reason = "inside_candidate_limit"
+            elif rank_values and min(rank_values) > config.EAES_CANDIDATE_LIMIT:
+                origin_drop_reason = "rank_beyond_candidate_limit"
+            else:
+                origin_drop_reason = "not_scored_by_query_plan"
+
             diagnostics["gold_origins"].append({
                 "origin": origin,
                 "event_ids": event_ids,
                 "memory_ids": memory_ids,
-                "covered_by_retrieval": any(
-                    entry["in_retrieved_candidates"] for entry in memory_entries
-                ),
-                "best_rank": min(
-                    [entry["candidate_rank"] for entry in memory_entries if entry["candidate_rank"] is not None],
-                    default=None,
-                ),
+                "covered_by_retrieval": covered_by_retrieval,
+                "drop_reason": origin_drop_reason,
+                "best_rank": min(rank_values, default=None),
                 "memories": memory_entries,
             })
         return diagnostics

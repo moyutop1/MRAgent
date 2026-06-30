@@ -273,12 +273,14 @@ Schema:
   "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
   "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
   "required_lifecycle": "planned | current | historical | unknown",
+  "no_time_limit": true,
   "keywords": ["important lexical constraints"]
 }
 Rules:
 - Use "historical" when the question asks what happened, what someone did, or what events someone attended.
 - Use "planned" when the question asks about intentions, plans, scheduled future events, or going to do something.
 - Use "current" when the question asks about now, currently, still, preferences, roles, residence, or ongoing state.
+- Use "unknown" with no_time_limit=true for stable fact/profile questions without an explicit temporal or event constraint, such as identity, relationship status, preferences, interests, activities, membership, allyship, career fields, or kinds/types of art.
 - attribute_hints should be copied from inventory when available; each useful hint should be a compact relation clause like "event.attendance: Caroline attended an LGBTQ support group on 2023-05-07", not a bare keyword.
 - Do not answer the question."""
 
@@ -328,6 +330,7 @@ Rules:
 - If the question asks for a field, career, education, interest, plan, or preference, select concrete attributes with similar meaning even if wording differs.
 - Return 1-6 entities when useful and 1-10 attribute_hints when useful.
 - Use keywords only for important residual lexical constraints from the question.
+- Use required_lifecycle="unknown" and no_time_limit=true for stable fact/profile questions without an explicit temporal or event constraint, such as identity, relationship status, preferences, interests, activities, membership, allyship, career fields, or kinds/types of art.
 - If no candidate is useful, return empty entities/attribute_hints but still infer answer_type and lifecycle.
 
 Schema:
@@ -337,6 +340,7 @@ Schema:
   "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
   "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
   "required_lifecycle": "planned | current | historical | unknown",
+  "no_time_limit": true,
   "keywords": ["important lexical constraints"]
 }"""
 

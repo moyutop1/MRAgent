@@ -650,11 +650,63 @@ class Agent:
             )
             self.memory.add_eaes_memory_note(note)
 
+    @staticmethod
+    def _eaes_should_use_unknown_lifecycle(question, query_plan):
+        if not isinstance(query_plan, dict):
+            return False
+        required = str(query_plan.get("required_lifecycle") or "").lower().strip()
+        if required not in {"current", "historical"}:
+            return False
+        answer_type = str(query_plan.get("answer_type") or "").lower().strip()
+        temporal_intent = str(query_plan.get("temporal_intent") or "").lower().strip()
+        if answer_type == "time" or temporal_intent in {"time_answer", "relative_time", "planned_event"}:
+            return False
+        q = re.sub(r"\s+", " ", str(question or "").lower()).strip()
+        if not q:
+            return False
+        explicit_event = re.search(
+            r"\b(when|what date|which date|where did|what did|who did|how did|"
+            r"attended|participated|joined|went|visited|met|shared|recently|"
+            r"yesterday|last week|last month|last year|ago)\b",
+            q,
+        )
+        explicit_plan = re.search(
+            r"\b(will|going to|plans? to|planning to|intend|intends|scheduled|"
+            r"upcoming|tomorrow|next week|next month|next year)\b",
+            q,
+        )
+        if explicit_event or explicit_plan:
+            return False
+        stable_fact = re.search(
+            r"\b(identity|relationship status|status|preference|likes?|"
+            r"interested in|kind of|type of|types of|activities|partake|"
+            r"considered|member of|ally|field|fields|career|art)\b",
+            q,
+        )
+        if stable_fact:
+            return True
+        return (
+            temporal_intent in {"current_state", "none", ""}
+            and answer_type in {"fact", "state", "person", "location", "reason", "yes_no", "unknown"}
+        )
+
+    def _postprocess_eaes_query_plan(self, question, query_plan):
+        if not isinstance(query_plan, dict):
+            return query_plan
+        plan = dict(query_plan)
+        if self._eaes_should_use_unknown_lifecycle(question, plan):
+            plan["required_lifecycle"] = "unknown"
+            plan["temporal_intent"] = "none"
+            plan["no_time_limit"] = True
+        else:
+            plan["no_time_limit"] = False
+        return plan
+
     def parse_eaes_query(self, question, question_keys, question_emb=None):
         if config.EAES_QUERY_MODE == "inventory":
             inventory_query = self._parse_eaes_query_from_inventory(question, question_emb)
             if inventory_query:
-                return inventory_query
+                return self._postprocess_eaes_query_plan(question, inventory_query)
         query_out = self.llm.chat_text(
             messages=[
                 {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
@@ -663,11 +715,11 @@ class Agent:
             model=config.RE_MODEL
         )
         if isinstance(query_out, dict):
-            return query_out
+            return self._postprocess_eaes_query_plan(question, query_out)
         if not isinstance(question_keys, dict):
             question_keys = {}
         key_items = self._as_list(question_keys.get("keywords"))
-        return {
+        fallback_query = {
             "entities": [k.get("id") for k in key_items if isinstance(k, dict)],
             "attribute_hints": [],
             "answer_type": "unknown",
@@ -675,6 +727,7 @@ class Agent:
             "required_lifecycle": "unknown",
             "keywords": [k.get("id") for k in key_items if isinstance(k, dict)],
         }
+        return self._postprocess_eaes_query_plan(question, fallback_query)
 
     def _dense_eaes_note_ids(self, question_emb, k=None):
         if question_emb is None:

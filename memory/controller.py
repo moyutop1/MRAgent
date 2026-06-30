@@ -188,7 +188,7 @@ class MemoryController:
 
             lifecycle_score = 0.0
             if required_lifecycle in {"planned", "current", "historical"}:
-                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else -0.25
+                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else 0.0
 
             emb_score = 0.0
             if question_emb is not None and note.embedding is not None:
@@ -201,7 +201,7 @@ class MemoryController:
                 2.0 * entity_score
                 + 1.4 * attr_score
                 + 1.2 * keyword_score
-                + 0.7 * lifecycle_score
+                + 0.1 * lifecycle_score
                 + 0.2 * emb_score
             )
             if score <= 0 and not query_entities:

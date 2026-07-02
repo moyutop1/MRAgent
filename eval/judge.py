@@ -56,11 +56,31 @@ Question: {question}
 Gold answer: {gold_answer}
 Generated answer: {generated_answer}
 
-First, provide a short (one sentence) explanation of your reasoning, then finish with CORRECT or WRONG. 
-Do NOT include both CORRECT and WRONG in your response, or it will break the evaluation script.
-
-Just return the label CORRECT or WRONG in a json format with the key as "label".
+Return only valid JSON. Do not include explanations, markdown, or extra text.
+The JSON schema is exactly:
+{{"label": "CORRECT"}}
+or
+{{"label": "WRONG"}}
 """
+
+
+def _parse_judge_label(content):
+    import re
+    try:
+        label = json.loads(content)["label"]
+    except Exception:
+        try:
+            label = extract_json_from_content(content).get("label")
+        except Exception:
+            text = str(content or "")
+            if re.search(r"\bCORRECT\b", text) and not re.search(r"\bWRONG\b", text):
+                label = "CORRECT"
+            elif re.search(r"\bWRONG\b", text) and not re.search(r"\bCORRECT\b", text):
+                label = "WRONG"
+            else:
+                return None
+    label = str(label or "").strip().upper()
+    return label if label in {"CORRECT", "WRONG"} else None
 
 
 def evaluate_llm_judge(question, gold_answer, generated_answer):
@@ -86,24 +106,18 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
     }
     if JUDGE_PROVIDER == "deepseek" and JUDGE_MODEL.startswith("deepseek-v4") and DEEPSEEK_THINKING_MODE == "disabled":
         req["extra_body"] = {"thinking": {"type": "disabled"}}
-    try:
-        response = client.chat.completions.create(**req, response_format={"type": "json_object"})
-    except Exception:
-        response = client.chat.completions.create(**req)
-    # print([
-    #         {
-    #             "role": "user",
-    #             "content": ACCURACY_PROMPT.format(
-    #             ),
-    #         }
-    #     ])
-    # print(response.choices[0].message.content)
-    content = response.choices[0].message.content
-    try:
-        label = json.loads(content)["label"]
-    except Exception:
-        label = extract_json_from_content(content).get("label")
-    return 1 if label == "CORRECT" else 0
+    last_content = ""
+    for _ in range(2):
+        try:
+            response = client.chat.completions.create(**req, response_format={"type": "json_object"})
+        except Exception:
+            response = client.chat.completions.create(**req)
+        last_content = response.choices[0].message.content
+        label = _parse_judge_label(last_content)
+        if label is not None:
+            return 1 if label == "CORRECT" else 0
+    print(f"[judge] Could not parse label; counting WRONG. head={str(last_content)[:120]!r}", file=sys.stderr)
+    return 0
 
 
 # def main():

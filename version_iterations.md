@@ -1,5 +1,28 @@
 # Version Iterations
 
+## v107-20260702
+
+### Goal
+
+Improve final-answer reliability for EAES runs, especially temporal questions, without changing memory construction or retrieval breadth.
+
+### Changes
+
+- Strengthen the EAES final-answer prompt for time questions.
+  - Require relative time phrases to be normalized with `time_interval.start`.
+  - Prefer a single best time for single-time questions.
+  - Forbid merging conflicting dates from multiple similar candidates.
+  - Treat `evidence_package` as primary evidence and use `backup_candidates` only when needed.
+- Make LLM-judge parsing more robust.
+  - The judge prompt now asks for JSON only, with no explanation.
+  - Malformed or truncated judge responses are retried once.
+  - If parsing still fails, the item is counted as wrong instead of crashing the whole evaluation.
+
+### Expected Effect
+
+- Reduce answers like `last Friday`, `last year`, or multiple conflicting dates when an absolute or anchored time answer is required.
+- Prevent evaluation runs from stopping on malformed judge outputs such as a truncated `{"`.
+
 ## v106-20260630
 
 ### Goal

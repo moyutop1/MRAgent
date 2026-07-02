@@ -401,7 +401,14 @@ Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
 - For list questions, return a concise comma-separated list.
-- For time questions, combine rewrite_content temporal phrases with time_interval conversation-time anchors when needed.
+- Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.
+- For time questions, always normalize the answer using rewrite_content plus the evidence time_interval.start anchor.
+- For time questions, do not answer only with relative phrases such as "yesterday", "last Friday", "last week", "last year", "next month", or "two days ago" when time_interval.start is available.
+- For a single-time question, return exactly one best time expression, not a list of multiple candidate dates.
+- If the question asks for an exact date, output an absolute date like "2023-07-10" or "10 July 2023".
+- If the gold-style answer is naturally relative to a known anchor, normalize it, e.g. "the Friday before 14 August 2023" or "the week before 3 July 2023".
+- Use these conversions with time_interval.start as the conversation date: yesterday = start - 1 day; two days ago = start - 2 days; last week = the week before start; last Friday = the nearest Friday before start; next month = the month after start.
+- When multiple candidates mention similar events, choose the one whose entity, event type, month/season, and wording best match the question; do not merge conflicting times.
 - Do not use planned-only evidence to answer a historical/completed question unless paired with historical evidence.
 - If evidence_package has answer_items or backup_candidates, make the best answer supported by them instead of saying "no information available".
 - Use "no information available" only when there is no relevant evidence at all.

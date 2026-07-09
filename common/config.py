@@ -14,6 +14,9 @@ parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / 
 parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
 parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged per rewrite call. 1=per-session (key=session_i, compatible with existing files/per-session readers); >1=merged (key=session_first-session_last)")
+parser.add_argument("--rewrite_window_size", type=int, default=int(os.getenv("REWRITE_WINDOW_SIZE", "40")), help="Dialogue turns per session-local rewrite compression window.")
+parser.add_argument("--rewrite_overlap_size", type=int, default=int(os.getenv("REWRITE_OVERLAP_SIZE", "2")), help="Dialogue turns repeated between adjacent rewrite compression windows.")
+parser.add_argument("--rewrite_previous_limit", type=int, default=int(os.getenv("REWRITE_PREVIOUS_LIMIT", "3")), help="Previous compressed memories shown to the next rewrite window for deduplication.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
 parser.add_argument("--query_key_mode", choices=["inventory", "extract"], default=os.getenv("QUERY_KEY_MODE", "inventory"), help="Question-key strategy: select from stored keys or freely extract keywords.")
@@ -185,6 +188,15 @@ if EAES_QUERY_ATTRIBUTE_LIMIT <= 0:
 qu = args.qu
 ca = args.ca
 LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call
+REWRITE_WINDOW_SIZE = args.rewrite_window_size
+if REWRITE_WINDOW_SIZE <= 0:
+    raise ValueError("--rewrite_window_size must be a positive integer.")
+REWRITE_OVERLAP_SIZE = args.rewrite_overlap_size
+if REWRITE_OVERLAP_SIZE < 0 or REWRITE_OVERLAP_SIZE >= REWRITE_WINDOW_SIZE:
+    raise ValueError("--rewrite_overlap_size must be >= 0 and smaller than --rewrite_window_size.")
+REWRITE_PREVIOUS_LIMIT = args.rewrite_previous_limit
+if REWRITE_PREVIOUS_LIMIT < 0:
+    raise ValueError("--rewrite_previous_limit must be non-negative.")
 
 dataset = args.data
 DATASET = dataset

@@ -404,7 +404,11 @@ class MemorySystem:
             else:
                 event_origin = self.episode_events[event_id].origin
 
+            source_origins = re.findall(r"D\d+:\d+", event_origin)
+            event_origin = source_origins[0] if source_origins else event_origin
             m = pattern.match(event_origin)
+            if not m:
+                return json.dumps(event_text, ensure_ascii=False), origin_list
             prefix, n = m.group(1), int(m.group(2))
             # [fix, option B] under LM user-only filtering, n+-1 lands on the filtered-out assistant turn (raw_text only has user's odd turns),
             # the original `id + ":" + None` crashed. Instead, find the nearest actually-existing previous/next turn in raw_text (i.e. the previous/next user utterance).
@@ -417,10 +421,11 @@ class MemorySystem:
             if prev_id is not None:
                 event_text.append(prev_id + ":" + session_turns.get(prev_id))
                 origin_list.append(prev_id)
-            _cur = session_turns.get(event_origin)
-            if _cur is not None:
-                event_text.append(event_origin + ":" + _cur)
-                origin_list.append(event_origin)
+            for source_origin in source_origins or [event_origin]:
+                _cur = session_turns.get(source_origin)
+                if _cur is not None:
+                    event_text.append(source_origin + ":" + _cur)
+                    origin_list.append(source_origin)
             if next_id is not None:
                 event_text.append(next_id + ":" + session_turns.get(next_id))
                 origin_list.append(next_id)

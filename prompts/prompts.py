@@ -15,18 +15,21 @@ class Prompts:
 
 
 
-    REWRITE_SYSTEM_PROMPT = """You are a dialogue processor. Only output valid JSON.
+    REWRITE_SYSTEM_PROMPT = """You are a memory compressor for long-term conversational memory. Only output valid JSON.
 TASK:
-- For each sentence:
-  1. Replace ALL pronouns ("I", "you", "he", "she", "it", "they", "we", "this", "that", "these", "those", "the", "the xx", "one") with explicit entities, events or noun phrases from the conversation context, such as "the event"->"charity race".  
-  2. Do NOT modify verbs, adjectives, or other words. Only replace pronouns. 
-  3. Use a short concrete noun to describe what the speaker is talking about in "tag", e.g. Movie Preference, Hobbies. No more than two words. 
-  4. If a sentence uses a relative time (e.g., 'yesterday', 'next Monday', 'in two days', 'last summer'), compute the absolute calendar date based on conversation_time and output 'YYYY-MM-DD'. If the sentence includes a precise absolute date already, output that date. If time refers to a period, output the midpoint date 'YYYY-MM-DD'. If no time is mentioned, output the conversation date (YYYY-MM-DD).
-  5. If a sentence ends with a question, merge the question content into the next sentence that provides an answer to complete sentence information.
-  6. Never omit or miss any sentence.
-- Topics:derive at least ten concrete topics overall (short sentences). Assign topic IDs (t1..tn). In each sentence, fill 'topic' with a list of topic IDs that apply; use [] if none
-- Personal information: extract person-related facts (preferences, roles, schedules, background, relations, attributes) into 'personal_sentences'. If a fact is already in a sentence, also duplicate a concise normalized version here.
-- "id" in "sentence" is combination of "origin" and number. The "origin" must exactly correspond to the "dia_id" field in the "Dialogue". Do not create or invent new ids.
+- Convert the dialogue window into compact rewrite memories, not a sentence-by-sentence transcript.
+- Keep only answer-bearing information: user-specific facts, preferences, plans, completed events, times, places, people, relationships, decisions, task outcomes, and image/caption facts.
+- Drop low-value content: greetings, acknowledgements, boilerplate, generic advice, repeated confirmations, and assistant text that contains no user-specific fact or task result.
+- Each memory in "sentence" must be self-contained, explicit, and useful without the raw dialogue context.
+- Resolve all pronouns ("I", "you", "he", "she", "it", "they", "we", "this", "that", "these", "those") into concrete people, objects, events, or noun phrases from the window.
+- Normalize relative time using conversation_time and output "time" as YYYY-MM-DD. If no event time is mentioned, use conversation_time.
+- If several adjacent turns describe the same fact/event, merge them into one dense memory.
+- Use "origin" as a comma-separated list of the exact source dia_id values copied from this window, e.g. "D1:12,D1:13". Do not invent source ids.
+- Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
+- The "id" field may be any valid placeholder matching the first source id, because code will rewrite ids deterministically after validation.
+- Use PREVIOUS_REWRITE_MEMORIES only to avoid repeating already-written memories; do not copy them unless this window adds new information.
+- Topics: derive concrete topic summaries from the memories in this window. Assign topic IDs (t1..tn). In each memory, fill "topic" with topic IDs that apply; use [] if none.
+- Personal information: extract person-related stable facts into "personal_sentences". If a fact is already in a memory, also duplicate a concise normalized version here.
 Schema:
 {
   "conversation_time":"YYYY-MM-DD",
@@ -54,15 +57,21 @@ Schema:
 }
     """
 
-    REWRITE_PROMPT = """Dialogue:
-        <<<
-        {RAW_TEXT}
-        >>>"""
+    REWRITE_PROMPT = """PREVIOUS_REWRITE_MEMORIES:
+<<<
+{PREVIOUS_MEMORIES}
+>>>
+
+Dialogue:
+<<<
+{RAW_TEXT}
+>>>"""
 
     @classmethod
-    def extract_rewrite_prompt(cls, raw_text: str) -> str:
+    def extract_rewrite_prompt(cls, raw_text: str, previous_memories: str = "[]") -> str:
         return cls.REWRITE_PROMPT.format(
             RAW_TEXT=raw_text,
+            PREVIOUS_MEMORIES=previous_memories,
         )
 
 

@@ -12,7 +12,6 @@ SCHEMA = {
     },
     "sentence": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "required": ["id", "text", "tag", "origin", "topic", "time"],
@@ -30,7 +29,7 @@ SCHEMA = {
           },
           "origin": {
             "type": "string",
-            "pattern": "^D\\d+:\\d+$",
+            "pattern": "^D\\d+:\\d+(,\\s*D\\d+:\\d+)*$",
           },
           "topic": {
             "type": "array",
@@ -63,7 +62,6 @@ KEY_SCHEMA = {
   "properties": {
     "sentence": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "required": ["sentence_id", "keyword"],
@@ -88,7 +86,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple, Set
 
 ID_RE = re.compile(r'^D\d+:\d+-\d+$')
-ORIGIN_RE = re.compile(r'^D\d+:\d+$')
+ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
 DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 
 
@@ -99,7 +97,7 @@ def check_rewrite_json(text, dialogue_text):
 
   validator = Draft202012Validator(schema)
   ID_RE = re.compile(r'^D\d+:\d+-\d+$')
-  ORIGIN_RE = re.compile(r'^D\d+:\d+$')
+  ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
   DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 
   # Step 1: Schema validation
@@ -128,16 +126,23 @@ def check_rewrite_json(text, dialogue_text):
       msg = f"sentence[{i}].origin format error: {origin}"
       return False, msg
 
-    # 3) Check origin == id prefix
-    prefix = sid.split("-")[0]
-    if origin != prefix:
-      msg = f"sentence[{i}]: origin({origin}) ≠ id prefix({prefix})"
+    origin_ids = [x.strip() for x in origin.split(",") if x.strip()]
+    if not origin_ids:
+      msg = f"sentence[{i}].origin has no source ids: {origin}"
       return False, msg
 
-    # 4) If dialogue_text is provided, check dia_id existence
-    if allowed and prefix not in allowed:
-      msg = f"sentence[{i}]: id prefix({prefix}) not found in allowed dia_id list"
+    # 3) Check first origin == id prefix
+    prefix = sid.split("-")[0]
+    if origin_ids[0] != prefix:
+      msg = f"sentence[{i}]: first origin({origin_ids[0]}) != id prefix({prefix})"
       return False, msg
+
+    # 4) If dialogue_text is provided, check all source dia_ids exist
+    if allowed:
+      missing = [oid for oid in origin_ids if oid not in allowed]
+      if missing:
+        msg = f"sentence[{i}]: origin ids not found in allowed dia_id list: {missing}"
+        return False, msg
 
   return True, ""
 

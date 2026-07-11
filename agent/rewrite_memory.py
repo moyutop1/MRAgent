@@ -147,8 +147,8 @@ def _merge_window_rewrites(window_outputs: List[dict], conversation_time: str):
     for out in window_outputs:
         if not isinstance(out, dict):
             continue
-        if out.get("conversation_time"):
-            merged["conversation_time"] = out.get("conversation_time")
+        # Keep the session-level anchor parsed from the raw session text.
+        # Window LLM outputs may confuse event dates with conversation_time.
         topic_map = {}
         for old_tid, topic_text in (out.get("topics") or {}).items():
             if not topic_text:

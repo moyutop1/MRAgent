@@ -1,6 +1,7 @@
 import json
 import re
 from collections import defaultdict
+from datetime import datetime
 from typing import List
 
 from common import config
@@ -55,8 +56,25 @@ def _dialogue_turn_lines(text: str):
 
 
 def _conversation_time_from_text(text: str):
-    m = re.search(r"^\s*time\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", str(text or ""), re.MULTILINE)
-    return m.group(1) if m else None
+    m = re.search(r"^\s*time\s*:\s*(.+?)\s*$", str(text or ""), re.MULTILINE)
+    if not m:
+        return None
+    raw_time = m.group(1).strip()
+    iso = re.search(r"\b([0-9]{4}-[0-9]{2}-[0-9]{2})\b", raw_time)
+    if iso:
+        return iso.group(1)
+    for fmt in ("%I:%M %p on %d %B, %Y", "%I:%M%p on %d %B, %Y", "%d %B, %Y"):
+        try:
+            return datetime.strptime(raw_time, fmt).date().isoformat()
+        except ValueError:
+            pass
+    m2 = re.search(r"\bon\s+(\d{1,2}\s+[A-Za-z]+,\s+\d{4})\b", raw_time, re.IGNORECASE)
+    if m2:
+        try:
+            return datetime.strptime(m2.group(1), "%d %B, %Y").date().isoformat()
+        except ValueError:
+            return None
+    return None
 
 
 def _window_turns(turns: List[str]):

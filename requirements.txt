@@ -8,6 +8,6 @@ regex==2022.4.24
 jsonschema==4.25.1       # rewrite / keyword JSON-schema validation
 python-dotenv==1.1.1     # load DEEPSEEK_API_KEY / local embedding settings from .env
 tqdm==4.67.1
+nltk==3.9.1              # EAES lexical stemming and evaluation metrics
 
 # Evaluation only (eval/*.py)
-nltk==3.9.1

@@ -6,6 +6,7 @@ from datetime import date
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 import numpy as np
+from nltk.stem import PorterStemmer
 from common import config
 from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
@@ -13,6 +14,8 @@ from llm.controller import LLM
 from memory.system import MemorySystem
 import logging
 logger = logging.getLogger(__name__)
+
+_EAES_STEMMER = PorterStemmer()
 
 class MemoryController:
     """Wraps your storage; replace with your own DB/vector/graph implementation."""
@@ -131,7 +134,11 @@ class MemoryController:
     @staticmethod
     def _eaes_words(text: str) -> Set[str]:
         text = MemoryController._snake_norm(text).replace("_", " ")
-        return set(t for t in text.split() if t)
+        # EAES lexical matching is about concepts, not English tense/aspect.
+        # Stem both the query and memory sides so variants such as
+        # camp/camped/camping contribute to the same score; temporal state is
+        # scored independently by the lifecycle component.
+        return {_EAES_STEMMER.stem(t) for t in text.split() if t}
 
     @staticmethod
     def _eaes_overlap_score(left: Set[str], right: Set[str]) -> float:

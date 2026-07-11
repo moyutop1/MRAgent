@@ -147,7 +147,8 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--model` | chat model short name (`gemini` / `claude` / `gpt4o` / `qwen`) | `gemini` |
 | `--file` | run/experiment tag appended to result filenames | `0` |
 | `--sample` | (LoCoMo) run a single sample id, e.g. `42`; omit to run all | `None` |
-| `--max_questions` | run at most the first N questions per selected sample | `None` |
+| `--max_questions` | run at most the first N questions per selected sample after category filtering | `None` |
+| `--exclude_categories` | comma-separated question categories to skip, e.g. `5` | none |
 | `--ca` | (LM) category index: `0`=multi-session, `1`=single-session-user, `2`=temporal-reasoning | `1` |
 | `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
 | `--workers` | concurrent question workers per selected sample | `10` |

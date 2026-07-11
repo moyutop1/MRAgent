@@ -9,7 +9,8 @@ parser.add_argument("--data", type=str, default="locomo", help="Dataset name, e.
 parser.add_argument("--model", type=str, default="gemini", help="Model name, e.g., gemini / deepseek / ofox")
 parser.add_argument("--file", type=str, default="0", help="Run/experiment tag appended to result filenames")
 parser.add_argument("--sample", type=int, default=None, help="Sample id to run (e.g. 42). Omit to run all samples.")
-parser.add_argument("--max_questions", type=int, default=None, help="Run at most the first N questions per selected sample.")
+parser.add_argument("--max_questions", type=int, default=None, help="Run at most the first N questions per selected sample after category filtering.")
+parser.add_argument("--exclude_categories", type=str, default=os.getenv("EXCLUDE_CATEGORIES", ""), help="Comma-separated question categories to skip, e.g. 5 or 3,5.")
 parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
@@ -161,6 +162,9 @@ sample_id = args.sample
 MAX_QUESTIONS = args.max_questions
 if MAX_QUESTIONS is not None and MAX_QUESTIONS <= 0:
     raise ValueError("--max_questions must be a positive integer.")
+EXCLUDED_CATEGORIES = {
+    item.strip() for item in str(args.exclude_categories or "").split(",") if item.strip()
+}
 QUESTION_WORKERS = args.workers
 if QUESTION_WORKERS <= 0:
     raise ValueError("--workers must be a positive integer.")
@@ -211,6 +215,7 @@ ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
 ADDITIONAL_RE = (
     f"_{args.model}_{args.file}"
     f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
+    f"{'_xcat' + '-'.join(sorted(EXCLUDED_CATEGORIES)) if EXCLUDED_CATEGORIES else ''}"
     f"{'_eaes' if EAES_MODE else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"

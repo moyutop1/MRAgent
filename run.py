@@ -28,14 +28,30 @@ from data.embed_rewrite import embed_sample
 
 logger = logging.getLogger(__name__)
 
+
+def _select_question_rows(question_list, sample_id):
+    rows = list(enumerate(question_list[sample_id], start=1))
+    if config.EXCLUDED_CATEGORIES:
+        before = len(rows)
+        rows = [
+            (question_index, qa)
+            for question_index, qa in rows
+            if str(qa.get("category")) not in config.EXCLUDED_CATEGORIES
+        ]
+        logger.info(
+            f"Excluded categories {sorted(config.EXCLUDED_CATEGORIES)} for {sample_id}: "
+            f"kept {len(rows)}/{before} questions."
+        )
+    if config.MAX_QUESTIONS is not None:
+        rows = rows[:config.MAX_QUESTIONS]
+        logger.info(f"Limiting {sample_id} to first {len(rows)} selected questions.")
+    return rows
+
 def get_question(dataset, agent, question_list, sample_id, memory, result_path, question_embeddings=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
     logger.info(f"---------------{sample_id}-------------------")
 
-    qa_list = question_list[sample_id]
-    if config.MAX_QUESTIONS is not None:
-        qa_list = qa_list[:config.MAX_QUESTIONS]
-        logger.info(f"Limiting {sample_id} to first {len(qa_list)} questions.")
+    question_rows = _select_question_rows(question_list, sample_id)
     memory_system = agent.memory  # shared read-only after store_raw_text / store_keyword
 
     # resumable: use the line count of result_path as the cursor, skip already-done questions
@@ -43,13 +59,13 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
     if os.path.exists(result_path):
         with open(result_path, encoding="utf-8") as _f:
             done_count = sum(1 for line in _f if line.strip())
-    if done_count >= len(qa_list):
-        logger.info(f"All {len(qa_list)} questions already done for {sample_id}, skipping.")
+    if done_count >= len(question_rows):
+        logger.info(f"All {len(question_rows)} questions already done for {sample_id}, skipping.")
         return
     if done_count > 0:
         logger.info(f"Resuming {sample_id} from question {done_count + 1} (already done: {done_count})")
 
-    remaining = list(enumerate(qa_list, start=1))[done_count:]
+    remaining = question_rows[done_count:]
 
     def _run_one_question(i, qa):
         category = qa.get("category")
@@ -79,12 +95,14 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
                 "answer": qa.get("answer"), "prediction": "ERROR", "category": category,
                 "evidence": evidence_labels, "question": qa.get("question"),
                 "prediction_context": [], "sample": sample_id,
+                "question_index": i,
             }
 
         evaluation = {
             "answer": qa.get("answer"), "prediction": results, "category": category,
             "evidence": evidence_labels, "question": qa.get("question"),
             "prediction_context": evidence_support, "sample": sample_id,
+            "question_index": i,
         }
         return i, evaluation
 
@@ -160,23 +178,20 @@ def _retrieval_metrics(gold_evidence, retrieved_origins):
 
 def get_question_retrieval(dataset, agent, question_list, sample_id, result_path, question_embeddings=None):
     logger.info(f"---------------retrieval-only {sample_id}-------------------")
-    qa_list = question_list[sample_id]
-    if config.MAX_QUESTIONS is not None:
-        qa_list = qa_list[:config.MAX_QUESTIONS]
-        logger.info(f"Limiting retrieval {sample_id} to first {len(qa_list)} questions.")
+    question_rows = _select_question_rows(question_list, sample_id)
 
     done_count = 0
     if os.path.exists(result_path):
         with open(result_path, encoding="utf-8") as _f:
             done_count = sum(1 for line in _f if line.strip())
-    if done_count >= len(qa_list):
-        logger.info(f"All {len(qa_list)} retrieval rows already done for {sample_id}, skipping.")
+    if done_count >= len(question_rows):
+        logger.info(f"All {len(question_rows)} retrieval rows already done for {sample_id}, skipping.")
         return
     if done_count > 0:
         logger.info(f"Resuming retrieval {sample_id} from question {done_count + 1} (already done: {done_count})")
 
     metric_rows = []
-    for i, qa in list(enumerate(qa_list, start=1))[done_count:]:
+    for i, qa in question_rows[done_count:]:
         category = qa.get("category")
         question = Agent.question_format(dataset, qa)
         override_question_time = None

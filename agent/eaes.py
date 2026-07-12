@@ -2,10 +2,7 @@
 import logging
 import re
 
-import numpy as np
-
 from common import config
-from common.utils import topk_answers_by_similarity
 from memory.system import EAESMemoryNote
 from prompts.prompts import Prompts
 
@@ -13,6 +10,17 @@ logger = logging.getLogger(__name__)
 
 
 class EAESMixin:
+    @staticmethod
+    def _eaes_query_question(question):
+        text = str(question or "").strip()
+        for suffix in (
+            " No extra explanations.",
+            " Give reasons with original text.",
+        ):
+            if text.endswith(suffix.strip()):
+                text = text[:-len(suffix.strip())].rstrip()
+        return text
+
     @staticmethod
     def _eaes_memory_id(event_id):
         return "M_" + re.sub(r"[^A-Za-z0-9]+", "_", event_id).strip("_")
@@ -250,150 +258,92 @@ class EAESMixin:
             plan["no_time_limit"] = False
         return plan
 
-    def parse_eaes_query(self, question, question_keys, question_emb=None):
-        if config.EAES_QUERY_MODE == "inventory":
-            inventory_query = self._parse_eaes_query_from_inventory(question, question_emb)
-            if inventory_query:
-                return self._postprocess_eaes_query_plan(question, inventory_query)
+    def parse_eaes_query(self, question, question_emb=None):
+        query_question = self._eaes_query_question(question)
         query_out = self.llm.chat_text(
             messages=[
                 {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps({"question": question}, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps({"question": query_question}, ensure_ascii=False)},
             ],
             model=config.RE_MODEL
         )
         if isinstance(query_out, dict):
-            return self._postprocess_eaes_query_plan(question, query_out)
-        if not isinstance(question_keys, dict):
-            question_keys = {}
-        key_items = self._as_list(question_keys.get("keywords"))
+            query_attributes = []
+            for value in self._as_list(query_out.get("query_attributes")):
+                value = str(value or "").strip()
+                if value and value not in query_attributes:
+                    query_attributes.append(value)
+            plan = {
+                "entities": self._as_list(query_out.get("entities")),
+                "query_attributes": query_attributes[:3] or [query_question],
+                "answer_type": query_out.get("answer_type", "unknown"),
+                "temporal_intent": query_out.get("temporal_intent", "none"),
+                "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
+                "keywords": self._as_list(query_out.get("keywords")),
+                "query_mode": "question_only",
+            }
+            return self._postprocess_eaes_query_plan(query_question, plan)
         fallback_query = {
-            "entities": [k.get("id") for k in key_items if isinstance(k, dict)],
-            "attribute_hints": [],
+            "entities": [],
+            "query_attributes": [query_question],
             "answer_type": "unknown",
             "temporal_intent": "none",
             "required_lifecycle": "unknown",
-            "keywords": [k.get("id") for k in key_items if isinstance(k, dict)],
+            "keywords": [],
+            "query_mode": "question_text_fallback",
         }
-        return self._postprocess_eaes_query_plan(question, fallback_query)
+        return self._postprocess_eaes_query_plan(query_question, fallback_query)
 
-    def _dense_eaes_note_ids(self, question_emb, k=None):
-        if question_emb is None:
+    def rerank_eaes_candidates(self, question, query_plan, candidates):
+        if not candidates:
             return []
-        ids, embs = [], []
-        for mid, note in self.memory.eaes_notes.items():
-            if note.embedding is None:
-                continue
-            ids.append(mid)
-            embs.append(note.embedding)
-        if not embs:
-            return []
-        top_ids, _, _, _ = topk_answers_by_similarity(
-            question_emb, np.vstack(embs), ids, k=k or config.EAES_QUERY_CANDIDATE_DENSE_K)
-        return top_ids
-
-    def _eaes_inventory_candidates(self, question, question_emb=None):
-        q_tokens = self._key_tokens(question)
-        dense_mids = self._dense_eaes_note_ids(question_emb, config.EAES_QUERY_CANDIDATE_DENSE_K)
-        entity_scores, attr_scores = {}, {}
-        entity_examples, attr_examples = {}, {}
-        entity_dense_hits = set()
-
-        def add_example(target, key, text):
-            if not key:
-                return
-            bucket = target.setdefault(key, [])
-            if len(bucket) < 2:
-                bucket.append(text[:220])
-
-        for rank, mid in enumerate(dense_mids):
-            note = self.memory.get_eaes_note(mid)
-            if note is None:
-                continue
-            weight = 2.0 / (rank + 1)
-            example = f"{note.event_id}: {note.rewrite_content}"
-            for entity in self._as_list(note.entities):
-                entity_scores[entity] = entity_scores.get(entity, 0.0) + weight
-                entity_dense_hits.add(entity)
-                add_example(entity_examples, entity, example)
-            for attr in self._as_list(note.attribute_paths):
-                attr_scores[attr] = attr_scores.get(attr, 0.0) + weight
-                add_example(attr_examples, attr, example)
-
-        for note in self.memory.eaes_notes.values():
-            note_entities = [str(entity) for entity in self._as_list(note.entities) if entity is not None]
-            note_attributes = [str(attr) for attr in self._as_list(note.attribute_paths) if attr is not None]
-            note_text = f"{note.rewrite_content} {' '.join(note_entities)} {' '.join(note_attributes)}"
-            text_tokens = self._key_tokens(note_text)
-            overlap = len(q_tokens & text_tokens)
-            if not overlap:
-                continue
-            example = f"{note.event_id}: {note.rewrite_content}"
-            for entity in note_entities:
-                entity_scores[entity] = entity_scores.get(entity, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
-                add_example(entity_examples, entity, example)
-            for attr in note_attributes:
-                attr_scores[attr] = attr_scores.get(attr, 0.0) + 1.0 + overlap / max(len(text_tokens), 1)
-                add_example(attr_examples, attr, example)
-
-        entity_records = [
-            {
-                "entity": entity,
-                "score": round(score, 4),
-                "source": "dense" if entity in entity_dense_hits else "lexical",
-                "examples": entity_examples.get(entity, []),
-            }
-            for entity, score in sorted(entity_scores.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
-        ][:config.EAES_QUERY_ENTITY_LIMIT]
-
-        attr_records = [
-            {
-                "attribute": attr,
-                "score": round(score, 4),
-                "examples": attr_examples.get(attr, []),
-            }
-            for attr, score in sorted(attr_scores.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
-        ][:config.EAES_QUERY_ATTRIBUTE_LIMIT]
-        return entity_records, attr_records
-
-    def _parse_eaes_query_from_inventory(self, question, question_emb=None):
-        entity_records, attr_records = self._eaes_inventory_candidates(question, question_emb)
-        if not entity_records and not attr_records:
-            return None
+        limit = min(config.EAES_RERANK_LIMIT, len(candidates))
+        rerank_input = {
+            "question": self._eaes_query_question(question),
+            "query_plan": query_plan,
+            "limit": limit,
+            "candidates": [
+                {
+                    "memory_id": candidate.get("memory_id"),
+                    "embedding_rank": candidate.get("rank"),
+                    "embedding_score": candidate.get("score"),
+                    "attribute_paths": candidate.get("attribute_paths"),
+                }
+                for candidate in candidates
+            ],
+        }
         out = self.llm.chat_text(
             messages=[
-                {"role": "system", "content": Prompts.EAES_QUERY_INVENTORY_SYSTEM_PROMPT},
-                {"role": "user", "content": Prompts.eaes_query_inventory_prompt(
-                    question,
-                    json.dumps(entity_records, ensure_ascii=False),
-                    json.dumps(attr_records, ensure_ascii=False),
-                )},
+                {"role": "system", "content": Prompts.EAES_ATTRIBUTE_RERANK_PROMPT},
+                {"role": "user", "content": json.dumps(rerank_input, ensure_ascii=False)},
             ],
             model=config.RE_MODEL,
         )
-        if not isinstance(out, dict):
-            return None
-        valid_entities = {r["entity"] for r in entity_records}
-        valid_attrs = {r["attribute"] for r in attr_records}
-        selected_entities = []
-        for entity in self._as_list(out.get("entities")):
-            if entity in valid_entities and entity not in selected_entities:
-                selected_entities.append(entity)
-        selected_attrs = []
-        for attr in self._as_list(out.get("attribute_hints")):
-            if attr in valid_attrs and attr not in selected_attrs:
-                selected_attrs.append(attr)
-        return {
-            "entities": selected_entities,
-            "attribute_hints": selected_attrs,
-            "answer_type": out.get("answer_type", "unknown"),
-            "temporal_intent": out.get("temporal_intent", "none"),
-            "required_lifecycle": out.get("required_lifecycle", "unknown"),
-            "keywords": self._as_list(out.get("keywords")),
-            "query_mode": "inventory",
-            "entity_candidate_count": len(entity_records),
-            "attribute_candidate_count": len(attr_records),
-        }
+        by_id = {candidate.get("memory_id"): candidate for candidate in candidates}
+        ordered_ids = []
+        if isinstance(out, dict):
+            for memory_id in self._as_list(out.get("ranked_memory_ids")):
+                if memory_id in by_id and memory_id not in ordered_ids:
+                    ordered_ids.append(memory_id)
+                if len(ordered_ids) >= limit:
+                    break
+        llm_selected_ids = set(ordered_ids)
+        for candidate in candidates:
+            memory_id = candidate.get("memory_id")
+            if memory_id and memory_id not in ordered_ids:
+                ordered_ids.append(memory_id)
+            if len(ordered_ids) >= limit:
+                break
+
+        reranked = []
+        for rerank_rank, memory_id in enumerate(ordered_ids[:limit], start=1):
+            item = dict(by_id[memory_id])
+            item["embedding_rank"] = item.get("rank")
+            item["rerank_rank"] = rerank_rank
+            item["rerank_source"] = "llm" if memory_id in llm_selected_ids else "embedding_fill"
+            item["rank"] = rerank_rank
+            reranked.append(item)
+        return reranked
 
     def _enrich_eaes_package(self, package):
         if not isinstance(package, dict):
@@ -449,7 +399,7 @@ class EAESMixin:
         selection_input = {
             "question": question,
             "query_plan": query_plan,
-            "candidates": candidates[:config.EAES_SELECTION_LIMIT],
+            "candidates": candidates,
         }
         package = self.llm.chat_text(
             messages=[
@@ -478,10 +428,12 @@ class EAESMixin:
         return enriched
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
-        question_keys = self.extract_question_keys(question, question_emb)
-        query_plan = self.parse_eaes_query(question, question_keys, question_emb)
-        candidates = self.memory_controller.retrieve_eaes_candidates(
+        query_plan = self.parse_eaes_query(question, question_emb)
+        embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
             query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+        if not embedding_candidates:
+            return "no information available", []
+        candidates = self.rerank_eaes_candidates(question, query_plan, embedding_candidates)
         if not candidates:
             return "no information available", []
         evidence_package = self.select_eaes_evidence(question, query_plan, candidates)

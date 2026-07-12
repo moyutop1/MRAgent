@@ -154,7 +154,8 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
-| `--eaes_query_mode` | EAES query strategy (`inventory` selects from existing entities/attributes; `extract` freely parses) | `inventory` |
+| `--eaes_prefilter_limit` | attribute-embedding candidates retained before LLM reranking | `120` |
+| `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
 
 ### 5.2 LoCoMo
 
@@ -176,7 +177,7 @@ python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --ma
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
 
 # entity-attribute-memory retrieval diagnostics
-python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_query_mode inventory
+python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
 
 # compare against the older free keyword extraction path

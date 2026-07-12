@@ -71,15 +71,25 @@ class RetrievalMixin:
             query_plan, question_emb, limit=None, include_rank=True)
         by_memory_id = {item.get("memory_id"): item for item in ranked if item.get("memory_id")}
         by_event_id = {item.get("event_id"): item for item in ranked if item.get("event_id")}
+        prefilter_candidates = self._as_list(retrieval.get("prefilter_candidates"))
+        prefilter_memory_ids = {
+            item.get("memory_id") for item in prefilter_candidates if isinstance(item, dict)
+        }
+        reranked_candidates = self._as_list(retrieval.get("candidates"))
+        reranked_by_memory_id = {
+            item.get("memory_id"): item for item in reranked_candidates
+            if isinstance(item, dict) and item.get("memory_id")
+        }
         retrieved_memory_ids = {
-            item.get("memory_id") for item in self._as_list(retrieval.get("candidates")) if isinstance(item, dict)
+            item.get("memory_id") for item in reranked_candidates if isinstance(item, dict)
         }
         retrieved_event_ids = {
             item for item in self._as_list(retrieval.get("retrieved_event_ids")) if item
         }
 
         diagnostics = {
-            "candidate_limit": config.EAES_CANDIDATE_LIMIT,
+            "prefilter_limit": config.EAES_CANDIDATE_LIMIT,
+            "rerank_limit": config.EAES_RERANK_LIMIT,
             "total_scored_memories": len(ranked),
             "gold_origins": [],
         }
@@ -96,8 +106,12 @@ class RetrievalMixin:
                     "event_id": None,
                     "memory_id": None,
                     "indexed": False,
+                    "in_embedding_topk": False,
+                    "in_llm_topk": False,
                     "in_retrieved_candidates": False,
                     "candidate_rank": None,
+                    "embedding_rank": None,
+                    "rerank_rank": None,
                     "candidate_score": None,
                     "score_parts": None,
                     "entities": [],
@@ -111,6 +125,8 @@ class RetrievalMixin:
                 note = self.memory.get_eaes_note(memory_id) if memory_id else None
                 scored = by_memory_id.get(memory_id) or by_event_id.get(event_id)
                 rank = scored.get("rank") if scored else None
+                reranked = reranked_by_memory_id.get(memory_id)
+                rerank_rank = reranked.get("rerank_rank") if reranked else None
                 neighbor_window = []
                 if rank is not None:
                     start = max(0, rank - window - 1)
@@ -128,8 +144,12 @@ class RetrievalMixin:
                     "event_id": event_id,
                     "memory_id": memory_id,
                     "indexed": note is not None,
+                    "in_embedding_topk": memory_id in prefilter_memory_ids,
+                    "in_llm_topk": memory_id in reranked_by_memory_id,
                     "in_retrieved_candidates": memory_id in retrieved_memory_ids or event_id in retrieved_event_ids,
                     "candidate_rank": rank,
+                    "embedding_rank": rank,
+                    "rerank_rank": rerank_rank,
                     "candidate_score": scored.get("score") if scored else None,
                     "score_parts": scored.get("score_parts") if scored else None,
                     "entities": note.entities if note is not None else [],
@@ -138,9 +158,10 @@ class RetrievalMixin:
                     "nearby_ranked_candidates": neighbor_window,
                     "drop_reason": (
                         "not_built_in_eaes_memory" if note is None else
-                        "not_scored_by_query_plan" if scored is None else
-                        "rank_beyond_candidate_limit" if rank and rank > config.EAES_CANDIDATE_LIMIT else
-                        "inside_candidate_limit"
+                        "not_scored_by_query_attributes" if scored is None else
+                        "rank_beyond_embedding_topk" if rank and rank > config.EAES_CANDIDATE_LIMIT else
+                        "dropped_by_llm_reranker" if memory_id not in reranked_by_memory_id else
+                        "inside_llm_topk"
                     ),
                 })
             covered_by_retrieval = any(
@@ -150,16 +171,22 @@ class RetrievalMixin:
                 entry["candidate_rank"] for entry in memory_entries
                 if entry["candidate_rank"] is not None
             ]
+            rerank_values = [
+                entry["rerank_rank"] for entry in memory_entries
+                if entry["rerank_rank"] is not None
+            ]
             if not event_ids:
                 origin_drop_reason = "gold_origin_not_in_episode_events"
             elif not memory_ids:
                 origin_drop_reason = "no_gold_memory_built_for_origin"
             elif covered_by_retrieval:
-                origin_drop_reason = "inside_candidate_limit"
+                origin_drop_reason = "inside_llm_topk"
             elif rank_values and min(rank_values) > config.EAES_CANDIDATE_LIMIT:
-                origin_drop_reason = "rank_beyond_candidate_limit"
+                origin_drop_reason = "rank_beyond_embedding_topk"
+            elif rank_values:
+                origin_drop_reason = "dropped_by_llm_reranker"
             else:
-                origin_drop_reason = "not_scored_by_query_plan"
+                origin_drop_reason = "not_scored_by_query_attributes"
 
             diagnostics["gold_origins"].append({
                 "origin": origin,
@@ -168,6 +195,8 @@ class RetrievalMixin:
                 "covered_by_retrieval": covered_by_retrieval,
                 "drop_reason": origin_drop_reason,
                 "best_rank": min(rank_values, default=None),
+                "best_embedding_rank": min(rank_values, default=None),
+                "best_rerank_rank": min(rerank_values, default=None),
                 "memories": memory_entries,
             })
         return diagnostics
@@ -193,23 +222,32 @@ class RetrievalMixin:
                                    override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
         """Return retrieval candidates without generating a final answer."""
         if config.EAES_MODE:
-            question_keys = self.extract_question_keys(question, question_emb)
-            query_plan = self.parse_eaes_query(question, question_keys, question_emb)
-            candidates = self.memory_controller.retrieve_eaes_candidates(
+            query_plan = self.parse_eaes_query(question, question_emb)
+            embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
                 query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+            candidates = self.rerank_eaes_candidates(question, query_plan, embedding_candidates)
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
             origins = self._unique_keep_order(
                 [c.get("origin") for c in candidates] or self._origins_for_event_ids(event_ids)
             )
             if not origins:
                 origins = self._origins_for_event_ids(event_ids)
+            prefilter_event_ids = self._unique_keep_order(
+                [c.get("event_id") for c in embedding_candidates]
+            )
+            prefilter_origins = self._unique_keep_order(
+                [c.get("origin") for c in embedding_candidates]
+                or self._origins_for_event_ids(prefilter_event_ids)
+            )
             return {
                 "mode": "eaes",
-                "question_keys": question_keys,
                 "query_plan": query_plan,
                 "retrieved_event_ids": event_ids,
                 "retrieved_origins": origins,
                 "candidates": candidates,
+                "prefilter_event_ids": prefilter_event_ids,
+                "prefilter_origins": prefilter_origins,
+                "prefilter_candidates": embedding_candidates,
             }
 
         self.memory_controller.question_emb = question_emb

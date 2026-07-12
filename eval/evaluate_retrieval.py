@@ -66,6 +66,9 @@ def main():
         return
 
     print_group("OVERALL", rows)
+    if any("prefilter_metrics" in r for r in rows):
+        print_group("OVERALL embedding prefilter", rows, "prefilter_metrics")
+        print_group("OVERALL LLM rerank", rows, "combined_metrics")
     if any("graph_metrics" in r for r in rows):
         print_group("OVERALL graph", rows, "graph_metrics")
         print_group("OVERALL dense", rows, "dense_metrics")
@@ -75,6 +78,9 @@ def main():
         by_cat[row.get("category")].append(row)
     for cat in sorted(by_cat, key=str):
         print_group(f"category={cat}", by_cat[cat])
+        if any("prefilter_metrics" in r for r in by_cat[cat]):
+            print_group(f"category={cat} embedding prefilter", by_cat[cat], "prefilter_metrics")
+            print_group(f"category={cat} LLM rerank", by_cat[cat], "combined_metrics")
         if any("graph_metrics" in r for r in by_cat[cat]):
             print_group(f"category={cat} graph", by_cat[cat], "graph_metrics")
             print_group(f"category={cat} dense", by_cat[cat], "dense_metrics")

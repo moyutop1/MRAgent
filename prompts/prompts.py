@@ -278,7 +278,7 @@ Extract fields for answer-oriented evidence selection.
 Schema:
 {
   "entities": ["person or entity names"],
-  "attribute_hints": ["semantic.attribute.path"],
+  "query_attributes": ["semantic.path: question-side relation clause"],
   "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
   "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
   "required_lifecycle": "planned | current | historical | unknown",
@@ -290,7 +290,9 @@ Rules:
 - Use "planned" when the question asks about intentions, plans, scheduled future events, or going to do something.
 - Use "current" when the question asks about now, currently, still, preferences, roles, residence, or ongoing state.
 - Use "unknown" with no_time_limit=true for stable fact/profile questions without an explicit temporal or event constraint, such as identity, relationship status, preferences, interests, activities, membership, allyship, career fields, or kinds/types of art.
-- attribute_hints should be copied from inventory when available; each useful hint should be a compact relation clause like "event.attendance: Caroline attended an LGBTQ support group on 2023-05-07", not a bare keyword.
+- Generate 1-3 query_attributes using only the question. Never use or assume an answer.
+- Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
+- Keep named entities and concrete relation words from the question. Do not output bare keywords.
 - Do not answer the question."""
 
     EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
@@ -329,48 +331,16 @@ Schema:
     def eaes_index_prompt(cls, memories: str) -> str:
         return cls.EAES_INDEX_USER_PROMPT.format(MEMORIES=memories)
 
-    EAES_QUERY_INVENTORY_SYSTEM_PROMPT = """You choose retrieval entry points from an existing entity-attribute memory inventory. Only output valid JSON.
-Rules:
-- Choose entities only from CANDIDATE_ENTITIES "entity" values. Copy exactly.
-- Choose attribute_hints only from CANDIDATE_ATTRIBUTES "attribute" values. Copy exactly.
-- Do not invent, paraphrase, stem, or normalize entities/attributes.
-- Prefer entity + attribute combinations that are likely to retrieve answer-bearing memories.
-- Prefer natural-language relation clauses over keyword/tag/topic-like attributes; a good attribute_hint should read like a short evidence sentence.
-- If the question asks for a field, career, education, interest, plan, or preference, select concrete attributes with similar meaning even if wording differs.
-- Return 1-6 entities when useful and 1-10 attribute_hints when useful.
-- Use keywords only for important residual lexical constraints from the question.
-- Use required_lifecycle="unknown" and no_time_limit=true for stable fact/profile questions without an explicit temporal or event constraint, such as identity, relationship status, preferences, interests, activities, membership, allyship, career fields, or kinds/types of art.
-- If no candidate is useful, return empty entities/attribute_hints but still infer answer_type and lifecycle.
-
+    EAES_ATTRIBUTE_RERANK_PROMPT = """You rerank memory candidates using structured attributes. Only output valid JSON.
+Use only the question, query_attributes, memory attribute_paths, and embedding rank/score.
+Do not answer the question. Do not invent memory IDs.
+Prefer memories whose attributes directly contain the relation needed to fill the question's answer slot.
+Keep complementary attribute evidence for multi-hop and list questions.
+Return memory IDs in descending relevance order, with at most the requested limit.
 Schema:
 {
-  "entities": ["exact candidate entity"],
-  "attribute_hints": ["exact candidate attribute"],
-  "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
-  "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
-  "required_lifecycle": "planned | current | historical | unknown",
-  "no_time_limit": true,
-  "keywords": ["important lexical constraints"]
+  "ranked_memory_ids": ["M_D1_2_1"]
 }"""
-
-    EAES_QUERY_INVENTORY_USER_PROMPT = """QUESTION:
-<<<
-{QUESTION}
->>>
-
-CANDIDATE_ENTITIES:
-{ENTITIES}
-
-CANDIDATE_ATTRIBUTES:
-{ATTRIBUTES}"""
-
-    @classmethod
-    def eaes_query_inventory_prompt(cls, question: str, entities: str, attributes: str) -> str:
-        return cls.EAES_QUERY_INVENTORY_USER_PROMPT.format(
-            QUESTION=question,
-            ENTITIES=entities,
-            ATTRIBUTES=attributes,
-        )
 
     EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.
 Goal: select valid answer evidence, not merely related memories.

@@ -117,6 +117,7 @@ class EAESMemoryNote:
             event_lifecycle: str,
             origin: str,
             embedding=None,
+            retrieval_embedding=None,
     ):
         self.memory_id = memory_id
         self.event_id = event_id
@@ -128,6 +129,7 @@ class EAESMemoryNote:
         self.event_lifecycle = event_lifecycle
         self.origin = origin
         self.embedding = embedding
+        self.retrieval_embedding = retrieval_embedding
 
     def to_dict(self, include_raw: bool = False):
         data = {

@@ -209,6 +209,10 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 gold_memory_diagnostics = agent.diagnose_eaes_gold_memories(
                     qa.get("evidence"), retrieval, question_emb)
             metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("retrieved_origins"))
+            prefilter_metrics = (
+                _retrieval_metrics(qa.get("evidence"), retrieval.get("prefilter_origins"))
+                if retrieval.get("mode") == "eaes" else {}
+            )
             graph_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("graph_origins"))
             dense_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("dense_origins"))
             row = {
@@ -220,6 +224,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "evidence": qa.get("evidence"),
                 **metrics,
                 "combined_metrics": metrics,
+                "prefilter_metrics": prefilter_metrics,
                 "graph_metrics": graph_metrics,
                 "dense_metrics": dense_metrics,
                 "gold_memory_diagnostics": gold_memory_diagnostics,
@@ -251,6 +256,18 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             f"[retrieval-only] {sample_id}: n={len(scored)} "
             f"Hit@K={hit:.4f} Recall@K={recall:.4f} ExactCover@K={exact:.4f} MRR={mrr:.4f}"
         )
+        prefilter_scored = [
+            row["prefilter_metrics"] for row in scored
+            if row.get("prefilter_metrics", {}).get("hit") is not None
+        ]
+        if prefilter_scored:
+            logger.info(
+                f"[embedding-prefilter] {sample_id}: n={len(prefilter_scored)} "
+                f"Hit@K={sum(r['hit'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"Recall@K={sum(r['recall'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"ExactCover@K={sum(r['exact_cover'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"MRR={sum(r['mrr'] for r in prefilter_scored) / len(prefilter_scored):.4f}"
+            )
 
 
 
@@ -343,6 +360,8 @@ def main():
             agent.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)
 
             agent.store_keyword(keyword_path, rewrite_path)
+            if config.EAES_MODE:
+                memory_controller.prepare_eaes_retrieval_embeddings()
 
             result_path = config.result_template.format(dataset=dataset, sample_id=sample_id)
             if config.RETRIEVAL_ONLY:

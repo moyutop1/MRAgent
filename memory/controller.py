@@ -2,20 +2,21 @@ import sys, os
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import json
 import re
+import threading
 from datetime import date
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 import numpy as np
-from nltk.stem import PorterStemmer
 from common import config
 from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
 from llm.controller import LLM
+from llm.embeddings import get_embedding
 from memory.system import MemorySystem
 import logging
 logger = logging.getLogger(__name__)
 
-_EAES_STEMMER = PorterStemmer()
+_EAES_EMBEDDING_LOCK = threading.Lock()
 
 class MemoryController:
     """Wraps your storage; replace with your own DB/vector/graph implementation."""
@@ -26,6 +27,7 @@ class MemoryController:
         self.question_emb = None
         self.queried_event = []
         self.queried_keyword = []
+        self._eaes_query_embedding_cache = {}
 
     # Dispatcher op
 
@@ -132,19 +134,54 @@ class MemoryController:
         return self.memory.query_personal_aspect( person, aspect)
 
     @staticmethod
-    def _eaes_words(text: str) -> Set[str]:
-        text = MemoryController._snake_norm(text).replace("_", " ")
-        # EAES lexical matching is about concepts, not English tense/aspect.
-        # Stem both the query and memory sides so variants such as
-        # camp/camped/camping contribute to the same score; temporal state is
-        # scored independently by the lifecycle component.
-        return {_EAES_STEMMER.stem(t) for t in text.split() if t}
+    def _normalize_embedding_rows(values):
+        matrix = np.asarray(values, dtype=np.float32)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return matrix / norms
 
     @staticmethod
-    def _eaes_overlap_score(left: Set[str], right: Set[str]) -> float:
-        if not left or not right:
-            return 0.0
-        return len(left & right) / max(1, len(left))
+    def _eaes_retrieval_text(note):
+        attributes = "\n".join(str(attr) for attr in note.attribute_paths or [] if str(attr).strip())
+        return f"ATTRIBUTES:\n{attributes}\nREWRITE:\n{note.rewrite_content or ''}".strip()
+
+    def prepare_eaes_retrieval_embeddings(self):
+        pending = [note for note in self.memory.eaes_notes.values() if note.retrieval_embedding is None]
+        if not pending:
+            return
+        with _EAES_EMBEDDING_LOCK:
+            pending = [note for note in self.memory.eaes_notes.values() if note.retrieval_embedding is None]
+            if not pending:
+                return
+            vectors = self._normalize_embedding_rows(
+                get_embedding([self._eaes_retrieval_text(note) for note in pending])
+            )
+            if len(vectors) != len(pending):
+                raise RuntimeError(
+                    f"EAES retrieval embedding count mismatch: {len(vectors)} != {len(pending)}"
+                )
+            for note, vector in zip(pending, vectors):
+                note.retrieval_embedding = vector
+
+    def _eaes_query_embeddings(self, query_plan, question_emb=None):
+        query_attributes = [
+            str(value).strip()
+            for value in self._as_list((query_plan or {}).get("query_attributes"))
+            if str(value).strip()
+        ]
+        if query_attributes:
+            cache_key = tuple(query_attributes)
+            vectors = self._eaes_query_embedding_cache.get(cache_key)
+            if vectors is None:
+                with _EAES_EMBEDDING_LOCK:
+                    vectors = self._normalize_embedding_rows(get_embedding(query_attributes))
+                self._eaes_query_embedding_cache[cache_key] = vectors
+            return vectors, query_attributes
+        if question_emb is not None:
+            return self._normalize_embedding_rows(question_emb), ["__question_embedding_fallback__"]
+        return np.empty((0, 0), dtype=np.float32), []
 
     @staticmethod
     def _as_list(value):
@@ -160,69 +197,25 @@ class MemoryController:
                               include_rank: bool = False):
         if not isinstance(query_plan, dict):
             query_plan = {}
-        query_entities = self._as_list(query_plan.get("entities"))
-        attr_hints = self._as_list(query_plan.get("attribute_hints"))
-        keywords = self._as_list(query_plan.get("keywords"))
-        required_lifecycle = (query_plan.get("required_lifecycle") or "").lower().strip()
-
-        entity_words = [self._eaes_words(e) for e in query_entities]
-        attr_words = set()
-        for attr in attr_hints:
-            attr_words |= self._eaes_words(attr)
-        keyword_words = set()
-        for kw in keywords:
-            keyword_words |= self._eaes_words(kw)
+        self.prepare_eaes_retrieval_embeddings()
+        query_vectors, query_attributes = self._eaes_query_embeddings(query_plan, question_emb)
 
         scored = []
         for note in self.memory.eaes_notes.values():
-            note_entity_words = set()
-            for entity in self._as_list(note.entities):
-                note_entity_words |= self._eaes_words(entity)
-            note_attr_words = set()
-            for attr in self._as_list(note.attribute_paths):
-                note_attr_words |= self._eaes_words(attr)
-            note_text_words = self._eaes_words(note.rewrite_content)
-
-            if entity_words:
-                entity_score = max(
-                    self._eaes_overlap_score(qe, note_entity_words | note_text_words)
-                    for qe in entity_words
-                )
-            else:
-                entity_score = 0.2
-            attr_score = self._eaes_overlap_score(attr_words, note_attr_words | note_text_words)
-            keyword_score = self._eaes_overlap_score(keyword_words, note_text_words | note_attr_words)
-
-            lifecycle_score = 0.0
-            if required_lifecycle in {"planned", "current", "historical"}:
-                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else 0.0
-
-            emb_score = 0.0
-            if question_emb is not None and note.embedding is not None:
-                try:
-                    emb_score = float(np.dot(question_emb.reshape(-1), note.embedding.reshape(-1)))
-                except Exception:
-                    emb_score = 0.0
-
-            score = (
-                2.0 * entity_score
-                + 1.4 * attr_score
-                + 1.2 * keyword_score
-                + 0.1 * lifecycle_score
-                + 0.2 * emb_score
-            )
-            if score <= 0 and not query_entities:
+            if note.retrieval_embedding is None or query_vectors.size == 0:
                 continue
+            note_vector = self._normalize_embedding_rows(note.retrieval_embedding)[0]
+            similarities = np.dot(query_vectors, note_vector)
+            best_index = int(np.argmax(similarities))
+            score = float(similarities[best_index])
             scored.append((score, {
                 **note.to_dict(include_raw=False),
                 "score": round(score, 4),
                 "score_parts": {
-                    "entity": round(entity_score, 3),
-                    "attribute": round(attr_score, 3),
-                    "keyword": round(keyword_score, 3),
-                    "lifecycle": round(lifecycle_score, 3),
-                    "embedding": round(emb_score, 3),
-                }
+                    "query_attribute_embedding": round(score, 4),
+                    "query_attribute_count": len(query_attributes),
+                },
+                "matched_query_attribute": query_attributes[best_index],
             }))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -237,7 +230,7 @@ class MemoryController:
 
     def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
         limit = limit or config.EAES_CANDIDATE_LIMIT
-        return self.score_eaes_candidates(query_plan, question_emb, limit=limit, include_rank=False)
+        return self.score_eaes_candidates(query_plan, question_emb, limit=limit, include_rank=True)
 
     def expand_eaes_raw_text(self, memory_ids: List[str]):
         expanded = []

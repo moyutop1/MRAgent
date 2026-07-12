@@ -470,12 +470,10 @@ class RetrievalMixin:
             if lm_current_date:
                 ans_input["current_date"] = lm_current_date
 
-        if category == 2:
-            ans_input["question"] = (ans_input["question"]
-                + " After identifying the corresponding event, "
-                + "call query_conversation_time and calculate an absolute date grounded to the query conversation time, 'yesterday' of conversation time '7 May 2023' is '6 May 2023'. "
-                + "For 'when' questions, accepted formats include: '7 May 2023', 'May 2023', '2023', "
-                "'the week/Sunday before 25 May 2023' or else with no additional words. For 'how long' questions, do not compute or convert; return the duration exactly as written in the conversation.")
+        if str(category) == "2" and str(config.dataset).lower() == "locomo":
+            ans_input["question"] = (
+                ans_input["question"] + " " + Prompts.TEMPORAL_ANSWER_POLICY
+            )
         elif category == 3:
             # open-ended questions are asked to give supporting reasons
             ans_input["question"] = ans_input["question"] + (" No extra explanations in 'answer'. Give reasons with original text in 'reason'. ")

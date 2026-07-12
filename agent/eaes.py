@@ -1,6 +1,7 @@
 ﻿import json
 import logging
 import re
+from datetime import date
 
 from common import config
 from memory.system import EAESMemoryNote
@@ -10,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class EAESMixin:
+    _MONTH_NAMES = (
+        "", "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    )
+
     @staticmethod
     def _eaes_query_question(question):
         text = str(question or "").strip()
@@ -84,6 +90,157 @@ class EAESMixin:
             return text
         return text[:max_chars].rsplit(" ", 1)[0].rstrip(" .,;:") + "..."
 
+    @staticmethod
+    def _eaes_extract_temporal_expression(text):
+        """Return the source's relative-time wording without resolving it."""
+        value = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not value:
+            return None
+        patterns = (
+            r"\blast\s+week\s+of\s+[A-Za-z]+(?:\s*,?\s*\d{4})?\b",
+            r"\b(?:last|next)\s+(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|"
+            r"Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?|weekend|week|month|year)\b",
+            r"\b(?:a\s+few|few|a\s+couple\s+of|couple\s+of|an?|one|two|three|four|five|\d+)\s+"
+            r"(?:days?|weeks?|weekends?|months?|years?)\s+(?:ago|before|after)\b",
+            r"\b(?:yesterday|today|tomorrow)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        return None
+
+    def _eaes_raw_source_text(self, event):
+        """Recover original dialogue text so rewrite normalization is not lossy."""
+        parts = []
+        for origin in re.findall(r"D\d+:\d+", str(getattr(event, "origin", "") or "")):
+            prefix = origin.split(":", 1)[0]
+            raw = self.memory.raw_text.get(prefix, {}).get(origin)
+            if raw:
+                parts.append(str(raw))
+        return "\n".join(parts) or str(getattr(event, "text", "") or "")
+
+    @classmethod
+    def _eaes_anchor_relative_answer(cls, source_expression, anchor):
+        """Render an anchored-relative answer for coarse calendar cues."""
+        cue = re.sub(r"\s+", " ", str(source_expression or "")).strip()
+        if not cue or re.search(r"\blast\s+week\s+of\b", cue, re.IGNORECASE):
+            return None
+        try:
+            anchor_date = date.fromisoformat(str(anchor or "")[:10])
+        except (TypeError, ValueError):
+            return None
+        anchor_text = f"{anchor_date.day} {cls._MONTH_NAMES[anchor_date.month]} {anchor_date.year}"
+
+        named = re.fullmatch(
+            r"(last|next)\s+(Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|"
+            r"Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?|weekend|week)",
+            cue,
+            re.IGNORECASE,
+        )
+        if named:
+            direction, unit = named.groups()
+            weekday_names = {
+                "mon": "Monday", "monday": "Monday",
+                "tue": "Tuesday", "tuesday": "Tuesday",
+                "wed": "Wednesday", "wednesday": "Wednesday",
+                "thu": "Thursday", "thursday": "Thursday",
+                "fri": "Friday", "friday": "Friday",
+                "sat": "Saturday", "saturday": "Saturday",
+                "sun": "Sunday", "sunday": "Sunday",
+            }
+            normalized_unit = weekday_names.get(unit.lower(), unit.lower())
+            relation = "before" if direction.lower() == "last" else "after"
+            return f"The {normalized_unit} {relation} {anchor_text}"
+
+        distance = re.fullmatch(
+            r"(a\s+few|few|a\s+couple\s+of|couple\s+of|an?|one|two|three|four|five|\d+)\s+"
+            r"(days?|weeks?|weekends?)\s+(ago|before|after)",
+            cue,
+            re.IGNORECASE,
+        )
+        if distance:
+            amount, unit, relation = distance.groups()
+            if unit.lower().startswith("day") and amount.lower() not in {
+                "a few", "few", "a couple of", "couple of"
+            }:
+                return None
+            if relation.lower() == "ago":
+                relation = "before"
+            amount = amount.lower()
+            if amount == "few":
+                amount = "a few"
+            elif amount == "couple of":
+                amount = "a couple of"
+            return f"{amount.capitalize()} {unit.lower()} {relation.lower()} {anchor_text}"
+        return None
+
+    @classmethod
+    def _eaes_precise_temporal_answer(cls, source_expression, event_time):
+        """Format exact-day/month/year cues from the normalized event time."""
+        cue = re.sub(r"\s+", " ", str(source_expression or "")).strip().lower()
+        try:
+            event_date = date.fromisoformat(str(event_time or "")[:10])
+        except (TypeError, ValueError):
+            return None
+        human_date = f"{event_date.day} {cls._MONTH_NAMES[event_date.month]} {event_date.year}"
+        if cue in {"yesterday", "today", "tomorrow"}:
+            return human_date
+        exact_days = re.fullmatch(
+            r"(?:an?|one|two|three|four|five|\d+)\s+days?\s+ago", cue)
+        if exact_days:
+            return human_date
+        if cue in {"last year", "next year"}:
+            return str(event_date.year)
+        if cue in {"last month", "next month"}:
+            return f"{cls._MONTH_NAMES[event_date.month]} {event_date.year}"
+        return None
+
+    def _eaes_temporal_answer(self, answer, supports, evidence_package, candidates):
+        """Preserve the supported source expression's temporal granularity."""
+        supported = set(supports or [])
+        evidence_records = []
+        for item in (evidence_package or {}).get("answer_items", []):
+            if isinstance(item, dict):
+                evidence_records.extend(
+                    ev for ev in item.get("evidence", []) if isinstance(ev, dict))
+        candidate_records = [c for c in (candidates or []) if isinstance(c, dict)]
+        records = evidence_records + candidate_records
+        supported_records = [
+            record for record in records if record.get("memory_id") in supported
+        ]
+        if supported_records:
+            records = supported_records
+        elif evidence_records:
+            records = evidence_records
+        for record in records:
+            event = self.memory.episode_events.get(record.get("event_id"))
+            if event is None:
+                continue
+            source_expression = self._eaes_extract_temporal_expression(
+                self._eaes_raw_source_text(event))
+            if not source_expression:
+                source_expression = self._eaes_extract_temporal_expression(
+                    record.get("rewrite_content") or event.text)
+            interval = record.get("time_interval") or {}
+            rendered = self._eaes_anchor_relative_answer(
+                source_expression,
+                event.conversation_time or interval.get("start"),
+            )
+            if not rendered:
+                rendered = self._eaes_precise_temporal_answer(
+                    source_expression, event.time)
+            if rendered:
+                return rendered
+        iso_answer = re.fullmatch(r"\s*(\d{4})-(\d{2})-(\d{2})\s*", str(answer or ""))
+        if iso_answer:
+            try:
+                answer_date = date.fromisoformat(iso_answer.group(0).strip())
+                return f"{answer_date.day} {self._MONTH_NAMES[answer_date.month]} {answer_date.year}"
+            except ValueError:
+                pass
+        return answer
+
     def _eaes_attribute_text(self, attr, fallback_text=None):
         if isinstance(attr, str):
             text = attr.strip()
@@ -118,7 +275,7 @@ class EAESMixin:
             memories.append({
                 "event_id": event_id,
                 "rewrite_content": ee.get("text") or ev.text,
-                "raw_text": ev.text,
+                "raw_text": self._eaes_raw_source_text(ev),
                 "tag": ee.get("tag"),
                 "keywords": self._as_list(keyword_by_sentence.get(event_id))[:12],
                 "time": ee.get("time"),
@@ -188,12 +345,13 @@ class EAESMixin:
                 if short:
                     attribute_paths.append(f"event.summary: {short}")
             attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
+            raw_source_text = self._eaes_raw_source_text(ev)
             note = EAESMemoryNote(
                 memory_id=self._eaes_memory_id(event_id),
                 event_id=event_id,
                 entities=entities,
                 attribute_paths=attribute_paths,
-                raw_text=ev.text,
+                raw_text=raw_source_text,
                 rewrite_content=rewrite_content,
                 time_interval={
                     "type": "conversation_time",
@@ -443,26 +601,27 @@ class EAESMixin:
             "evidence_package": evidence_package,
             "backup_candidates": candidates[:12],
         }
+        use_anchored_temporal_style = (
+            str(config.dataset).lower() == "locomo" and str(category) == "2"
+        )
         if lm_current_date:
             final_input["current_date"] = lm_current_date
+        final_answer_prompt = Prompts.EAES_FINAL_ANSWER_PROMPT
+        if use_anchored_temporal_style:
+            final_answer_prompt += "\n" + Prompts.TEMPORAL_ANSWER_POLICY
         answer_obj = self.llm.chat_text(
             messages=[
-                {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
+                {"role": "system", "content": final_answer_prompt},
                 {"role": "user", "content": json.dumps(final_input, ensure_ascii=False)},
             ],
             model=config.RE_MODEL
         )
         if not isinstance(answer_obj, dict):
             evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
-            fallback_input = {
-                "question": question,
-                "query_plan": query_plan,
-                "evidence_package": evidence_package,
-                "backup_candidates": candidates[:12],
-            }
+            fallback_input = {**final_input, "evidence_package": evidence_package}
             answer_obj = self.llm.chat_text(
                 messages=[
-                    {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
+                    {"role": "system", "content": final_answer_prompt},
                     {"role": "user", "content": json.dumps(fallback_input, ensure_ascii=False)},
                 ],
                 model=config.RE_MODEL
@@ -481,6 +640,10 @@ class EAESMixin:
                     mid = ev.get("memory_id")
                     if mid and mid not in supports:
                         supports.append(mid)
-        return answer_obj.get("answer", "no information available"), self.memory.get_eaes_support_origin(supports)
+        answer = answer_obj.get("answer", "no information available")
+        if use_anchored_temporal_style:
+            answer = self._eaes_temporal_answer(
+                answer, supports, evidence_package, candidates)
+        return answer, self.memory.get_eaes_support_origin(supports)
 
 

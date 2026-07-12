@@ -22,7 +22,8 @@ TASK:
 - Drop low-value content: greetings, acknowledgements, boilerplate, generic advice, repeated confirmations, and assistant text that contains no user-specific fact or task result.
 - Each memory in "sentence" must be self-contained, explicit, and useful without the raw dialogue context.
 - Resolve all pronouns ("I", "you", "he", "she", "it", "they", "we", "this", "that", "these", "those") into concrete people, objects, events, or noun phrases from the window.
-- Normalize relative time using conversation_time and output "time" as YYYY-MM-DD. If no event time is mentioned, use conversation_time.
+- Resolve relative time into the separate "time" field as YYYY-MM-DD. If no event time is mentioned, use conversation_time.
+- In the memory "text", preserve the source's relative-time wording (for example, "last Friday" or "last week"). You may add the resolved date in parentheses, but never replace the source wording with only an absolute date.
 - If several adjacent turns describe the same fact/event, merge them into one dense memory.
 - Use "origin" as a comma-separated list of the exact source dia_id values copied from this window, e.g. "D1:12,D1:13". Do not invent source ids.
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
@@ -375,18 +376,23 @@ Limits:
 - Select at most 3 memories per answer_item.
 - Prefer direct evidence; use complementary pairs only when one memory supplies specificity and another supplies lifecycle/completion."""
 
+    TEMPORAL_ANSWER_POLICY = """Temporal output policy:
+- Preserve the temporal granularity and relation stated by the source memory. The conversation anchor explains what a relative phrase refers to; it is not automatically the answer.
+- After identifying the event, call query_conversation_time when its conversation anchor is not already available.
+- For named weekdays, weeks, and weekends, use an anchored-relative phrase instead of calculating the calendar date: "last Friday" + anchor 2023-07-15 becomes "The Friday before 15 July 2023"; "last week" becomes "The week before 15 July 2023". Do not output an ISO date for these expressions.
+- For day-exact expressions such as "yesterday" or "two days ago", an explicit source date, or a question explicitly asking for the exact date, return a human-readable absolute date such as "7 May 2023", never YYYY-MM-DD.
+- For month/year expressions, preserve their natural precision, such as "June 2023" or "2022". For duration questions, return the duration as stated, such as "10 years ago"; do not turn it into a date.
+- Return one minimal time expression and no explanation."""
+
     EAES_FINAL_ANSWER_PROMPT = """You answer from an EAES evidence package. Only output valid JSON.
 Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
 - For list questions, return a concise comma-separated list.
 - Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.
-- For time questions, always normalize the answer using rewrite_content plus the evidence time_interval.start anchor.
-- For time questions, do not answer only with relative phrases such as "yesterday", "last Friday", "last week", "last year", "next month", or "two days ago" when time_interval.start is available.
+- For time questions, preserve the source wording and its precision. Use time_interval.start as the conversation time only when a relative expression needs that reference point.
 - For a single-time question, return exactly one best time expression, not a list of multiple candidate dates.
-- If the question asks for an exact date, output an absolute date like "2023-07-10" or "10 July 2023".
-- If the gold-style answer is naturally relative to a known anchor, normalize it, e.g. "the Friday before 14 August 2023" or "the week before 3 July 2023".
-- Use these conversions with time_interval.start as the conversation date: yesterday = start - 1 day; two days ago = start - 2 days; last week = the week before start; last Friday = the nearest Friday before start; next month = the month after start.
+- If the question asks for an exact date, output a human-readable absolute date like "10 July 2023".
 - When multiple candidates mention similar events, choose the one whose entity, event type, month/season, and wording best match the question; do not merge conflicting times.
 - Do not use planned-only evidence to answer a historical/completed question unless paired with historical evidence.
 - If evidence_package has answer_items or backup_candidates, make the best answer supported by them instead of saying "no information available".

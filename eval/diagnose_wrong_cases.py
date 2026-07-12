@@ -186,7 +186,7 @@ def compact_candidate(cand, rank):
         "origin": cand.get("origin"),
         "score": cand.get("score"),
         "score_parts": cand.get("score_parts"),
-        "embedding_rank": cand.get("embedding_rank"),
+        "prefilter_rank": cand.get("prefilter_rank"),
         "rerank_rank": cand.get("rerank_rank"),
         "rerank_source": cand.get("rerank_source"),
         "event_lifecycle": cand.get("event_lifecycle"),
@@ -207,9 +207,9 @@ def compact_gold_diag(retrieval_row):
                 "memory_id": mem.get("memory_id"),
                 "indexed": mem.get("indexed"),
                 "candidate_rank": mem.get("candidate_rank"),
-                "embedding_rank": mem.get("embedding_rank"),
+                "prefilter_rank": mem.get("prefilter_rank"),
                 "rerank_rank": mem.get("rerank_rank"),
-                "in_embedding_topk": mem.get("in_embedding_topk"),
+                "in_prefilter_topk": mem.get("in_prefilter_topk"),
                 "in_llm_topk": mem.get("in_llm_topk"),
                 "candidate_score": mem.get("candidate_score"),
                 "score_parts": mem.get("score_parts"),
@@ -222,7 +222,7 @@ def compact_gold_diag(retrieval_row):
             "covered_by_retrieval": gold.get("covered_by_retrieval"),
             "drop_reason": gold.get("drop_reason"),
             "best_rank": gold.get("best_rank"),
-            "best_embedding_rank": gold.get("best_embedding_rank"),
+            "best_prefilter_rank": gold.get("best_prefilter_rank"),
             "best_rerank_rank": gold.get("best_rerank_rank"),
             "memories": memories,
         })
@@ -295,14 +295,14 @@ def write_md(path, cases):
             f.write(f"**Prediction Context:** `{case.get('prediction_context')}`\n\n")
             if "retrieval_metrics" in case:
                 f.write(f"**Retrieval Metrics:** `{case.get('retrieval_metrics')}`\n\n")
-                f.write(f"**Embedding Prefilter Metrics:** `{case.get('prefilter_metrics')}`\n\n")
+                f.write(f"**Combined Prefilter Metrics:** `{case.get('prefilter_metrics')}`\n\n")
                 f.write("<details><summary>Question Keys</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('question_keys'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Query Plan</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('query_plan'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Top Candidates</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('top_candidates'))}\n```\n\n</details>\n\n")
-                f.write("<details><summary>Embedding Top Candidates</summary>\n\n")
+                f.write("<details><summary>Combined Prefilter Top Candidates</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('embedding_top_candidates'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Gold Memory Diagnostics</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('gold_memory_diagnostics'))}\n```\n\n</details>\n\n")

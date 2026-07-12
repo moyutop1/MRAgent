@@ -154,7 +154,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
-| `--eaes_prefilter_limit` | attribute-embedding candidates retained before LLM reranking | `120` |
+| `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
 
 ### 5.2 LoCoMo

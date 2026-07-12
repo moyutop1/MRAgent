@@ -106,11 +106,11 @@ class RetrievalMixin:
                     "event_id": None,
                     "memory_id": None,
                     "indexed": False,
-                    "in_embedding_topk": False,
+                    "in_prefilter_topk": False,
                     "in_llm_topk": False,
                     "in_retrieved_candidates": False,
                     "candidate_rank": None,
-                    "embedding_rank": None,
+                    "prefilter_rank": None,
                     "rerank_rank": None,
                     "candidate_score": None,
                     "score_parts": None,
@@ -144,11 +144,11 @@ class RetrievalMixin:
                     "event_id": event_id,
                     "memory_id": memory_id,
                     "indexed": note is not None,
-                    "in_embedding_topk": memory_id in prefilter_memory_ids,
+                    "in_prefilter_topk": memory_id in prefilter_memory_ids,
                     "in_llm_topk": memory_id in reranked_by_memory_id,
                     "in_retrieved_candidates": memory_id in retrieved_memory_ids or event_id in retrieved_event_ids,
                     "candidate_rank": rank,
-                    "embedding_rank": rank,
+                    "prefilter_rank": rank,
                     "rerank_rank": rerank_rank,
                     "candidate_score": scored.get("score") if scored else None,
                     "score_parts": scored.get("score_parts") if scored else None,
@@ -159,7 +159,7 @@ class RetrievalMixin:
                     "drop_reason": (
                         "not_built_in_eaes_memory" if note is None else
                         "not_scored_by_query_attributes" if scored is None else
-                        "rank_beyond_embedding_topk" if rank and rank > config.EAES_CANDIDATE_LIMIT else
+                        "rank_beyond_prefilter_topk" if rank and rank > config.EAES_CANDIDATE_LIMIT else
                         "dropped_by_llm_reranker" if memory_id not in reranked_by_memory_id else
                         "inside_llm_topk"
                     ),
@@ -182,7 +182,7 @@ class RetrievalMixin:
             elif covered_by_retrieval:
                 origin_drop_reason = "inside_llm_topk"
             elif rank_values and min(rank_values) > config.EAES_CANDIDATE_LIMIT:
-                origin_drop_reason = "rank_beyond_embedding_topk"
+                origin_drop_reason = "rank_beyond_prefilter_topk"
             elif rank_values:
                 origin_drop_reason = "dropped_by_llm_reranker"
             else:
@@ -195,7 +195,7 @@ class RetrievalMixin:
                 "covered_by_retrieval": covered_by_retrieval,
                 "drop_reason": origin_drop_reason,
                 "best_rank": min(rank_values, default=None),
-                "best_embedding_rank": min(rank_values, default=None),
+                "best_prefilter_rank": min(rank_values, default=None),
                 "best_rerank_rank": min(rerank_values, default=None),
                 "memories": memory_entries,
             })

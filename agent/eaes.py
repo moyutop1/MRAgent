@@ -305,8 +305,8 @@ class EAESMixin:
             "candidates": [
                 {
                     "memory_id": candidate.get("memory_id"),
-                    "embedding_rank": candidate.get("rank"),
-                    "embedding_score": candidate.get("score"),
+                    "prefilter_rank": candidate.get("rank"),
+                    "prefilter_score": candidate.get("score"),
                     "attribute_paths": candidate.get("attribute_paths"),
                 }
                 for candidate in candidates
@@ -338,7 +338,7 @@ class EAESMixin:
         reranked = []
         for rerank_rank, memory_id in enumerate(ordered_ids[:limit], start=1):
             item = dict(by_id[memory_id])
-            item["embedding_rank"] = item.get("rank")
+            item["prefilter_rank"] = item.get("rank")
             item["rerank_rank"] = rerank_rank
             item["rerank_source"] = "llm" if memory_id in llm_selected_ids else "embedding_fill"
             item["rank"] = rerank_rank

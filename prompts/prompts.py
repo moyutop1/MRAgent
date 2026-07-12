@@ -332,7 +332,7 @@ Schema:
         return cls.EAES_INDEX_USER_PROMPT.format(MEMORIES=memories)
 
     EAES_ATTRIBUTE_RERANK_PROMPT = """You rerank memory candidates using structured attributes. Only output valid JSON.
-Use only the question, query_attributes, memory attribute_paths, and embedding rank/score.
+Use only the question, query_attributes, memory attribute_paths, and prefilter rank/score.
 Do not answer the question. Do not invent memory IDs.
 Prefer memories whose attributes directly contain the relation needed to fill the question's answer slot.
 Keep complementary attribute evidence for multi-hop and list questions.

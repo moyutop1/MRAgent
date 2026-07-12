@@ -7,6 +7,7 @@ from datetime import date
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import defaultdict
 import numpy as np
+from nltk.stem import PorterStemmer
 from common import config
 from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
@@ -17,6 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _EAES_EMBEDDING_LOCK = threading.Lock()
+_EAES_STEMMER = PorterStemmer()
 
 class MemoryController:
     """Wraps your storage; replace with your own DB/vector/graph implementation."""
@@ -134,6 +136,17 @@ class MemoryController:
         return self.memory.query_personal_aspect( person, aspect)
 
     @staticmethod
+    def _eaes_words(text: str) -> Set[str]:
+        text = MemoryController._snake_norm(text).replace("_", " ")
+        return {_EAES_STEMMER.stem(token) for token in text.split() if token}
+
+    @staticmethod
+    def _eaes_overlap_score(left: Set[str], right: Set[str]) -> float:
+        if not left or not right:
+            return 0.0
+        return len(left & right) / max(1, len(left))
+
+    @staticmethod
     def _normalize_embedding_rows(values):
         matrix = np.asarray(values, dtype=np.float32)
         if matrix.ndim == 1:
@@ -199,6 +212,14 @@ class MemoryController:
             query_plan = {}
         self.prepare_eaes_retrieval_embeddings()
         query_vectors, query_attributes = self._eaes_query_embeddings(query_plan, question_emb)
+        query_entities = self._as_list(query_plan.get("entities"))
+        keywords = self._as_list(query_plan.get("keywords"))
+        required_lifecycle = str(query_plan.get("required_lifecycle") or "").lower().strip()
+
+        entity_words = [self._eaes_words(entity) for entity in query_entities]
+        keyword_words = set()
+        for keyword in keywords:
+            keyword_words |= self._eaes_words(keyword)
 
         scored = []
         for note in self.memory.eaes_notes.values():
@@ -207,12 +228,56 @@ class MemoryController:
             note_vector = self._normalize_embedding_rows(note.retrieval_embedding)[0]
             similarities = np.dot(query_vectors, note_vector)
             best_index = int(np.argmax(similarities))
-            score = float(similarities[best_index])
+            raw_attribute_score = float(similarities[best_index])
+            attribute_score = max(0.0, raw_attribute_score)
+
+            note_entity_words = set()
+            for entity in self._as_list(note.entities):
+                note_entity_words |= self._eaes_words(entity)
+            note_text_words = self._eaes_words(note.rewrite_content)
+            note_attr_words = set()
+            for attribute in self._as_list(note.attribute_paths):
+                note_attr_words |= self._eaes_words(attribute)
+
+            if entity_words:
+                entity_score = max(
+                    self._eaes_overlap_score(words, note_entity_words | note_text_words)
+                    for words in entity_words
+                )
+            else:
+                entity_score = 0.2
+            keyword_score = self._eaes_overlap_score(
+                keyword_words, note_text_words | note_attr_words
+            )
+            lifecycle_score = 0.0
+            if required_lifecycle in {"planned", "current", "historical"}:
+                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else 0.0
+            original_embedding_score = 0.0
+            if question_emb is not None and note.embedding is not None:
+                try:
+                    original_embedding_score = float(
+                        np.dot(question_emb.reshape(-1), note.embedding.reshape(-1))
+                    )
+                except Exception:
+                    original_embedding_score = 0.0
+
+            score = (
+                2.0 * entity_score
+                + 1.4 * attribute_score
+                + 1.2 * keyword_score
+                + 0.1 * lifecycle_score
+                + 0.2 * original_embedding_score
+            )
             scored.append((score, {
                 **note.to_dict(include_raw=False),
                 "score": round(score, 4),
                 "score_parts": {
-                    "query_attribute_embedding": round(score, 4),
+                    "entity": round(entity_score, 3),
+                    "attribute": round(attribute_score, 4),
+                    "attribute_embedding_raw": round(raw_attribute_score, 4),
+                    "keyword": round(keyword_score, 3),
+                    "lifecycle": round(lifecycle_score, 3),
+                    "embedding": round(original_embedding_score, 3),
                     "query_attribute_count": len(query_attributes),
                 },
                 "matched_query_attribute": query_attributes[best_index],

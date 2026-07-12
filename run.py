@@ -262,7 +262,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         ]
         if prefilter_scored:
             logger.info(
-                f"[embedding-prefilter] {sample_id}: n={len(prefilter_scored)} "
+                f"[combined-prefilter] {sample_id}: n={len(prefilter_scored)} "
                 f"Hit@K={sum(r['hit'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
                 f"Recall@K={sum(r['recall'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
                 f"ExactCover@K={sum(r['exact_cover'] for r in prefilter_scored) / len(prefilter_scored):.4f} "

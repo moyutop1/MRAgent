@@ -24,7 +24,7 @@ parser.add_argument("--query_key_mode", choices=["inventory", "extract"], defaul
 parser.add_argument("--key_candidate_dense_k", type=int, default=int(os.getenv("KEY_CANDIDATE_DENSE_K", "40")), help="Dense events used to build the stored-key candidate pool.")
 parser.add_argument("--key_candidate_limit", type=int, default=int(os.getenv("KEY_CANDIDATE_LIMIT", "120")), help="Maximum stored-key candidates shown to the LLM.")
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
-parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Attribute-embedding candidates kept before EAES LLM reranking.")
+parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Memories kept by the EAES attribute reranker for evidence selection.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
 parser.add_argument("--retrieval_only", action="store_true", help="Only evaluate retrieval evidence; skip final answer generation and LLM judge.")

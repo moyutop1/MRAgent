@@ -22,8 +22,13 @@ TASK:
 - Drop low-value content: greetings, acknowledgements, boilerplate, generic advice, repeated confirmations, and assistant text that contains no user-specific fact or task result.
 - Each memory in "sentence" must be self-contained, explicit, and useful without the raw dialogue context.
 - Resolve all pronouns ("I", "you", "he", "she", "it", "they", "we", "this", "that", "these", "those") into concrete people, objects, events, or noun phrases from the window.
-- Resolve relative time into the separate "time" field as YYYY-MM-DD. If no event time is mentioned, use conversation_time.
-- In the memory "text", preserve the source's relative-time wording (for example, "last Friday" or "last week"). You may add the resolved date in parentheses, but never replace the source wording with only an absolute date.
+- Keep top-level "conversation_time" equal to the dialogue's session date. Never replace it with an event date.
+- Resolve relative time into the separate "time" field as an indexable YYYY-MM-DD start date. For a day use that day; for a week/weekend/month/year use the normalized beginning of that period. If no event time is mentioned, use conversation_time.
+- Preserve temporal granularity in memory "text" with these exact rules (anchor = conversation_time):
+  - Named weekdays, weeks, and weekends stay anchored-relative instead of becoming a calendar date: "last Friday" + anchor 2023-07-22 -> "the Friday before 22 July 2023"; "last week" -> "the week before 22 July 2023"; "last weekend" -> "the weekend before 22 July 2023". Their "time" values are 2023-07-21, 2023-07-10, and 2023-07-15 respectively.
+  - Exact-day expressions become human-readable absolute dates: with anchor 2023-07-22, "yesterday" -> "21 July 2023" and "two days ago" -> "20 July 2023".
+  - Month expressions keep month precision: "last month" -> "June 2023", with "time" = "2023-06-01".
+  - Year expressions keep year precision in text: "last year" -> "2022", with "time" = "2022-01-01" for indexing.
 - If several adjacent turns describe the same fact/event, merge them into one dense memory.
 - Use "origin" as a comma-separated list of the exact source dia_id values copied from this window, e.g. "D1:12,D1:13". Do not invent source ids.
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.

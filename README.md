@@ -12,7 +12,7 @@ The pipeline has two phases:
 
 **Phase 1 — Build the graph memory** (once per conversation sample):
 
-- **rewrite** — rewrite each dialogue turn into a self-contained sentence: resolve pronouns to explicit entities, convert relative times to absolute `YYYY-MM-DD` dates, attach a topic tag, and extract topics and person-level facts.
+- **rewrite** — compress dialogue into self-contained memories: resolve pronouns, render relative times at their source granularity, store normalized `YYYY-MM-DD` start dates for indexing, attach topic tags, and extract topics and person-level facts.
 - **extract_keyword** — extract salient keywords for each rewritten sentence.
 - **store** — build the in-memory graph from the above: key nodes, episode / topic / personal events, and the links between them.
 

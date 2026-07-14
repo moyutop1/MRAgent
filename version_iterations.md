@@ -1,5 +1,46 @@
 # Version Iterations
 
+## v108-20260708
+
+### Goal
+
+Adopt a SimpleMem-style memory creation stage while preserving the existing keyword, EAES attribute, and memory retrieval layers.
+
+### Changes
+
+- Replace per-session sentence-preserving rewrite with session-local windowed memory compression.
+  - Each session is processed with sliding windows controlled by `--rewrite_window_size` and `--rewrite_overlap_size`.
+  - Windows never cross session boundaries.
+  - Each window receives up to `--rewrite_previous_limit` previously generated rewrite memories to reduce duplicate memories.
+- Allow low-value dialogue turns to be omitted during rewrite.
+  - The rewrite prompt now asks for compact, self-contained memories instead of preserving every sentence.
+  - Greetings, acknowledgements, generic advice, and repeated confirmations can be dropped.
+- Preserve LoCoMo evidence alignment with multi-origin compressed memories.
+  - A memory can now use comma-separated source origins such as `D1:12,D1:13`.
+  - Final memory ids are generated deterministically from the first origin, e.g. `D1:12-1`.
+  - Schema validation checks that every source origin exists in the source dialogue window.
+- Use rewrite memory as the stored event text.
+  - `EpisodeEvent.text` now stores the compressed rewrite memory text.
+  - Raw dialogue ids remain only as provenance through `origin`.
+- Update multi-origin compatibility in retrieval/evaluation support paths.
+  - Gold-origin diagnostics can map `D1:13` to a compressed memory whose origin is `D1:12,D1:13`.
+  - Time-filtered graph retrieval checks all source origins in a compressed memory.
+  - Event-context expansion handles compressed memories with multiple source origins.
+- Split windowed rewrite creation into `agent/rewrite_memory.py`.
+  - `agent.py` keeps a thin `rewrite()` entrypoint and origin helper wrappers.
+  - The windowing, previous-memory prompt context, schema retry, and session merge logic live in the new module.
+- Split large Agent responsibilities into mixins so no agent file exceeds 1000 lines.
+  - `agent/eaes.py` contains EAES memory indexing, query parsing, evidence selection, and EAES answering.
+  - `agent/retrieval.py` contains retrieval-only diagnostics, dense retrieval, answer routing, and query-key inventory selection.
+  - `agent/agent.py` now focuses on orchestration, tool helpers, rewrite/store entrypoints, and shared utilities.
+
+### Expected Effect
+
+- Reduce memory noise and retrieval clutter from low-information turns.
+- Improve answer density by storing higher-level, self-contained memories.
+- Keep retrieval-only evidence scoring compatible with LoCoMo `D?:?` gold ids.
+- Preserve the downstream keyword, EAES attribute, and retrieval architecture while changing only the rewrite-memory creation stage.
+
 ## v107-20260702
 
 ### Goal

@@ -1,12 +1,41 @@
 import json
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import List
 
 from common import config
 from prompts import schema as json_scheme
 from prompts.prompts import Prompts
+
+
+_MONTH_NAMES = (
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+_WEEKDAY_NAMES = {
+    "mon": ("Monday", 0), "monday": ("Monday", 0),
+    "tue": ("Tuesday", 1), "tuesday": ("Tuesday", 1),
+    "wed": ("Wednesday", 2), "wednesday": ("Wednesday", 2),
+    "thu": ("Thursday", 3), "thursday": ("Thursday", 3),
+    "fri": ("Friday", 4), "friday": ("Friday", 4),
+    "sat": ("Saturday", 5), "saturday": ("Saturday", 5),
+    "sun": ("Sunday", 6), "sunday": ("Sunday", 6),
+}
+_DAY_COUNTS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3,
+    "four": 4, "five": 5, "six": 6, "seven": 7,
+}
+_RELATIVE_TIME_RE = re.compile(
+    r"\b(?:last|next)\s+(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|"
+    r"Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?|weekend|week)"
+    r"\b(?!\s+of\b)|"
+    r"\b(?:yesterday|today|tomorrow)\b|"
+    r"\b(?:a|an|one|two|three|four|five|six|seven|\d+)\s+days?\s+"
+    r"(?:ago|before|after)\b|"
+    r"\b(?:last|next)\s+(?:month|year)\b",
+    re.IGNORECASE,
+)
 
 
 def origin_ids(origin):
@@ -77,6 +106,171 @@ def _conversation_time_from_text(text: str):
     return None
 
 
+def _dialogue_by_origin(text: str):
+    dialogue = {}
+    for line in str(text or "").splitlines():
+        match = re.search(r"\bdia_id\s*:\s*(D\d+:\d+)\b", line, re.IGNORECASE)
+        if match:
+            dialogue[match.group(1)] = line.strip()
+    return dialogue
+
+
+def _human_date(value: date):
+    return f"{value.day} {_MONTH_NAMES[value.month]} {value.year}"
+
+
+def _shift_month(anchor: date, offset: int):
+    month_index = anchor.year * 12 + anchor.month - 1 + offset
+    return date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def _relative_time_rendering(cue: str, conversation_time: str):
+    """Return (display text, normalized index start) for supported relative cues."""
+    try:
+        anchor = date.fromisoformat(str(conversation_time or "")[:10])
+    except (TypeError, ValueError):
+        return None
+    normalized_cue = re.sub(r"\s+", " ", str(cue or "")).strip().lower()
+    anchor_text = _human_date(anchor)
+
+    named = re.fullmatch(
+        r"(last|next)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|"
+        r"thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|weekend|week)",
+        normalized_cue,
+    )
+    if named:
+        direction, unit = named.groups()
+        relation = "before" if direction == "last" else "after"
+        if unit in _WEEKDAY_NAMES:
+            display_unit, weekday = _WEEKDAY_NAMES[unit]
+            if direction == "last":
+                days = (anchor.weekday() - weekday) % 7 or 7
+                index_start = anchor - timedelta(days=days)
+            else:
+                days = (weekday - anchor.weekday()) % 7 or 7
+                index_start = anchor + timedelta(days=days)
+        elif unit == "week":
+            display_unit = "week"
+            current_week_start = anchor - timedelta(days=anchor.weekday())
+            index_start = current_week_start + timedelta(
+                days=-7 if direction == "last" else 7)
+        else:
+            display_unit = "weekend"
+            current_week_start = anchor - timedelta(days=anchor.weekday())
+            index_start = current_week_start + timedelta(
+                days=-2 if direction == "last" else 12)
+        return f"the {display_unit} {relation} {anchor_text}", index_start
+
+    exact_day = re.fullmatch(
+        r"(a|an|one|two|three|four|five|six|seven|\d+)\s+days?\s+"
+        r"(ago|before|after)",
+        normalized_cue,
+    )
+    if exact_day:
+        raw_amount, relation = exact_day.groups()
+        amount = _DAY_COUNTS.get(raw_amount, int(raw_amount) if raw_amount.isdigit() else None)
+        if amount is None:
+            return None
+        index_start = anchor + timedelta(
+            days=amount if relation == "after" else -amount)
+        return _human_date(index_start), index_start
+
+    day_offsets = {"yesterday": -1, "today": 0, "tomorrow": 1}
+    if normalized_cue in day_offsets:
+        index_start = anchor + timedelta(days=day_offsets[normalized_cue])
+        return _human_date(index_start), index_start
+
+    month = re.fullmatch(r"(last|next)\s+month", normalized_cue)
+    if month:
+        index_start = _shift_month(anchor, -1 if month.group(1) == "last" else 1)
+        return f"{_MONTH_NAMES[index_start.month]} {index_start.year}", index_start
+
+    year = re.fullmatch(r"(last|next)\s+year", normalized_cue)
+    if year:
+        index_start = date(anchor.year + (-1 if year.group(1) == "last" else 1), 1, 1)
+        return str(index_start.year), index_start
+    return None
+
+
+def _date_text_variants(value: date):
+    month = _MONTH_NAMES[value.month]
+    return (
+        value.isoformat(),
+        f"{value.day} {month} {value.year}",
+        f"{month} {value.day}, {value.year}",
+        f"{month} {value.day} {value.year}",
+    )
+
+
+def _replace_or_append_time(text: str, cue: str, display: str, index_start: date):
+    value = str(text or "").strip()
+    if not value:
+        return value
+    if re.fullmatch(r"\d{4}", display):
+        already_rendered = re.search(
+            rf"\b{re.escape(display)}\b(?!-\d{{2}}-\d{{2}})", value)
+    else:
+        already_rendered = display.lower() in value.lower()
+    if already_rendered:
+        return value
+    replaced, count = re.subn(
+        re.escape(cue), display, value, count=1, flags=re.IGNORECASE)
+    if count:
+        return replaced
+    for variant in _date_text_variants(index_start):
+        replaced, count = re.subn(
+            rf"\b{re.escape(variant)}\b", display, value, count=1,
+            flags=re.IGNORECASE,
+        )
+        if count:
+            return replaced
+    if re.fullmatch(r"(?:last|next)\s+year", cue, re.IGNORECASE):
+        replaced, count = re.subn(
+            rf"\b{index_start.year}\b", display, value, count=1)
+        if count:
+            return replaced
+    suffix = value[-1] if value[-1] in ".!?" else ""
+    body = value[:-1].rstrip() if suffix else value
+    return f"{body} ({display}){suffix}"
+
+
+def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
+    """Normalize rewrite text granularity and its ISO date index from raw sources."""
+    if not isinstance(rewrite_out, dict):
+        return
+    conversation_time = _conversation_time_from_text(dialogue_text)
+    if not conversation_time:
+        return
+    dialogue = _dialogue_by_origin(dialogue_text)
+    for sentence in rewrite_out.get("sentence") or []:
+        if not isinstance(sentence, dict):
+            continue
+        source = "\n".join(
+            dialogue[origin]
+            for origin in origin_ids(sentence.get("origin"))
+            if origin in dialogue
+        )
+        matches = list(_RELATIVE_TIME_RE.finditer(source))
+        if not matches:
+            continue
+        # A compressed memory with several distinct temporal cues cannot be represented
+        # by the schema's single time field, so leave it for the model instead of guessing.
+        unique_cues = list(dict.fromkeys(
+            re.sub(r"\s+", " ", match.group(0)).strip().lower()
+            for match in matches
+        ))
+        if len(unique_cues) != 1:
+            continue
+        cue = matches[0].group(0)
+        rendering = _relative_time_rendering(cue, conversation_time)
+        if not rendering:
+            continue
+        display, index_start = rendering
+        sentence["text"] = _replace_or_append_time(
+            sentence.get("text"), cue, display, index_start)
+        sentence["time"] = index_start.isoformat()
+
+
 def _window_turns(turns: List[str]):
     if not turns:
         return []
@@ -129,6 +323,7 @@ def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger
         ],
     )
     normalize_sentence_ids(rewrite_out)
+    normalize_rewrite_temporal_granularity(rewrite_out, window_text)
     flag, err = json_scheme.check_rewrite_json(rewrite_out, window_text)
     last_err = err
     if not flag:
@@ -146,6 +341,7 @@ def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger
                 temperature=1.0,
             )
             normalize_sentence_ids(rewrite_out)
+            normalize_rewrite_temporal_granularity(rewrite_out, window_text)
             flag, err = json_scheme.check_rewrite_json(rewrite_out, window_text)
             if flag:
                 break

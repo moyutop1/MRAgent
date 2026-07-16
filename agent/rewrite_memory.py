@@ -2,7 +2,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import List
+from typing import List, NamedTuple
 
 from common import config
 from prompts import schema as json_scheme
@@ -271,18 +271,22 @@ def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
         sentence["time"] = index_start.isoformat()
 
 
+class _RewriteWindow(NamedTuple):
+    previous_context: List[str]
+    current_turns: List[str]
+
+
 def _window_turns(turns: List[str]):
     if not turns:
         return []
     window_size = config.REWRITE_WINDOW_SIZE
-    step_size = window_size - config.REWRITE_OVERLAP_SIZE
     windows = []
-    start = 0
-    while start < len(turns):
-        windows.append(turns[start:start + window_size])
-        if start + window_size >= len(turns):
-            break
-        start += step_size
+    for start in range(0, len(turns), window_size):
+        context_size = min(start, config.REWRITE_OVERLAP_SIZE)
+        windows.append(_RewriteWindow(
+            previous_context=turns[start - context_size:start],
+            current_turns=turns[start:start + window_size],
+        ))
     return windows
 
 
@@ -295,7 +299,33 @@ def _empty_rewrite(conversation_time=None):
     }
 
 
-def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger=None):
+def _validate_current_window_origins(rewrite_out, current_window_text: str):
+    """Reject context-only outputs so repeated raw turns cannot create duplicates."""
+    current_ids = set(_dialogue_by_origin(current_window_text))
+    if not current_ids:
+        return False, "current dialogue window has no dia_id values"
+    for field in ("sentence", "personal_sentences"):
+        for index, item in enumerate(rewrite_out.get(field) or []):
+            if not isinstance(item, dict):
+                continue
+            ids = set(origin_ids(item.get("origin")))
+            if ids and ids.isdisjoint(current_ids):
+                return (
+                    False,
+                    f"{field}[{index}] is supported only by PREVIOUS_DIALOGUE_CONTEXT; "
+                    "omit it unless CURRENT_DIALOGUE_WINDOW adds information",
+                )
+    return True, ""
+
+
+def _rewrite_window(
+        llm,
+        current_window_text: str,
+        source_text: str,
+        previous_dialogue_context: str,
+        previous_memories: List[dict],
+        logger=None,
+):
     previous_slice = (
         previous_memories[-config.REWRITE_PREVIOUS_LIMIT:]
         if config.REWRITE_PREVIOUS_LIMIT
@@ -313,8 +343,9 @@ def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger
         if isinstance(memory, dict)
     ]
     rewrite_prompt = Prompts.extract_rewrite_prompt(
-        json.dumps(window_text, ensure_ascii=False),
+        json.dumps(current_window_text, ensure_ascii=False),
         json.dumps(previous_payload, ensure_ascii=False),
+        json.dumps(previous_dialogue_context, ensure_ascii=False),
     )
     rewrite_out = llm.chat_text(
         messages=[
@@ -323,8 +354,11 @@ def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger
         ],
     )
     normalize_sentence_ids(rewrite_out)
-    normalize_rewrite_temporal_granularity(rewrite_out, window_text)
-    flag, err = json_scheme.check_rewrite_json(rewrite_out, window_text)
+    normalize_rewrite_temporal_granularity(rewrite_out, source_text)
+    flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
+    if flag:
+        flag, err = _validate_current_window_origins(
+            rewrite_out, current_window_text)
     last_err = err
     if not flag:
         for _ in range(1, 4):
@@ -341,15 +375,18 @@ def _rewrite_window(llm, window_text: str, previous_memories: List[dict], logger
                 temperature=1.0,
             )
             normalize_sentence_ids(rewrite_out)
-            normalize_rewrite_temporal_granularity(rewrite_out, window_text)
-            flag, err = json_scheme.check_rewrite_json(rewrite_out, window_text)
+            normalize_rewrite_temporal_granularity(rewrite_out, source_text)
+            flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
+            if flag:
+                flag, err = _validate_current_window_origins(
+                    rewrite_out, current_window_text)
             if flag:
                 break
             last_err = err
     if not flag:
         if logger:
             logger.warning(f"rewrite window failed schema validation after retries: {last_err}")
-        return _empty_rewrite(_conversation_time_from_text(window_text))
+        return _empty_rewrite(_conversation_time_from_text(current_window_text))
     return rewrite_out
 
 
@@ -411,11 +448,24 @@ def rewrite_windowed_session(llm, text: str, logger=None):
     window_outputs = []
     previous_memories = []
     for window in _window_turns(turns):
+        previous_dialogue_context = "\n".join(window.previous_context)
+        current_dialogue = "\n".join(window.current_turns)
+        source_dialogue = "\n".join(
+            window.previous_context + window.current_turns)
         if conversation_time:
-            window_text = "time:" + conversation_time + "\n" + "\n".join(window)
+            current_window_text = "time:" + conversation_time + "\n" + current_dialogue
+            source_text = "time:" + conversation_time + "\n" + source_dialogue
         else:
-            window_text = "\n".join(window)
-        out = _rewrite_window(llm, window_text, previous_memories, logger=logger)
+            current_window_text = current_dialogue
+            source_text = source_dialogue
+        out = _rewrite_window(
+            llm,
+            current_window_text,
+            source_text,
+            previous_dialogue_context,
+            previous_memories,
+            logger=logger,
+        )
         window_outputs.append(out)
         previous_memories.extend(_as_list(out.get("sentence")) if isinstance(out, dict) else [])
     return _merge_window_rewrites(window_outputs, conversation_time)

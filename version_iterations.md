@@ -1,5 +1,25 @@
 # Version Iterations
 
+## v109-20260716
+
+### Goal
+
+Preserve answer-bearing qualifiers when a question and its answer straddle adjacent rewrite windows.
+
+### Changes
+
+- Keep the original fixed-size current windows and prepend up to `--rewrite_overlap_size` preceding raw turns as explicit previous-dialogue context.
+- Tell the rewrite model to use previous raw turns for cross-window question/answer completion, reference resolution, and time/place/entity qualifiers.
+- Require cross-window memories to cite all contributing dialogue origins, including a context question and its current-window answer.
+- Reject outputs supported only by overlap context so repeated raw turns do not create duplicate memories.
+- Validate and normalize each output against the combined context plus current source, allowing temporal cues such as `last week` in the preceding question to be restored deterministically.
+
+### Expected Effect
+
+- A boundary pair such as `Where did you go last week?` followed by `I went to the national park with my kids` becomes one self-contained memory that preserves the week-level time constraint and both source origins.
+- Each rewrite call contains up to `rewrite_window_size + rewrite_overlap_size` raw turns; overlap no longer reduces the current window's capacity.
+- Existing `--rewrite_window_size`, `--rewrite_overlap_size`, and `--rewrite_previous_limit` controls remain compatible.
+
 ## v108-20260708
 
 ### Goal

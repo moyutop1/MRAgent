@@ -50,6 +50,15 @@ Label CORRECT when the generated answer conveys the same answer-bearing proposit
 - a noun phrase instead of a verb phrase, or vice versa;
 - a longer answer with extra details that do not contradict the gold answer.
 
+Use a coverage-first rule. The gold answer is a sufficient reference answer, not necessarily an exhaustive list of everything the generated answer may mention. If the generated answer affirmatively contains or entails every answer-bearing element of the gold answer, label it CORRECT even when it also lists other answers, alternatives, candidates, activities, objects, or details that are absent from the gold answer. Do not require the generated answer to be exclusive or concise, and do not mark it WRONG merely because additional answers are present.
+
+For example:
+- Gold: "painting and pottery"; Generated: "painting, pottery, and photography" -> CORRECT because all gold-answer elements are present.
+- Gold: "gave a school speech"; Generated: "gave a school speech, helped with the raffle, and met several teachers" -> CORRECT because the requested gold fact is fully answered.
+- Gold: "gave a school speech"; Generated: "did not give a school speech and only attended the event" -> WRONG because it explicitly negates the gold fact.
+
+Extra content should change a covered answer to WRONG only when it explicitly denies the gold answer or creates a direct logical contradiction with it. Merely adding another possible answer is not a contradiction. Mentioning the gold words only to deny, question, or quote them does not count as covering the gold answer.
+
 Do not require the same wording or shared keywords. For example:
 - Gold: "school speech"; Generated: "gave a talk at a school event" -> CORRECT. "Speech" and "gave a talk" describe the same action in this context.
 - Gold: "a shell necklace"; Generated: "They brought back a necklace made of shells from Hawaii" -> CORRECT.
@@ -57,9 +66,9 @@ Do not require the same wording or shared keywords. For example:
 However, sharing only a broad topic is not enough. The generated answer must entail the answer-bearing fact requested by the question. For example:
 - Gold: "gave a speech at the school event"; Generated: "attended a school event" -> WRONG. Attendance does not establish that a speech was given.
 
-Label WRONG when the generated answer contradicts the gold answer, describes a different person/event/object, omits the requested fact, or is too vague to establish semantic equivalence. Treat differences in negation, person, quantity, completion status (planned versus completed), and answer-critical time or place as meaningful. Minor details that the question does not ask for need not match.
+Label WRONG when the generated answer does not cover the gold answer, contradicts or denies it, omits the requested fact, or is too vague to establish semantic equivalence. A different person/event/object is grounds for WRONG only when the gold answer itself is not also affirmatively and completely covered. Treat differences within the gold-answer content in negation, person, quantity, completion status (planned versus completed), and answer-critical time or place as meaningful. Minor details that the question does not ask for need not match.
 
-For time-related questions, accept different surface forms that identify the same date or time period, including equivalent absolute and relative expressions when they are grounded to the same time. For example, "May 7th" and "7 May" are equivalent. Do not accept genuinely different dates or periods.
+For time-related questions, accept different surface forms that identify the same date or time period, including equivalent absolute and relative expressions when they are grounded to the same time. For example, "May 7th" and "7 May" are equivalent. If the gold time is fully present alongside additional times, apply the coverage-first rule and label it CORRECT unless the answer denies the gold time. Label it WRONG for time mismatch only when no gold-equivalent time is affirmatively covered.
 
 Now evaluate the real example:
 Question: {question}

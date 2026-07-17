@@ -1,5 +1,25 @@
 # Version Iterations
 
+## v112-20260717
+
+### Goal
+
+Restore previous rewrite memories after the no-previous-memory ablation reduced performance, while making LLM-judge grading coverage-oriented for complete answers that include additional candidates.
+
+### Changes
+
+- Restore accumulation of prior window rewrite memories and expose up to `--rewrite_previous_limit` entries to the next rewrite call.
+- Keep previous raw-dialogue context and the v111 retry behavior: mixed outputs discard only context-only items, while all-context-only outputs retry at most three times.
+- Restore the `--rewrite_previous_limit` option with default `3`.
+- Change the LLM-judge to treat the gold answer as a sufficient reference rather than an exhaustive list.
+- Grade a generated answer as correct when it affirmatively covers every gold-answer element, even if it also contains other answers, alternatives, or extra details.
+- Treat extra content as disqualifying only when it explicitly denies or directly contradicts the covered gold answer.
+
+### Expected Effect
+
+- Recover the rewrite quality and deduplication benefit of previous compressed memories without reintroducing whole-window loss from mixed context-only output.
+- Reduce judge false negatives for complete but non-exclusive generated answers.
+
 ## v111-20260717
 
 ### Goal

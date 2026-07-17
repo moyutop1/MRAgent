@@ -8,6 +8,7 @@ common_module = types.ModuleType("common")
 common_module.config = types.SimpleNamespace(
     REWRITE_WINDOW_SIZE=40,
     REWRITE_OVERLAP_SIZE=2,
+    REWRITE_PREVIOUS_LIMIT=3,
 )
 sys.modules.setdefault("common", common_module)
 sys.modules.setdefault("common.config", common_module.config)
@@ -240,6 +241,55 @@ class RewriteWindowContextTests(unittest.TestCase):
         self.assertEqual(llm.calls, 4)
         self.assertEqual(output["sentence"], [])
 
+    def test_previous_rewrite_memories_are_shown_to_the_next_window(self):
+        class PreviousMemoryLLM:
+            def __init__(self):
+                self.calls = []
+
+            def chat_text(self, messages, **_kwargs):
+                self.calls.append(messages)
+                if len(self.calls) == 1:
+                    return {
+                        "conversation_time": "2023-07-22",
+                        "sentence": [{
+                            "id": "D1:1-1",
+                            "text": "Morgan ate breakfast with the family.",
+                            "tag": "Family Breakfast",
+                            "origin": "D1:1",
+                            "topic": [],
+                            "time": "2023-07-22",
+                        }],
+                        "topics": {},
+                        "personal_sentences": [],
+                    }
+                return {
+                    "conversation_time": "2023-07-22",
+                    "sentence": [],
+                    "topics": {},
+                    "personal_sentences": [],
+                }
+
+        dialogue = "\n".join([
+            "time:2023-07-22",
+            "dia_id:D1:1 Morgan: I ate breakfast with my family.",
+            "dia_id:D1:2 Alex: That sounds nice.",
+            "dia_id:D1:3 Morgan: The kids enjoyed it.",
+            "dia_id:D1:4 Alex: What happened next?",
+            "dia_id:D1:5 Morgan: We went outside.",
+        ])
+        llm = PreviousMemoryLLM()
+
+        with patch(
+                "agent.rewrite_memory.json_scheme.check_rewrite_json",
+                return_value=(True, ""),
+        ):
+            rewrite_windowed_session(llm, dialogue)
+
+        self.assertEqual(len(llm.calls), 2)
+        second_prompt = llm.calls[1][1]["content"]
+        self.assertIn("PREVIOUS_REWRITE_MEMORIES", second_prompt)
+        self.assertIn("Morgan ate breakfast with the family.", second_prompt)
+
     def test_boundary_question_supplies_time_to_current_answer(self):
         class BoundaryLLM:
             def __init__(self):
@@ -286,7 +336,7 @@ class RewriteWindowContextTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 2)
         second_prompt = llm.calls[1][1]["content"]
-        self.assertNotIn("PREVIOUS_REWRITE_MEMORIES", second_prompt)
+        self.assertIn("PREVIOUS_REWRITE_MEMORIES", second_prompt)
         context_section, current_section = second_prompt.split(
             "CURRENT_DIALOGUE_WINDOW", maxsplit=1)
         self.assertIn("D1:4", context_section)

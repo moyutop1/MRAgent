@@ -33,6 +33,17 @@ class JudgePromptTests(unittest.TestCase):
         self.assertIn('Generated: "attended a school event" -> WRONG', prompt)
         self.assertIn("planned versus completed", prompt)
 
+    def test_prompt_accepts_complete_gold_with_additional_answers(self):
+        prompt = _load_accuracy_prompt()
+
+        self.assertIn("Use a coverage-first rule", prompt)
+        self.assertIn(
+            'Gold: "painting and pottery"; Generated: "painting, pottery, and photography" -> CORRECT',
+            prompt,
+        )
+        self.assertIn("do not mark it WRONG merely because additional answers are present", prompt)
+        self.assertIn("Merely adding another possible answer is not a contradiction", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

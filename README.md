@@ -153,6 +153,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
 | `--rewrite_window_size` | Current raw turns per rewrite window, excluding overlap context | `40` |
 | `--rewrite_overlap_size` | Tail turns from the preceding window supplied as raw context | `2` |
+| `--rewrite_previous_limit` | Previous compressed memories supplied for deduplication | `3` |
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |

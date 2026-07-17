@@ -350,10 +350,28 @@ def _rewrite_window(
         current_window_text: str,
         source_text: str,
         previous_dialogue_context: str,
+        previous_memories=None,
         logger=None,
 ):
+    previous_slice = (
+        (previous_memories or [])[-config.REWRITE_PREVIOUS_LIMIT:]
+        if config.REWRITE_PREVIOUS_LIMIT
+        else []
+    )
+    previous_payload = [
+        {
+            "id": memory.get("id"),
+            "text": memory.get("text"),
+            "origin": memory.get("origin"),
+            "time": memory.get("time"),
+            "tag": memory.get("tag"),
+        }
+        for memory in previous_slice
+        if isinstance(memory, dict)
+    ]
     rewrite_prompt = Prompts.extract_rewrite_prompt(
         json.dumps(current_window_text, ensure_ascii=False),
+        json.dumps(previous_payload, ensure_ascii=False),
         json.dumps(previous_dialogue_context, ensure_ascii=False),
     )
     rewrite_out = llm.chat_text(
@@ -455,6 +473,7 @@ def rewrite_windowed_session(llm, text: str, logger=None):
     if not turns:
         return _empty_rewrite(conversation_time)
     window_outputs = []
+    previous_memories = []
     for window in _window_turns(turns):
         previous_dialogue_context = "\n".join(window.previous_context)
         current_dialogue = "\n".join(window.current_turns)
@@ -471,7 +490,10 @@ def rewrite_windowed_session(llm, text: str, logger=None):
             current_window_text,
             source_text,
             previous_dialogue_context,
+            previous_memories,
             logger=logger,
         )
         window_outputs.append(out)
+        if isinstance(out, dict):
+            previous_memories.extend(_as_list(out.get("sentence")))
     return _merge_window_rewrites(window_outputs, conversation_time)

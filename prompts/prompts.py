@@ -35,7 +35,6 @@ TASK:
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
 - The "id" field may be any valid placeholder matching the first source id, because code will rewrite ids deterministically after validation.
-- Use PREVIOUS_REWRITE_MEMORIES only to avoid repeating already-written memories; do not copy them unless this window adds new information.
 - Topics: derive concrete topic summaries from the memories in this window. Assign topic IDs (t1..tn). In each memory, fill "topic" with topic IDs that apply; use [] if none.
 - Personal information: extract person-related stable facts into "personal_sentences". If a fact is already in a memory, also duplicate a concise normalized version here.
 Schema:
@@ -65,12 +64,7 @@ Schema:
 }
     """
 
-    REWRITE_PROMPT = """PREVIOUS_REWRITE_MEMORIES:
-<<<
-{PREVIOUS_MEMORIES}
->>>
-
-PREVIOUS_DIALOGUE_CONTEXT (context only; do not rewrite by itself):
+    REWRITE_PROMPT = """PREVIOUS_DIALOGUE_CONTEXT (context only; do not rewrite by itself):
 <<<
 {PREVIOUS_DIALOGUE_CONTEXT}
 >>>
@@ -84,12 +78,10 @@ CURRENT_DIALOGUE_WINDOW (produce memories for new information here):
     def extract_rewrite_prompt(
             cls,
             raw_text: str,
-            previous_memories: str = "[]",
             previous_dialogue_context: str = "[]",
     ) -> str:
         return cls.REWRITE_PROMPT.format(
             RAW_TEXT=raw_text,
-            PREVIOUS_MEMORIES=previous_memories,
             PREVIOUS_DIALOGUE_CONTEXT=previous_dialogue_context,
         )
 

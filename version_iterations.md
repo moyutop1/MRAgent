@@ -1,5 +1,44 @@
 # Version Iterations
 
+## v111-20260717
+
+### Goal
+
+Evaluate previous raw-dialogue context without exposing earlier compressed rewrite memories to the rewrite model, while avoiding whole-window loss from isolated context-only outputs.
+
+### Changes
+
+- Remove `PREVIOUS_REWRITE_MEMORIES` from the rewrite prompt and stop accumulating prior window memories for later rewrite calls.
+- Remove the unused `--rewrite_previous_limit` configuration option.
+- Keep previous raw-dialogue context and the fixed-size current-window behavior introduced in v109.
+- When an output mixes current-supported and context-only memories, discard only the context-only items without retrying.
+- Retry when every returned memory item is context-only, sharing the existing limit of at most three retries with schema-validation failures.
+- Remove topics that become unreferenced after context-only sentences are discarded.
+- Keep final exact `(lowercase text, normalized origin)` merge deduplication unchanged.
+
+### Expected Effect
+
+- Isolate the effect of raw cross-window context from model-level deduplication using previous compressed memories.
+- Preserve valid current-window memories when the same LLM output also contains an overlap-only duplicate.
+
+## v110-20260716
+
+### Goal
+
+Improve LLM-judge accuracy for semantically equivalent answers expressed with different wording.
+
+### Changes
+
+- Judge the answer-bearing proposition instead of requiring lexical overlap.
+- Explicitly accept synonyms, paraphrases, noun/verb alternations, and longer non-contradictory formulations.
+- Add `school speech` versus `gave a talk at a school event` as a positive calibration example.
+- Add a same-topic counterexample so merely mentioning or attending a school event does not count as giving a speech.
+- Preserve strict handling of contradictions and answer-critical differences in person, negation, quantity, completion status, time, and place.
+
+### Expected Effect
+
+- Reduce false negatives caused by synonymous or paraphrased answers without broadly accepting answers that only share the same topic.
+
 ## v109-20260716
 
 ### Goal

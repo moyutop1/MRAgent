@@ -8,13 +8,12 @@ common_module = types.ModuleType("common")
 common_module.config = types.SimpleNamespace(
     REWRITE_WINDOW_SIZE=40,
     REWRITE_OVERLAP_SIZE=2,
-    REWRITE_PREVIOUS_LIMIT=3,
 )
 sys.modules.setdefault("common", common_module)
 sys.modules.setdefault("common.config", common_module.config)
 
 from agent.rewrite_memory import (
-    _validate_current_window_origins,
+    _rewrite_window,
     _window_turns,
     normalize_rewrite_temporal_granularity,
     rewrite_windowed_session,
@@ -128,25 +127,118 @@ class RewriteWindowContextTests(unittest.TestCase):
             for window in windows
         ))
 
-    def test_context_only_memory_is_rejected_but_cross_window_memory_is_valid(self):
+    def test_mixed_output_drops_context_only_items_without_retrying(self):
+        class MixedLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_text(self, messages, **_kwargs):
+                self.calls += 1
+                return {
+                    "conversation_time": "2023-07-22",
+                    "sentence": [
+                        {
+                            "id": "D1:4-1",
+                            "text": "Context-only duplicate.",
+                            "tag": "Duplicate",
+                            "origin": "D1:4",
+                            "topic": ["t1"],
+                            "time": "2023-07-22",
+                        },
+                        {
+                            "id": "D1:4-2",
+                            "text": "Morgan answered the boundary question.",
+                            "tag": "Boundary Answer",
+                            "origin": "D1:4,D1:5",
+                            "topic": ["t2"],
+                            "time": "2023-07-22",
+                        },
+                    ],
+                    "topics": {
+                        "t1": "Context-only topic",
+                        "t2": "Current answer topic",
+                    },
+                    "personal_sentences": [{
+                        "id": "p1",
+                        "text": "Context-only personal fact.",
+                        "tag": "Profile",
+                        "origin": "D1:4",
+                        "person": "Morgan",
+                    }],
+                }
+
         current_text = (
             "time:2023-07-22\n"
             "dia_id:D1:5 Morgan: I went to the national park with my kids."
         )
-        context_only = {
-            "sentence": [{"origin": "D1:4"}],
-            "personal_sentences": [],
-        }
-        cross_window = {
-            "sentence": [{"origin": "D1:4,D1:5"}],
-            "personal_sentences": [],
-        }
+        source_text = (
+            "time:2023-07-22\n"
+            "dia_id:D1:4 Alex: Where did you go?\n"
+            "dia_id:D1:5 Morgan: I went to the national park with my kids."
+        )
+        llm = MixedLLM()
 
-        valid, _ = _validate_current_window_origins(context_only, current_text)
-        cross_valid, _ = _validate_current_window_origins(cross_window, current_text)
+        with patch(
+                "agent.rewrite_memory.json_scheme.check_rewrite_json",
+                return_value=(True, ""),
+        ):
+            output = _rewrite_window(
+                llm,
+                current_text,
+                source_text,
+                "dia_id:D1:4 Alex: Where did you go?",
+            )
 
-        self.assertFalse(valid)
-        self.assertTrue(cross_valid)
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(
+            [sentence["origin"] for sentence in output["sentence"]],
+            ["D1:4,D1:5"],
+        )
+        self.assertEqual(output["personal_sentences"], [])
+        self.assertEqual(output["topics"], {"t2": "Current answer topic"})
+
+    def test_all_context_only_output_retries_at_most_three_times(self):
+        class ContextOnlyLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def chat_text(self, messages, **_kwargs):
+                self.calls += 1
+                return {
+                    "conversation_time": "2023-07-22",
+                    "sentence": [{
+                        "id": "D1:4-1",
+                        "text": "Context-only duplicate.",
+                        "tag": "Duplicate",
+                        "origin": "D1:4",
+                        "topic": ["t1"],
+                        "time": "2023-07-22",
+                    }],
+                    "topics": {"t1": "Context-only topic"},
+                    "personal_sentences": [],
+                }
+
+        current_text = "time:2023-07-22\ndia_id:D1:5 Morgan: Current turn."
+        source_text = (
+            "time:2023-07-22\n"
+            "dia_id:D1:4 Alex: Previous context.\n"
+            "dia_id:D1:5 Morgan: Current turn."
+        )
+        llm = ContextOnlyLLM()
+
+        with patch(
+                "agent.rewrite_memory.json_scheme.check_rewrite_json",
+                return_value=(True, ""),
+        ):
+            output = _rewrite_window(
+                llm,
+                current_text,
+                source_text,
+                "dia_id:D1:4 Alex: Previous context.",
+            )
+
+        self.assertEqual(llm.calls, 4)
+        self.assertEqual(output["sentence"], [])
 
     def test_boundary_question_supplies_time_to_current_answer(self):
         class BoundaryLLM:
@@ -194,6 +286,7 @@ class RewriteWindowContextTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 2)
         second_prompt = llm.calls[1][1]["content"]
+        self.assertNotIn("PREVIOUS_REWRITE_MEMORIES", second_prompt)
         context_section, current_section = second_prompt.split(
             "CURRENT_DIALOGUE_WINDOW", maxsplit=1)
         self.assertIn("D1:4", context_section)

@@ -299,22 +299,49 @@ def _empty_rewrite(conversation_time=None):
     }
 
 
-def _validate_current_window_origins(rewrite_out, current_window_text: str):
-    """Reject context-only outputs so repeated raw turns cannot create duplicates."""
+def _filter_context_only_outputs(rewrite_out, current_window_text: str):
+    """Drop context-only items, retrying only when every returned item is dropped."""
     current_ids = set(_dialogue_by_origin(current_window_text))
     if not current_ids:
         return False, "current dialogue window has no dia_id values"
+    invalid_count = 0
+    compliant_count = 0
     for field in ("sentence", "personal_sentences"):
-        for index, item in enumerate(rewrite_out.get(field) or []):
+        compliant_items = []
+        for item in rewrite_out.get(field) or []:
             if not isinstance(item, dict):
+                compliant_items.append(item)
+                compliant_count += 1
                 continue
             ids = set(origin_ids(item.get("origin")))
             if ids and ids.isdisjoint(current_ids):
-                return (
-                    False,
-                    f"{field}[{index}] is supported only by PREVIOUS_DIALOGUE_CONTEXT; "
-                    "omit it unless CURRENT_DIALOGUE_WINDOW adds information",
-                )
+                invalid_count += 1
+                continue
+            compliant_items.append(item)
+            compliant_count += 1
+        rewrite_out[field] = compliant_items
+    if not invalid_count:
+        return True, ""
+    if not compliant_count:
+        return (
+            False,
+            "all returned memory items are supported only by "
+            "PREVIOUS_DIALOGUE_CONTEXT; omit them and extract information "
+            "from CURRENT_DIALOGUE_WINDOW",
+        )
+
+    used_topics = {
+        str(topic)
+        for sentence in rewrite_out.get("sentence") or []
+        if isinstance(sentence, dict)
+        for topic in _as_list(sentence.get("topic"))
+    }
+    if isinstance(rewrite_out.get("topics"), dict):
+        rewrite_out["topics"] = {
+            topic_id: topic_text
+            for topic_id, topic_text in rewrite_out["topics"].items()
+            if str(topic_id) in used_topics
+        }
     return True, ""
 
 
@@ -323,28 +350,10 @@ def _rewrite_window(
         current_window_text: str,
         source_text: str,
         previous_dialogue_context: str,
-        previous_memories: List[dict],
         logger=None,
 ):
-    previous_slice = (
-        previous_memories[-config.REWRITE_PREVIOUS_LIMIT:]
-        if config.REWRITE_PREVIOUS_LIMIT
-        else []
-    )
-    previous_payload = [
-        {
-            "id": memory.get("id"),
-            "text": memory.get("text"),
-            "origin": memory.get("origin"),
-            "time": memory.get("time"),
-            "tag": memory.get("tag"),
-        }
-        for memory in previous_slice
-        if isinstance(memory, dict)
-    ]
     rewrite_prompt = Prompts.extract_rewrite_prompt(
         json.dumps(current_window_text, ensure_ascii=False),
-        json.dumps(previous_payload, ensure_ascii=False),
         json.dumps(previous_dialogue_context, ensure_ascii=False),
     )
     rewrite_out = llm.chat_text(
@@ -357,7 +366,7 @@ def _rewrite_window(
     normalize_rewrite_temporal_granularity(rewrite_out, source_text)
     flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
     if flag:
-        flag, err = _validate_current_window_origins(
+        flag, err = _filter_context_only_outputs(
             rewrite_out, current_window_text)
     last_err = err
     if not flag:
@@ -378,14 +387,14 @@ def _rewrite_window(
             normalize_rewrite_temporal_granularity(rewrite_out, source_text)
             flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
             if flag:
-                flag, err = _validate_current_window_origins(
+                flag, err = _filter_context_only_outputs(
                     rewrite_out, current_window_text)
             if flag:
                 break
             last_err = err
     if not flag:
         if logger:
-            logger.warning(f"rewrite window failed schema validation after retries: {last_err}")
+            logger.warning(f"rewrite window failed validation after retries: {last_err}")
         return _empty_rewrite(_conversation_time_from_text(current_window_text))
     return rewrite_out
 
@@ -446,7 +455,6 @@ def rewrite_windowed_session(llm, text: str, logger=None):
     if not turns:
         return _empty_rewrite(conversation_time)
     window_outputs = []
-    previous_memories = []
     for window in _window_turns(turns):
         previous_dialogue_context = "\n".join(window.previous_context)
         current_dialogue = "\n".join(window.current_turns)
@@ -463,9 +471,7 @@ def rewrite_windowed_session(llm, text: str, logger=None):
             current_window_text,
             source_text,
             previous_dialogue_context,
-            previous_memories,
             logger=logger,
         )
         window_outputs.append(out)
-        previous_memories.extend(_as_list(out.get("sentence")) if isinstance(out, dict) else [])
     return _merge_window_rewrites(window_outputs, conversation_time)

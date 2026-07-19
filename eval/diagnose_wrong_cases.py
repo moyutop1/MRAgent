@@ -42,6 +42,12 @@ def parse_args():
     p.add_argument("--file", type=str, required=True, help="Answer result tag used by evaluate_reasoning.")
     p.add_argument("--allfile", action="store_true", help="Load all matching answer files.")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set.")
+    p.add_argument(
+        "--categories",
+        type=str,
+        default=None,
+        help="Comma-separated answer categories to include, e.g. 1,3.",
+    )
     p.add_argument("--judge_file", type=str, default=None, help="Existing result_judge_*.jsonl file.")
     p.add_argument(
         "--retrieval_tag",
@@ -117,6 +123,17 @@ def load_answers(args):
 
 def norm_text(text):
     return " ".join(str(text or "").split())
+
+
+def filter_categories(rows, categories):
+    selected = {
+        item.strip()
+        for item in str(categories or "").split(",")
+        if item.strip()
+    }
+    if not selected:
+        return rows
+    return [row for row in rows if str(row.get("category")) in selected]
 
 
 def case_key(row):
@@ -312,7 +329,7 @@ def write_md(path, cases):
 
 def main():
     args = parse_args()
-    answers = load_answers(args)
+    answers = filter_categories(load_answers(args), args.categories)
     judge_by_key, judge_path, judge_rows = load_judge(args)
     retrieval_by_key, retrieval_paths = load_retrieval(args)
 

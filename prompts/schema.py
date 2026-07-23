@@ -14,7 +14,7 @@ SCHEMA = {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "text", "tag", "origin", "topic", "time"],
+        "required": ["id", "text", "tag", "origin", "topic", "time", "semantic_properties"],
         "properties": {
           "id": {
             "type": "string",
@@ -38,7 +38,23 @@ SCHEMA = {
             "type": "string",
             "format": "date",
             "description": "YYYY-MM-DD"
-
+          },
+          "semantic_properties": {
+            "type": "array",
+            "uniqueItems": True,
+            "items": {
+              "type": "string",
+              "enum": [
+                "event_action",
+                "state_opinion",
+                "personal_profile",
+                "relation_social",
+                "transient",
+                "episodic",
+                "durable",
+                "unknown"
+              ]
+            }
           }
         }
       }
@@ -115,6 +131,24 @@ def check_rewrite_json(text, dialogue_text):
   for i, s in enumerate(text.get("sentence", [])):
     sid = s.get("id", "")
     origin = s.get("origin", "")
+    semantic_properties = s.get("semantic_properties")
+
+    # The semantic field combines two independent axes: up to three content
+    # properties plus exactly one persistence property. Schema validation above
+    # already enforces list type, uniqueness, and the complete label whitelist.
+    content_properties = {
+      "event_action", "state_opinion", "personal_profile", "relation_social"
+    }
+    persistence_properties = {"transient", "episodic", "durable", "unknown"}
+    content_count = sum(item in content_properties for item in semantic_properties)
+    persistence_count = sum(item in persistence_properties for item in semantic_properties)
+    if content_count > 3:
+      return False, f"sentence[{i}].semantic_properties has more than 3 content properties"
+    if persistence_count != 1:
+      return False, (
+        f"sentence[{i}].semantic_properties must contain exactly one "
+        "persistence property"
+      )
 
     # 1) Check id format
     if not ID_RE.fullmatch(sid):

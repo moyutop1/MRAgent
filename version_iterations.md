@@ -2,6 +2,38 @@
 
 > Evaluation recording convention: whenever a new experiment result is reported, append its scope, metrics, and diagnosis to the corresponding version entry.
 
+## v114-20260723
+
+### Goal
+
+Add query-adaptive semantic-property scoring to the existing EAES retrieval path without introducing a new memory type, cache, embedding, reranker, or filtering module.
+
+### Changes
+
+- Generate and permanently save `semantic_properties` with every rewrite memory in the existing rewrite LLM call.
+  - Content axis: `event_action`, `state_opinion`, `personal_profile`, `relation_social` (zero to three labels).
+  - Persistence axis: `transient`, `episodic`, `durable`, `unknown` (exactly one label).
+  - `personal_profile` covers preferences plus interests, hobbies, occupation, education, skills, traits, residence, possessions, pets, and stable goals.
+  - The abandoned labels `profile_preference` and `fact_background` are rejected by schema validation.
+- Store the field on the existing `EpisodeEvent`; leave `EAESMemoryNote`, its cached retrieval embedding, and EAES index construction unchanged.
+- Add `--eaes_semantic_score` as an opt-in EAES retrieval-scoring ablation.
+  - When enabled, the existing query parser additionally predicts `required_semantic_properties`.
+  - Query labels are whitelist-filtered, deduplicated, and never include `unknown`.
+  - Each exact query-memory property match adds `0.1`, capped at three matches (`0.3` total).
+  - Mismatches and missing properties receive no penalty and never filter a candidate.
+- Add semantic match count, matched labels, and bonus to candidate score diagnostics.
+- Add `_semantic` to result filenames and `--semantic_score` to the retrieval evaluator for locating those files.
+- Keep the original query prompt, query-plan fields, and retrieval score unchanged when the flag is disabled.
+
+### Expected Effect
+
+- Prefer memories whose content granularity and persistence match the evidence needs of the query while retaining the current entity, attribute, keyword, lifecycle, embedding, LLM reranker, and evidence-selector pipeline.
+- Improve retrieval ranking for category-1 and category-3 questions without reducing recall through hard type filtering.
+
+### Evaluation Result
+
+Pending. Regenerate rewrite memories before the comparison because existing rewrite JSONL files do not contain `semantic_properties`. Compare the same regenerated memories with semantic scoring disabled versus enabled, focusing on ExactCover and MRR for categories 1 and 3.
+
 ## v113-20260721
 
 ### Goal

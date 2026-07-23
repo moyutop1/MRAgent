@@ -34,6 +34,18 @@ TASK:
 - Create a memory only when CURRENT_DIALOGUE_WINDOW adds answer-bearing information. Never create a memory supported only by PREVIOUS_DIALOGUE_CONTEXT.
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
+- Classify every memory with one orthogonal "semantic_properties" array in the same rewrite call. Do not create a separate classification response.
+  - Content properties (choose zero to three):
+    - "event_action": a concrete action, event, plan, decision, or task outcome.
+    - "state_opinion": a reaction, emotion, opinion, evaluation, or temporary state.
+    - "personal_profile": person-centered characteristics such as interests, hobbies, occupation, education, skills, traits, residence, possessions, pets, or stable goals. It is not limited to preferences.
+    - "relation_social": an interpersonal relationship, social role, membership, support, or interaction pattern.
+  - Persistence property (choose exactly one):
+    - "transient": momentary or short-lived state/reaction.
+    - "episodic": bounded occurrence tied to a particular event or period.
+    - "durable": relatively stable profile, preference, possession, role, relationship, or long-lived condition.
+    - "unknown": persistence cannot be determined from the dialogue.
+  - Use only the eight labels above, never "profile_preference" or "fact_background". Do not repeat a label.
 - The "id" field may be any valid placeholder matching the first source id, because code will rewrite ids deterministically after validation.
 - Use PREVIOUS_REWRITE_MEMORIES only to avoid repeating already-written memories; do not copy them unless CURRENT_DIALOGUE_WINDOW adds new information.
 - Topics: derive concrete topic summaries from the memories in this window. Assign topic IDs (t1..tn). In each memory, fill "topic" with topic IDs that apply; use [] if none.
@@ -48,7 +60,8 @@ Schema:
       "tag":"short concrete tag",
       "origin":"D1:1",
       "topic": ["t1","t3"],
-      "time":"YYYY-MM-DD"
+      "time":"YYYY-MM-DD",
+      "semantic_properties":["personal_profile","durable"]
     }
   ],
   "topics":{
@@ -313,6 +326,19 @@ Rules:
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
 - Do not answer the question."""
+
+    EAES_SEMANTIC_QUERY_EXTENSION = """
+
+Additionally infer the semantic memory properties required by the question.
+Add this field to the JSON object:
+  "required_semantic_properties": ["content property", "persistence property"]
+Rules:
+- Content properties are: "event_action", "state_opinion", "personal_profile", "relation_social". Select only properties that the answer evidence needs.
+- "personal_profile" covers person-centered interests, hobbies, occupation, education, skills, traits, residence, possessions, pets, preferences, and stable goals.
+- Persistence properties are: "transient", "episodic", "durable". Select the best required persistence when the question supports one.
+- Never output "unknown", "profile_preference", or "fact_background".
+- Use only the seven allowed query labels above and do not repeat a label.
+- This field describes evidence requirements; it must not answer the question."""
 
     EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
 For each memory sentence, identify:

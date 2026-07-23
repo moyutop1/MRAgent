@@ -28,6 +28,11 @@ parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("E
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Memories kept by the EAES attribute reranker for evidence selection.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
 parser.add_argument(
+    "--eaes_semantic_score",
+    action="store_true",
+    help="Enable query-required semantic-property bonuses in EAES candidate scoring.",
+)
+parser.add_argument(
     "--disable_evidence_selector",
     action="store_true",
     help="EAES answer ablation: bypass the evidence selector and pass all reranked candidates directly to the final reader.",
@@ -157,10 +162,16 @@ RERANK_LIMIT=20      # event_by_tag: re-rank events only when more than this man
 MAX_ROUNDS=8         # tool-calling loop: max assistant rounds
 MAX_TOOL_CALLS=50    # tool-calling loop: safety cap on total tool calls
 EAES_MODE = args.eaes
+EAES_SEMANTIC_SCORE = args.eaes_semantic_score
+# Each exact query-memory semantic-property match adds this weak positive bonus;
+# the scorer caps the effective match count at three and never subtracts points.
+SEMANTIC_MATCH_WEIGHT = 0.1
 RETRIEVAL_ONLY = args.retrieval_only
 DISABLE_EVIDENCE_SELECTOR = args.disable_evidence_selector
 if DISABLE_EVIDENCE_SELECTOR and not EAES_MODE:
     raise ValueError("--disable_evidence_selector requires --eaes.")
+if EAES_SEMANTIC_SCORE and not EAES_MODE:
+    raise ValueError("--eaes_semantic_score requires --eaes.")
 if DISABLE_EVIDENCE_SELECTOR and RETRIEVAL_ONLY:
     raise ValueError(
         "--disable_evidence_selector cannot change --retrieval_only metrics because "
@@ -223,6 +234,7 @@ ADDITIONAL_RE = (
     f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
     f"{'_xcat' + '-'.join(sorted(EXCLUDED_CATEGORIES)) if EXCLUDED_CATEGORIES else ''}"
     f"{'_eaes' if EAES_MODE else ''}"
+    f"{'_semantic' if EAES_SEMANTIC_SCORE else ''}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"

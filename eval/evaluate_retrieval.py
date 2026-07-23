@@ -10,13 +10,25 @@ def parse_args():
     p.add_argument("--model", type=str, default="ofox", help="Model short name")
     p.add_argument("--file", type=str, default="0", help="Run/experiment tag")
     p.add_argument("--eaes", action="store_true", help="Read EAES retrieval files")
+    p.add_argument(
+        "--semantic_score",
+        action="store_true",
+        help="Read EAES retrieval files produced with --eaes_semantic_score",
+    )
     p.add_argument("--allfile", action="store_true", help="Aggregate all matching samples")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
     return p.parse_args()
 
 
 def load_rows(args):
-    suffix = f"{args.model}_{args.file}{'_eaes' if args.eaes else ''}_retrieval"
+    if args.semantic_score and not args.eaes:
+        raise ValueError("--semantic_score requires --eaes.")
+    suffix = (
+        f"{args.model}_{args.file}"
+        f"{'_eaes' if args.eaes else ''}"
+        f"{'_semantic' if args.semantic_score else ''}"
+        "_retrieval"
+    )
     root = Path(f"result/{args.data}")
     if args.allfile:
         files = sorted(root.glob(f"*_result_{suffix}.jsonl"))

@@ -655,6 +655,7 @@ class Agent(EAESMixin, RetrievalMixin):
                     continue
                 time = ee.get("time")
                 topics = self._as_list(ee.get("topic"))
+                semantic_properties = self._as_list(ee.get("semantic_properties"))
 
 
                 first_origin = self._first_origin(origin)
@@ -676,7 +677,18 @@ class Agent(EAESMixin, RetrievalMixin):
                         continue
                     if raw_context.split(":", 1)[0].strip() != "user":
                         continue
-                ee_event = EpisodeEvent(id, text, origin, embedding, time=time, conv_time=conversation_time)
+                # semantic_properties is generated with the rewrite memory and
+                # stored on EpisodeEvent; loading it does not create a new cache
+                # or recompute the already persisted memory embedding.
+                ee_event = EpisodeEvent(
+                    id,
+                    text,
+                    origin,
+                    embedding,
+                    time=time,
+                    conv_time=conversation_time,
+                    semantic_properties=semantic_properties,
+                )
                 ee_event.tag_t = ee.get("tag")
                 self.memory.episode_events[id] = ee_event
                 try:

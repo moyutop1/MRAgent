@@ -159,6 +159,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
+| `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | EAES answer ablation: pass all reranked candidates directly to the final reader | off |
 
 ### 5.2 LoCoMo
@@ -183,6 +184,10 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file ret
 # entity-attribute-memory retrieval diagnostics
 python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
+
+# semantic-property scoring ablation (rewrite memories must first be regenerated with semantic_properties)
+python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file semantic50_q50 --sample conv-26 --eaes --semantic_score
 
 # answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
 python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30

@@ -418,9 +418,15 @@ class EAESMixin:
 
     def parse_eaes_query(self, question, question_emb=None):
         query_question = self._eaes_query_question(question)
+        # Keep the baseline query prompt byte-for-byte unchanged when semantic
+        # scoring is disabled. The extension is opt-in and only asks for the
+        # additional evidence-requirement field.
+        query_prompt = Prompts.EAES_QUERY_SYSTEM_PROMPT
+        if config.EAES_SEMANTIC_SCORE:
+            query_prompt += Prompts.EAES_SEMANTIC_QUERY_EXTENSION
         query_out = self.llm.chat_text(
             messages=[
-                {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
+                {"role": "system", "content": query_prompt},
                 {"role": "user", "content": json.dumps({"question": query_question}, ensure_ascii=False)},
             ],
             model=config.RE_MODEL
@@ -440,6 +446,19 @@ class EAESMixin:
                 "keywords": self._as_list(query_out.get("keywords")),
                 "query_mode": "question_only",
             }
+            if config.EAES_SEMANTIC_SCORE:
+                # Query requirements use exact labels only. Unknown persistence
+                # and unapproved/legacy labels cannot create a scoring bonus.
+                allowed_properties = {
+                    "event_action", "state_opinion", "personal_profile",
+                    "relation_social", "transient", "episodic", "durable",
+                }
+                required_properties = []
+                for value in self._as_list(query_out.get("required_semantic_properties")):
+                    value = str(value or "").lower().strip()
+                    if value in allowed_properties and value not in required_properties:
+                        required_properties.append(value)
+                plan["required_semantic_properties"] = required_properties
             return self._postprocess_eaes_query_plan(query_question, plan)
         fallback_query = {
             "entities": [],
@@ -450,6 +469,9 @@ class EAESMixin:
             "keywords": [],
             "query_mode": "question_text_fallback",
         }
+        if config.EAES_SEMANTIC_SCORE:
+            # A failed semantic query parse is neutral: no match and no penalty.
+            fallback_query["required_semantic_properties"] = []
         return self._postprocess_eaes_query_plan(query_question, fallback_query)
 
     def rerank_eaes_candidates(self, question, query_plan, candidates):

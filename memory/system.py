@@ -76,7 +76,7 @@ class Persona:
 
 
 class EpisodeEvent:
-    def __init__(self, event_id: str, text: str, origin: str, embedding = None, time: str = None, conv_time: str = None, true_time: str = None):
+    def __init__(self, event_id: str, text: str, origin: str, embedding = None, time: str = None, conv_time: str = None, true_time: str = None, semantic_properties=None):
         self.event_id = event_id
         self.text = text
         self.time = time
@@ -87,6 +87,9 @@ class EpisodeEvent:
         self.origin = origin
         self.embedding = embedding
         self.conversation_time = conv_time
+        # Persist rewrite-time semantic labels on the real memory object. EAES
+        # notes remain a derived entity/attribute index and do not own this field.
+        self.semantic_properties = list(semantic_properties or [])
 
 
     def add_tag(self, tag, episode_id):

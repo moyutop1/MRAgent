@@ -215,6 +215,12 @@ class MemoryController:
         query_entities = self._as_list(query_plan.get("entities"))
         keywords = self._as_list(query_plan.get("keywords"))
         required_lifecycle = str(query_plan.get("required_lifecycle") or "").lower().strip()
+        required_semantic_properties = []
+        if config.EAES_SEMANTIC_SCORE:
+            for value in self._as_list(query_plan.get("required_semantic_properties")):
+                value = str(value or "").lower().strip()
+                if value and value not in required_semantic_properties:
+                    required_semantic_properties.append(value)
 
         entity_words = [self._eaes_words(entity) for entity in query_entities]
         keyword_words = set()
@@ -261,12 +267,34 @@ class MemoryController:
                 except Exception:
                     original_embedding_score = 0.0
 
+            # Semantic properties live on EpisodeEvent, not EAESMemoryNote. A
+            # missing event/field, disabled flag, or empty query requirement is
+            # deliberately neutral. Exact intersections receive a capped,
+            # tiered positive bonus; mismatches are never penalized or filtered.
+            matched_semantic_properties = []
+            semantic_match_count = 0
+            semantic_bonus = 0.0
+            if config.EAES_SEMANTIC_SCORE and required_semantic_properties:
+                event = self.memory.episode_events.get(note.event_id)
+                memory_properties = set(
+                    self._as_list(getattr(event, "semantic_properties", []))
+                ) if event is not None else set()
+                matched_semantic_properties = [
+                    value for value in required_semantic_properties
+                    if value in memory_properties
+                ]
+                semantic_match_count = len(matched_semantic_properties)
+                semantic_bonus = (
+                    min(semantic_match_count, 3) * config.SEMANTIC_MATCH_WEIGHT
+                )
+
             score = (
                 2.0 * entity_score
                 + 1.4 * attribute_score
                 + 1.2 * keyword_score
                 + 0.1 * lifecycle_score
                 + 0.2 * original_embedding_score
+                + semantic_bonus
             )
             scored.append((score, {
                 **note.to_dict(include_raw=False),
@@ -278,6 +306,9 @@ class MemoryController:
                     "keyword": round(keyword_score, 3),
                     "lifecycle": round(lifecycle_score, 3),
                     "embedding": round(original_embedding_score, 3),
+                    "semantic_match_count": semantic_match_count,
+                    "matched_semantic_properties": matched_semantic_properties,
+                    "semantic_bonus": round(semantic_bonus, 3),
                     "query_attribute_count": len(query_attributes),
                 },
                 "matched_query_attribute": query_attributes[best_index],

@@ -314,6 +314,27 @@ Rules:
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
 - Do not answer the question."""
 
+    EAES_TYPED_QUERY_SYSTEM_PROMPT = EAES_QUERY_SYSTEM_PROMPT + """
+
+When typed memory is enabled, also output these orthogonal evidence preferences:
+{
+  "required_memory_types": ["event_action"],
+  "preferred_persistence": ["episodic"]
+}
+Typed-memory rules:
+- Predict what kinds of evidence the question needs, never the answer itself.
+- Use 1-3 required_memory_types. Multi-hop questions may require several types.
+- event_action: a bounded action, occurrence, attendance, execution, or event.
+- state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
+- profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
+- relation_social: a family, friendship, interpersonal, membership, or organizational relation.
+- fact_background: a descriptive fact about an object, place, situation, or external background.
+- transient: a momentary reaction or short-lived state.
+- episodic: information tied to a particular event or occurrence.
+- durable: a relation, preference, profile, goal, or fact expected to remain useful across time.
+- unknown means the question does not establish a useful persistence preference.
+- These fields express soft retrieval preferences and must not exclude other useful evidence."""
+
     EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
 For each memory sentence, identify:
 - entities: people, organizations, communities, named objects, or concrete concepts central to retrieving the memory.
@@ -342,6 +363,28 @@ Schema:
     }
   ]
 }"""
+
+    EAES_TYPED_INDEX_SYSTEM_PROMPT = EAES_INDEX_SYSTEM_PROMPT + """
+
+When typed memory is enabled, classify each indexed memory on two orthogonal axes.
+Add these fields to every object in memories:
+{
+  "memory_types": ["event_action"],
+  "persistence": "episodic"
+}
+Typed-memory rules:
+- Assign 1-3 memory_types using only the supplied memory sentence and raw source.
+- event_action: a bounded action, occurrence, attendance, execution, or event.
+- state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
+- profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
+- relation_social: a family, friendship, interpersonal, membership, or organizational relation.
+- fact_background: a descriptive fact about an object, place, situation, or external background.
+- Choose one primary persistence value.
+- transient: a momentary reaction or short-lived state.
+- episodic: information tied to a particular event or occurrence.
+- durable: a relation, preference, profile, goal, or fact expected to remain useful across time.
+- Use unknown when the source does not establish persistence.
+- Do not change, omit, or generalize the source facts in order to fit a label."""
 
     EAES_INDEX_USER_PROMPT = """MEMORY_SENTENCES:
 {MEMORIES}"""

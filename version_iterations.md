@@ -1,5 +1,30 @@
 # Version Iterations
 
+> Evaluation recording convention: whenever a new experiment result is reported, append its scope, metrics, and diagnosis to the corresponding version entry.
+
+## v113-20260721
+
+### Goal
+
+Test whether the EAES evidence selector is an answer-stage bottleneck when the reranked candidate list already contains complete gold evidence.
+
+### Changes
+
+- Add `--disable_evidence_selector` as an opt-in EAES answer ablation; the default pipeline remains unchanged.
+- When enabled, bypass the LLM evidence selector and expose every reranked candidate directly to the final reader in rerank order.
+- Add `_no_selector` to result and log filenames for the ablation.
+- Reject `--disable_evidence_selector` together with `--retrieval_only`, because retrieval-only already stops before evidence selection and its ExactCover/MRR cannot be affected by this switch.
+
+### Expected Effect
+
+- If answer accuracy improves, the selector is discarding or over-compressing useful complementary evidence.
+- If answer accuracy remains unchanged while final-context gold coverage is complete, the primary bottleneck is the final reader model or its reasoning prompt.
+- Retrieval-only ExactCover and MRR are expected to remain unchanged because they measure the reranked candidate list before evidence selection.
+
+### Evaluation Result
+
+Pending. Compare the same category-1/category-3 question set with selector enabled versus disabled using F1 and LLM-judge accuracy.
+
 ## v112-20260717
 
 ### Goal
@@ -19,6 +44,72 @@ Restore previous rewrite memories after the no-previous-memory ablation reduced 
 
 - Recover the rewrite quality and deduplication benefit of previous compressed memories without reintroducing whole-window loss from mixed context-only output.
 - Reduce judge false negatives for complete but non-exclusive generated answers.
+
+### Evaluation Result
+
+Scope: LoCoMo `conv-26`, `deepseek-chat`, first 100 questions after excluding category 5, with EAES enabled.
+
+#### F1 by Category
+
+| Category | n | F1 |
+| --- | ---: | ---: |
+| 1 | 32 | 0.4517 |
+| 2 | 37 | 0.8788 |
+| 3 | 13 | 0.2282 |
+| 4 | 18 | 0.4757 |
+
+#### LLM-Judge Accuracy by Category
+
+| Category | n | Correct | Accuracy |
+| --- | ---: | ---: | ---: |
+| 1 | 32 | 26 | 0.8125 |
+| 2 | 37 | 32 | 0.8649 |
+| 3 | 13 | 9 | 0.6923 |
+| 4 | 18 | 13 | 0.7222 |
+| Overall | 100 | 80 | 0.8000 |
+
+#### Category 4 Diagnosis
+
+- The lower category-4 judge score does not yet establish that single-hop questions are intrinsically harder in this system. Category 4 has only 18 questions and 5 errors, so each error changes its accuracy by 5.56 percentage points. Its 95% Wilson interval is approximately `[0.491, 0.875]`, overlapping category 1 (`[0.647, 0.911]`) and category 2 (`[0.720, 0.941]`). Two-sided Fisher tests also do not show a significant difference from category 1 (`p≈0.494`) or category 2 (`p≈0.268`).
+- `--max_questions 100` creates a category-order sampling bias. All 18 evaluated category-4 questions occupy selected positions 83-100. They are only 18 of the 70 category-4 questions in `conv-26`, and their gold evidence is concentrated in sessions D2 (8 questions), D3 (1), and D4 (9), while categories 1 and 2 cover many more sessions. This small cluster is not representative of all single-hop questions.
+- Single-hop describes evidence-chain length, not answer atomicity or retrieval difficulty. The evaluated category-4 gold answers average about 6.89 words, compared with 3.44 for category 1 and 4.05 for category 2. Several require complete lists, opinions, or causal explanations rather than a short entity.
+- Multiple category-4 questions ask for different facets of the same source turn. For example, D4:3 supports the necklace's symbolism, origin country, and gift identity, while D4:13 supports the counseling population, workshop identity, and workshop content. Rewrite compression can place all facets in one broad memory; retrieval may find the correct memory but the final answer model can select the wrong facet or omit one required list element.
+- Several D2 adoption questions are semantically very close: summer plans, agency population, reason for choosing the agency, and excitement about adoption. This increases same-topic distractor competition even though every question is technically single-hop.
+- There is at least one source/question entity inconsistency: the question asks about “Melanie's hand-painted bowl,” but D4:5 attributes the bowl to Caroline. Entity-aware EAES indexing or reranking can therefore demote the gold memory.
+- Category 4's F1 (0.4757) is slightly higher than category 1's (0.4517) even though its judge accuracy is lower. This suggests that a few semantic-coverage failures, answer-facet errors, or residual judge errors may be moving the judge metric more than a general collapse in answer overlap.
+
+Next diagnosis should inspect the five category-4 judge failures together with their retrieved candidates and final evidence package, then rerun either all 70 category-4 questions or a category-stratified sample. This will separate rewrite loss, retrieval/reranking errors, final-answer facet selection, and judge false negatives.
+
+### Full Evaluation Result
+
+Scope: all 1,540 non-adversarial questions from the ten LoCoMo conversations (`conv-26`, `conv-30`, `conv-41` through `conv-44`, and `conv-47` through `conv-50`), using `deepseek-chat` result tag `rewrite_overlap_and_new_llmjudge`. The run used one worker, rewrite window size 40 with overlap 2, and EAES with LLM indexing, prefilter limit 120, and rerank limit 30.
+
+#### F1 by Category
+
+| Category | n | F1 |
+| --- | ---: | ---: |
+| 1 | 282 | 0.4929 |
+| 2 | 321 | 0.7163 |
+| 3 | 96 | 0.3335 |
+| 4 | 841 | 0.6269 |
+
+#### LLM-Judge Accuracy by Category
+
+| Category | n | Correct | Wrong | Accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 282 | 208 | 74 | 0.7376 |
+| 2 | 321 | 264 | 57 | 0.8224 |
+| 3 | 96 | 57 | 39 | 0.5938 |
+| 4 | 841 | 704 | 137 | 0.8371 |
+| Overall | 1,540 | 1,233 | 307 | 0.8006 |
+
+#### Full-Set Diagnosis
+
+- The full evaluation reverses the small `conv-26` pilot's apparent category-4 weakness. Category 4 reaches the highest judge accuracy (`0.8371`) over 841 questions, confirming that its earlier `13/18` result was not representative.
+- Category 3 is the clearest rate-level weakness: judge accuracy is `0.5938` and F1 is `0.3335`. Category 1 is the next-lowest by both judge accuracy (`0.7376`) and F1 (`0.4929`).
+- Category 1 contributes more judge failures than category 3 in absolute terms (74 versus 39), so it remains a high-impact target even though its error rate is lower.
+- Category 4 comprises 54.6% of the evaluated questions. The overall micro accuracy (`0.8006`) is therefore dominated by the strongest and largest category; per-category metrics should remain the primary basis for diagnosis.
+- The next diagnostic run should evaluate retrieval only for categories 1 and 3, then join those rows with the existing judge failures. This will distinguish rewrite/index loss and retrieval/reranking misses from final-answer reasoning or residual judge errors.
 
 ## v111-20260717
 

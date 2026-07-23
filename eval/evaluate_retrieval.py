@@ -10,13 +10,27 @@ def parse_args():
     p.add_argument("--model", type=str, default="ofox", help="Model short name")
     p.add_argument("--file", type=str, default="0", help="Run/experiment tag")
     p.add_argument("--eaes", action="store_true", help="Read EAES retrieval files")
+    p.add_argument(
+        "--typed_memory",
+        action="store_true",
+        help="Read EAES typed-memory retrieval files (requires --eaes)",
+    )
     p.add_argument("--allfile", action="store_true", help="Aggregate all matching samples")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
     return p.parse_args()
 
 
 def load_rows(args):
-    suffix = f"{args.model}_{args.file}{'_eaes' if args.eaes else ''}_retrieval"
+    if args.typed_memory and not args.eaes:
+        raise ValueError("--typed_memory requires --eaes.")
+    # Mirrors common.config.ADDITIONAL_RE so evaluation cannot accidentally load
+    # the untyped control files for a typed-memory experiment (or vice versa).
+    suffix = (
+        f"{args.model}_{args.file}"
+        f"{'_eaes' if args.eaes else ''}"
+        f"{'_typed' if args.typed_memory else ''}"
+        "_retrieval"
+    )
     root = Path(f"result/{args.data}")
     if args.allfile:
         files = sorted(root.glob(f"*_result_{suffix}.jsonl"))

@@ -7,6 +7,123 @@ from typing import List, Dict, Set, Any
 from collections import defaultdict
 
 
+# This relation is intentionally narrow: an opinion can reveal a preference, but
+# most distinct semantic types are not interchangeable and receive no bonus.
+EAES_RELATED_MEMORY_TYPES = {
+    frozenset({"state_opinion", "profile_preference"}),
+}
+
+
+def _eaes_as_list(value):
+    """Accept legacy scalar fields and newer multi-value fields uniformly."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
+
+
+def eaes_labels(values):
+    """Read legacy scalar/dict values and return unique lowercase labels."""
+    labels = []
+    for item in _eaes_as_list(values):
+        if isinstance(item, dict):
+            value = str(item.get("value") or item.get("type") or "").lower().strip()
+        else:
+            value = str(item or "").lower().strip()
+        if value and value not in labels:
+            labels.append(value)
+    return labels
+
+
+def eaes_type_compatibility(query_plan, note):
+    """Return the best soft type match for one query-memory pair.
+
+    Returns ``(score, matched_note_types, match_state)``. Exact labels score
+    1.0 and the explicitly related pair receives half credit. We take the best
+    requested type here because this function ranks one note at a time. Cross-note
+    requirement coverage belongs to the evidence selector/composition stage.
+    """
+    query_types = eaes_labels(
+        (query_plan or {}).get("required_memory_types")
+    )
+    note_types = [
+        str(value).lower().strip()
+        for value in _eaes_as_list(getattr(note, "memory_types", []))
+        if str(value).strip()
+    ]
+    if not query_types:
+        return 0.0, [], "none"
+    if not note_types:
+        return 0.0, [], "unknown"
+    best_score = 0.0
+    best_state = "mismatch"
+    matched_types = []
+    for query_type in query_types:
+        for note_type in note_types:
+            if query_type == note_type:
+                compatibility = 1.0
+                state = "exact"
+            elif frozenset({query_type, note_type}) in EAES_RELATED_MEMORY_TYPES:
+                compatibility = 0.5
+                state = "related"
+            else:
+                compatibility = 0.0
+                state = "mismatch"
+            score = compatibility
+            if score > best_score:
+                best_score = score
+                best_state = state
+                matched_types = [note_type]
+            elif score == best_score and score > 0 and note_type not in matched_types:
+                matched_types.append(note_type)
+    return best_score, matched_types, best_state
+
+
+def eaes_persistence_compatibility(query_plan, note):
+    """Return the best soft persistence match for one query-memory pair.
+
+    Returns ``(score, matched_query_preference, match_state)``. ``unknown`` is
+    deliberately worth 0.5 rather than zero: it means the source did not establish
+    persistence, so the note remains retrievable instead of being treated as a
+    contradiction. No branch produces a negative score or a hard exclusion.
+    """
+    preferences = [
+        value
+        for value in eaes_labels((query_plan or {}).get("preferred_persistence"))
+        if value != "unknown"
+    ]
+    if not preferences:
+        return 0.0, None, "none"
+    note_persistence = str(
+        getattr(note, "persistence", "unknown") or "unknown"
+    ).lower().strip()
+    best_score = 0.0
+    best_preference = None
+    best_state = "mismatch"
+    for preferred in preferences:
+        if note_persistence == "unknown":
+            compatibility = 0.5
+            state = "unknown"
+        elif note_persistence == preferred:
+            compatibility = 1.0
+            state = "exact"
+        elif {note_persistence, preferred} == {"transient", "episodic"}:
+            compatibility = 0.3
+            state = "related"
+        else:
+            compatibility = 0.0
+            state = "mismatch"
+        score = compatibility
+        if score > best_score:
+            best_score = score
+            best_preference = preferred
+            best_state = state
+    return best_score, best_preference, best_state
+
+
 
 
 
@@ -105,6 +222,11 @@ class Link:
 
 
 class EAESMemoryNote:
+    """EAES retrieval note with optional orthogonal semantic annotations.
+
+    The typed fields have defaults so old construction paths and previously
+    serialized notes continue to work when the feature is disabled.
+    """
     def __init__(
             self,
             memory_id: str,
@@ -118,6 +240,8 @@ class EAESMemoryNote:
             origin: str,
             embedding=None,
             retrieval_embedding=None,
+            memory_types=None,
+            persistence: str = "unknown",
     ):
         self.memory_id = memory_id
         self.event_id = event_id
@@ -130,8 +254,11 @@ class EAESMemoryNote:
         self.origin = origin
         self.embedding = embedding
         self.retrieval_embedding = retrieval_embedding
+        self.memory_types = list(memory_types or [])
+        self.persistence = persistence or "unknown"
 
-    def to_dict(self, include_raw: bool = False):
+    def to_dict(self, include_raw: bool = False, include_typed: bool = True):
+        """Serialize a note, optionally preserving the exact legacy result shape."""
         data = {
             "memory_id": self.memory_id,
             "event_id": self.event_id,
@@ -142,6 +269,11 @@ class EAESMemoryNote:
             "event_lifecycle": self.event_lifecycle,
             "origin": self.origin,
         }
+        if include_typed:
+            data.update({
+                "memory_types": list(getattr(self, "memory_types", []) or []),
+                "persistence": getattr(self, "persistence", "unknown") or "unknown",
+            })
         if include_raw:
             data["raw_text"] = self.raw_text
         return data

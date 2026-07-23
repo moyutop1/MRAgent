@@ -13,7 +13,11 @@ from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
 from llm.controller import LLM
 from llm.embeddings import get_embedding
-from memory.system import MemorySystem
+from memory.system import (
+    MemorySystem,
+    eaes_persistence_compatibility,
+    eaes_type_compatibility,
+)
 import logging
 logger = logging.getLogger(__name__)
 
@@ -261,26 +265,74 @@ class MemoryController:
                 except Exception:
                     original_embedding_score = 0.0
 
+            type_score = 0.0
+            persistence_score = 0.0
+            matched_memory_types = []
+            type_match_state = "disabled"
+            matched_persistence = None
+            persistence_match_state = "disabled"
+            if config.EAES_TYPED_MEMORY:
+                # Semantic fields refine the existing entity/attribute retrieval
+                # through deterministic label compatibility only.
+                (
+                    type_score,
+                    matched_memory_types,
+                    type_match_state,
+                ) = eaes_type_compatibility(query_plan, note)
+                (
+                    persistence_score,
+                    matched_persistence,
+                    persistence_match_state,
+                ) = eaes_persistence_compatibility(query_plan, note)
+
+            # Typed signals are additive-only weak bonuses. They never filter a
+            # candidate, so an exact semantic/embedding match cannot be discarded
+            # merely because its type is missing, unknown, or misclassified.
             score = (
                 2.0 * entity_score
                 + 1.4 * attribute_score
                 + 1.2 * keyword_score
                 + 0.1 * lifecycle_score
                 + 0.2 * original_embedding_score
+                + config.EAES_TYPE_WEIGHT * type_score
+                + config.EAES_PERSISTENCE_WEIGHT * persistence_score
             )
+            score_parts = {
+                "entity": round(entity_score, 3),
+                "attribute": round(attribute_score, 4),
+                "attribute_embedding_raw": round(raw_attribute_score, 4),
+                "keyword": round(keyword_score, 3),
+                "lifecycle": round(lifecycle_score, 3),
+                "embedding": round(original_embedding_score, 3),
+                "query_attribute_count": len(query_attributes),
+            }
+            typed_diagnostics = {}
+            if config.EAES_TYPED_MEMORY:
+                # Persist decomposed scores and match states for retrieval-only
+                # diagnosis and weight ablations without rerunning the indexer.
+                score_parts.update({
+                    "type": round(type_score, 3),
+                    "persistence": round(persistence_score, 3),
+                    "type_bonus": round(config.EAES_TYPE_WEIGHT * type_score, 4),
+                    "persistence_bonus": round(
+                        config.EAES_PERSISTENCE_WEIGHT * persistence_score, 4
+                    ),
+                })
+                typed_diagnostics = {
+                    "matched_memory_types": matched_memory_types,
+                    "type_match_state": type_match_state,
+                    "matched_query_persistence": matched_persistence,
+                    "persistence_match_state": persistence_match_state,
+                }
             scored.append((score, {
-                **note.to_dict(include_raw=False),
+                **note.to_dict(
+                    include_raw=False,
+                    include_typed=config.EAES_TYPED_MEMORY,
+                ),
                 "score": round(score, 4),
-                "score_parts": {
-                    "entity": round(entity_score, 3),
-                    "attribute": round(attribute_score, 4),
-                    "attribute_embedding_raw": round(raw_attribute_score, 4),
-                    "keyword": round(keyword_score, 3),
-                    "lifecycle": round(lifecycle_score, 3),
-                    "embedding": round(original_embedding_score, 3),
-                    "query_attribute_count": len(query_attributes),
-                },
+                "score_parts": score_parts,
                 "matched_query_attribute": query_attributes[best_index],
+                **typed_diagnostics,
             }))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -302,7 +354,10 @@ class MemoryController:
         for mid in memory_ids[:config.EAES_RAW_EXPANSION_LIMIT]:
             note = self.memory.get_eaes_note(mid)
             if note is not None:
-                expanded.append(note.to_dict(include_raw=True))
+                expanded.append(note.to_dict(
+                    include_raw=True,
+                    include_typed=config.EAES_TYPED_MEMORY,
+                ))
         return expanded
 
     def _parse_md(self,s: str):

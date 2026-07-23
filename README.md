@@ -159,6 +159,10 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
+| `--eaes_typed_memory` | enable orthogonal semantic memory types and persistence as weak EAES retrieval bonuses | off |
+| `--eaes_type_weight` | semantic-type compatibility bonus weight | `0.15` |
+| `--eaes_persistence_weight` | persistence compatibility bonus weight | `0.05` |
+| `--disable_evidence_selector` | EAES answer ablation: pass all reranked candidates directly to the final reader | off |
 
 ### 5.2 LoCoMo
 
@@ -182,6 +186,13 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file ret
 # entity-attribute-memory retrieval diagnostics
 python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
+
+# answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
+python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
+
+# typed-memory retrieval ablation (adds the _typed suffix)
+python run.py --data locomo --model deepseek-chat --file typed_retrieval --sample 26 --workers 1 --retrieval_only --eaes --eaes_typed_memory --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file typed_retrieval --sample conv-26 --eaes --typed_memory
 
 # compare against the older free keyword extraction path
 python run.py --data locomo --model deepseek-chat --file retr50_extract --sample 26 --max_questions 50 --workers 1 --retrieval_only --query_key_mode extract

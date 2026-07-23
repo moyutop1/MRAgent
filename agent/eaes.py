@@ -73,50 +73,32 @@ class EAESMixin:
         return label
 
     @classmethod
-    def _eaes_infer_semantic_properties(cls, text, attribute_paths=None):
-        """Provide deterministic labels when indexing returns no valid types.
+    def _eaes_read_semantic_properties(cls, memory, require=False):
+        """Read semantic fields from the persisted rewrite memory.
 
-        This fallback keeps ``--eaes_index_mode heuristic`` and malformed LLM
-        outputs usable. It is called only when no valid LLM memory type remains,
-        so valid model annotations are never overwritten by keyword rules.
+        The rewrite JSON is the source of truth. EAES never reclassifies a memory
+        during indexing; it only normalizes the stored labels for retrieval. Typed
+        runs fail fast on legacy rewrite files so experiments cannot silently mix
+        generated labels with runtime heuristics.
         """
-        content = " ".join([
-            str(text or ""),
-            " ".join(str(value or "") for value in (attribute_paths or [])),
-        ]).lower()
-        inferred = []
-        if re.search(
-                r"\b(attend|attended|join|joined|went|visit|visited|meet|met|"
-                r"share|shared|make|made|create|created|start|started|finish|"
-                r"finished|participat|travel|traveled|travelled|event|workshop)\w*\b",
-                content):
-            inferred.append("event_action")
-        if re.search(
-                r"\b(feel|felt|think|thought|believ|opinion|inspir|excit|worr|"
-                r"hope|intend|decid|reaction|view)\w*\b",
-                content):
-            inferred.append("state_opinion")
-        if re.search(
-                r"\b(like|likes|enjoy|prefer|interest|career|profession|job|"
-                r"hobby|goal|study|studying|work|works|live|lives)\w*\b",
-                content):
-            inferred.append("profile_preference")
-        if re.search(
-                r"\b(friend|mother|father|parent|sister|brother|wife|husband|"
-                r"partner|family|member|membership|colleague|relationship|support group)\w*\b",
-                content):
-            inferred.append("relation_social")
-        if not inferred:
-            inferred.append("fact_background")
-        memory_types = list(dict.fromkeys(inferred))[:3]
-        if "profile_preference" in memory_types or "relation_social" in memory_types:
-            persistence = "durable"
-        elif "state_opinion" in memory_types:
-            persistence = "transient"
-        elif "event_action" in memory_types:
-            persistence = "episodic"
-        else:
-            persistence = "unknown"
+        memory = memory if isinstance(memory, dict) else {}
+        memory_types = cls._eaes_normalize_memory_types(
+            memory.get("memory_types")
+        )
+        raw_persistence = memory.get("persistence")
+        persistence = cls._eaes_normalize_persistence(raw_persistence)
+        persistence_valid = (
+            isinstance(raw_persistence, str)
+            and raw_persistence.lower().strip() in cls._EAES_PERSISTENCE_VALUES
+        )
+        if require and (not memory_types or not persistence_valid):
+            event_id = memory.get("id") or "<unknown>"
+            raise ValueError(
+                f"Rewrite memory {event_id} has no valid memory_types/persistence. "
+                "Regenerate this sample's rewrite, keyword, and embedding files "
+                "with the semantic-memory rewrite schema before using "
+                "--eaes_typed_memory."
+            )
         return memory_types, persistence
 
     @staticmethod
@@ -370,16 +352,9 @@ class EAESMixin:
             })
         if not memories:
             return {}
-        # Prompt isolation is deliberate: with the feature flag off, the LLM sees
-        # exactly the legacy indexing schema and existing experiments remain valid.
-        index_prompt = (
-            Prompts.EAES_TYPED_INDEX_SYSTEM_PROMPT
-            if config.EAES_TYPED_MEMORY
-            else Prompts.EAES_INDEX_SYSTEM_PROMPT
-        )
         out = self.llm.chat_text(
             messages=[
-                {"role": "system", "content": index_prompt},
+                {"role": "system", "content": Prompts.EAES_INDEX_SYSTEM_PROMPT},
                 {"role": "user", "content": Prompts.eaes_index_prompt(json.dumps(memories, ensure_ascii=False))},
             ],
             model=config.RE_MODEL,
@@ -408,22 +383,24 @@ class EAESMixin:
                 "attribute_paths": list(dict.fromkeys(attributes))[:12],
                 "event_lifecycle": lifecycle if lifecycle in {"planned", "current", "historical"} else None,
             }
-            if config.EAES_TYPED_MEMORY:
-                # Treat LLM JSON as untrusted input before persisting it in notes.
-                memory_types = self._eaes_normalize_memory_types(
-                    item.get("memory_types")
-                )
-                persistence = self._eaes_normalize_persistence(
-                    item.get("persistence")
-                )
-                index_data.update({
-                    "memory_types": memory_types,
-                    "persistence": persistence,
-                })
             indexed[event_id] = index_data
         return indexed
 
     def _eaes_build_notes_for_session(self, events, keyword_by_sentence, conversation_time):
+        # Validate persisted semantic fields before the optional LLM entity/
+        # attribute index call. A legacy rewrite should fail without spending an
+        # indexing request that cannot produce a valid typed experiment.
+        semantic_properties = {}
+        for memory in self._as_list(events.get("sentence")):
+            if not isinstance(memory, dict):
+                continue
+            semantic_properties[memory.get("id")] = (
+                self._eaes_read_semantic_properties(
+                    memory,
+                    require=config.EAES_TYPED_MEMORY,
+                )
+            )
+
         llm_index = {}
         if config.EAES_INDEX_MODE == "llm":
             try:
@@ -454,23 +431,12 @@ class EAESMixin:
                     attribute_paths.append(f"event.summary: {short}")
             attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
             raw_source_text = self._eaes_raw_source_text(ev)
-            memory_types = []
-            persistence = "unknown"
-            if config.EAES_TYPED_MEMORY:
-                memory_types = list(index_item.get("memory_types") or [])
-                persistence = index_item.get("persistence") or "unknown"
-                # Fall back only when the LLM/heuristic index supplied no valid
-                # type. An explicit ``unknown`` persistence stays unknown unless
-                # the whole typed annotation needs this fallback.
-                if not memory_types:
-                    (
-                        memory_types,
-                        inferred_persistence,
-                    ) = self._eaes_infer_semantic_properties(
-                        rewrite_content, attribute_paths
-                    )
-                    if persistence == "unknown":
-                        persistence = inferred_persistence
+            # Semantic properties are generated and persisted with the rewrite
+            # memory. EAESMemoryNote is only the runtime retrieval representation.
+            memory_types, persistence = semantic_properties.get(
+                event_id,
+                ([], "unknown"),
+            )
             note = EAESMemoryNote(
                 memory_id=self._eaes_memory_id(event_id),
                 event_id=event_id,

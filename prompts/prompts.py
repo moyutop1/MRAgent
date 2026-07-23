@@ -36,6 +36,14 @@ TASK:
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
 - The "id" field may be any valid placeholder matching the first source id, because code will rewrite ids deterministically after validation.
 - Use PREVIOUS_REWRITE_MEMORIES only to avoid repeating already-written memories; do not copy them unless CURRENT_DIALOGUE_WINDOW adds new information.
+- For every memory in "sentence", assign 1-3 "memory_types" from this fixed vocabulary:
+  - event_action: a bounded action, occurrence, attendance, execution, or event.
+  - state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
+  - profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
+  - relation_social: a family, friendship, interpersonal, membership, or organizational relation.
+  - fact_background: a descriptive fact about an object, place, situation, or external background.
+- For every memory in "sentence", assign exactly one "persistence": transient for a momentary state, episodic for a particular event, durable for a lasting relation/profile/preference/fact, or unknown when the source does not establish persistence.
+- "memory_types" and "persistence" describe the generated memory itself. Generate them together with the memory; do not defer classification to a later retrieval/indexing stage.
 - Topics: derive concrete topic summaries from the memories in this window. Assign topic IDs (t1..tn). In each memory, fill "topic" with topic IDs that apply; use [] if none.
 - Personal information: extract person-related stable facts into "personal_sentences". If a fact is already in a memory, also duplicate a concise normalized version here.
 Schema:
@@ -48,13 +56,15 @@ Schema:
       "tag":"short concrete tag",
       "origin":"D1:1",
       "topic": ["t1","t3"],
-      "time":"YYYY-MM-DD"
+      "time":"YYYY-MM-DD",
+      "memory_types":["event_action","state_opinion"],
+      "persistence":"episodic"
     }
   ],
   "topics":{
     "t1": "Nate plans the charity race route",
     "t2": "Joanna discusses aquarium maintenance"
-    }
+    },
   "personal_sentences":[{
   "id":"p1",
   "text":"Nate enjoys long-distance running.",
@@ -363,28 +373,6 @@ Schema:
     }
   ]
 }"""
-
-    EAES_TYPED_INDEX_SYSTEM_PROMPT = EAES_INDEX_SYSTEM_PROMPT + """
-
-When typed memory is enabled, classify each indexed memory on two orthogonal axes.
-Add these fields to every object in memories:
-{
-  "memory_types": ["event_action"],
-  "persistence": "episodic"
-}
-Typed-memory rules:
-- Assign 1-3 memory_types using only the supplied memory sentence and raw source.
-- event_action: a bounded action, occurrence, attendance, execution, or event.
-- state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
-- profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
-- relation_social: a family, friendship, interpersonal, membership, or organizational relation.
-- fact_background: a descriptive fact about an object, place, situation, or external background.
-- Choose one primary persistence value.
-- transient: a momentary reaction or short-lived state.
-- episodic: information tied to a particular event or occurrence.
-- durable: a relation, preference, profile, goal, or fact expected to remain useful across time.
-- Use unknown when the source does not establish persistence.
-- Do not change, omit, or generalize the source facts in order to fit a label."""
 
     EAES_INDEX_USER_PROMPT = """MEMORY_SENTENCES:
 {MEMORIES}"""

@@ -14,7 +14,10 @@ SCHEMA = {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "text", "tag", "origin", "topic", "time"],
+        "required": [
+          "id", "text", "tag", "origin", "topic", "time",
+          "memory_types", "persistence"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -38,7 +41,26 @@ SCHEMA = {
             "type": "string",
             "format": "date",
             "description": "YYYY-MM-DD"
-
+          },
+          "memory_types": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {
+              "type": "string",
+              "enum": [
+                "event_action",
+                "state_opinion",
+                "profile_preference",
+                "relation_social",
+                "fact_background"
+              ]
+            }
+          },
+          "persistence": {
+            "type": "string",
+            "enum": ["transient", "episodic", "durable", "unknown"]
           }
         }
       }

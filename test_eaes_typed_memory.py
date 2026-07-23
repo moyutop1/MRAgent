@@ -18,6 +18,7 @@ from memory.system import (
     eaes_type_compatibility,
 )
 from prompts.prompts import Prompts
+from prompts.schema import SCHEMA
 
 try:
     import numpy as np
@@ -68,10 +69,13 @@ class _QueryAgent(EAESMixin):
 
 
 class TypedMemorySchemaTests(unittest.TestCase):
-    def test_typed_index_prompt_is_isolated_from_legacy_prompt(self):
+    def test_rewrite_prompt_and_schema_persist_semantic_fields(self):
         self.assertNotIn("memory_types", Prompts.EAES_INDEX_SYSTEM_PROMPT)
-        self.assertIn("memory_types", Prompts.EAES_TYPED_INDEX_SYSTEM_PROMPT)
-        self.assertIn("persistence", Prompts.EAES_TYPED_INDEX_SYSTEM_PROMPT)
+        self.assertIn("memory_types", Prompts.REWRITE_SYSTEM_PROMPT)
+        self.assertIn("persistence", Prompts.REWRITE_SYSTEM_PROMPT)
+        sentence_schema = SCHEMA["properties"]["sentence"]["items"]
+        self.assertIn("memory_types", sentence_schema["required"])
+        self.assertIn("persistence", sentence_schema["required"])
 
     def test_note_serializes_typed_fields_and_can_hide_them(self):
         note = _note("M_D1_1_1", ["relation_social"], "durable")
@@ -104,14 +108,27 @@ class TypedMemorySchemaTests(unittest.TestCase):
 
         self.assertEqual(values, ["relation_social", "event_action"])
 
-    def test_heuristic_fallback_separates_type_and_persistence(self):
-        types_out, persistence = EAESMixin._eaes_infer_semantic_properties(
-            "Caroline's friend Melanie supports her counseling career interest."
+    def test_eaes_reads_semantic_fields_from_rewrite_memory(self):
+        types_out, persistence = EAESMixin._eaes_read_semantic_properties(
+            {
+                "id": "D1:1-1",
+                "memory_types": ["relation_social", "profile_preference"],
+                "persistence": "durable",
+            },
+            require=True,
         )
 
-        self.assertIn("relation_social", types_out)
-        self.assertIn("profile_preference", types_out)
+        self.assertEqual(
+            types_out, ["relation_social", "profile_preference"]
+        )
         self.assertEqual(persistence, "durable")
+
+    def test_typed_run_rejects_legacy_rewrite_memory(self):
+        with self.assertRaisesRegex(ValueError, "Regenerate"):
+            EAESMixin._eaes_read_semantic_properties(
+                {"id": "D1:1-1", "text": "Legacy memory."},
+                require=True,
+            )
 
     def test_unknown_persistence_is_neutral_not_a_conflict(self):
         query_plan = {

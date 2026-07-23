@@ -17,7 +17,7 @@ The target research question is:
 ### Implementation status
 
 - 2026-07-22: Priority 1A and 1B are implemented behind `--eaes_typed_memory`.
-- Implemented scope: typed EAES index/query prompts, normalized storage, heuristic fallback, label-based soft compatibility bonuses, result diagnostics, feature flags, and unit tests.
+- Implemented scope: rewrite-time semantic fields, persisted rewrite storage, typed query parsing, label-based soft compatibility bonuses, result diagnostics, feature flags, and unit tests.
 - Evaluation status: pending retrieval-only comparison on the same questions as the current EAES baseline.
 
 ## 2. Fixed Decisions
@@ -134,25 +134,33 @@ Recommended stored form:
 }
 ```
 
-Persistence has one primary value. If one generated memory contains clauses with incompatible persistence, the rewrite/index prompt should prefer splitting it into separate memories when source alignment permits.
+Persistence has one primary value. If one generated memory contains clauses with incompatible persistence, the rewrite prompt should prefer splitting it into separate memories when source alignment permits.
 
 ### 5.3 Classification location
 
-Priority 1 adds these fields in the EAES index stage, not the rewrite stage.
+Priority 1 generates these fields together with each rewrite memory. The persisted
+rewrite JSON is the source of truth; EAES indexing must not classify or infer them
+again at runtime.
 
 Reasons:
 
-- the existing rewrite cache remains reusable;
-- `EAES_INDEX_SYSTEM_PROMPT` already classifies entities, attributes, and lifecycle;
-- the first experiment can isolate typed indexing and retrieval from rewrite changes;
-- a failed experiment can be reverted without regenerating rewrite memories.
+- type and persistence describe the generated memory itself;
+- every memory receives its semantic fields in the same LLM call that produces its text;
+- labels remain stable across repeated retrieval and evaluation runs;
+- no additional typed-cache artifact or repeated classification call is required;
+- typed and untyped retrieval can reuse the same regenerated rewrite memory, with the untyped path simply ignoring the extra fields.
 
 The first affected structures are:
 
-- `prompts/prompts.py`: EAES index and query schemas;
-- `agent/eaes.py`: index parsing and query-plan parsing;
-- `memory/system.py`: `EAESMemoryNote` storage and serialization;
+- `prompts/prompts.py`: rewrite-memory and typed-query schemas;
+- `prompts/schema.py`: required rewrite fields and controlled vocabularies;
+- `agent/eaes.py`: persisted-field validation and query-plan parsing;
+- `memory/system.py`: `EAESMemoryNote` runtime retrieval representation;
 - `memory/controller.py`: typed compatibility scoring.
+
+`EAESMemoryNote` is not a second persistent memory format. It is an in-memory EAES
+retrieval view that combines the persisted rewrite content and semantic fields with
+entities, attributes, raw source text, time, and embeddings.
 
 ### 5.4 Query-side typed intent
 
@@ -240,7 +248,8 @@ The result diagnostics must expose:
 
 ### 5.7 Backward compatibility
 
-Legacy `EAESMemoryNote` data without typed fields must deserialize as:
+When typed retrieval is disabled, legacy rewrite memories without typed fields remain
+loadable as:
 
 ```text
 memory_types = []
@@ -248,6 +257,11 @@ persistence = unknown
 ```
 
 Typed retrieval must be controlled by an opt-in experiment flag. When disabled, ranking must match the current implementation.
+
+When typed retrieval is enabled, a legacy rewrite memory without valid
+`memory_types` and `persistence` must fail fast with a regeneration instruction.
+Runtime heuristic classification is prohibited because it would mix two different
+memory-generation procedures in one experiment.
 
 Suggested result suffix:
 
@@ -259,13 +273,13 @@ _typed
 
 Priority 1 is complete when:
 
-1. controlled labels are generated and cached for every EAES note;
-2. malformed or absent labels fall back without failing a run;
+1. controlled labels are generated and persisted with every rewrite memory;
+2. the rewrite schema rejects malformed or absent labels before writing a memory;
 3. typed fields appear in retrieval diagnostics;
 4. exact matches receive weak bonuses;
 5. `unknown` never causes a negative penalty or removal;
 6. disabling the experiment flag reproduces the existing score path;
-7. unit tests cover multi-label types, unknown persistence, legacy notes, and score decomposition;
+7. unit tests cover persisted multi-label types, unknown persistence, legacy-file rejection, and score decomposition;
 8. retrieval-only ExactCover/MRR is evaluated before changing the selector.
 
 ## 6. Priority 2: Requirement-Coverage Evidence Selector

@@ -2,28 +2,6 @@
 
 > Evaluation recording convention: whenever a new experiment result is reported, append its scope, metrics, and diagnosis to the corresponding version entry.
 
-## v114-20260723
-
-### Goal
-
-Make orthogonal semantic properties part of each generated memory rather than a transient EAES indexing annotation.
-
-### Changes
-
-- Extend every persisted rewrite `sentence` with 1-3 controlled `memory_types` and one `persistence` value generated in the same LLM call as the memory text.
-- Add both fields to the required rewrite JSON schema so malformed or incomplete memories are retried before being written.
-- Remove typed classification from the EAES entity/attribute index prompt and remove runtime heuristic type inference.
-- Treat the rewrite JSON as the semantic-property source of truth; `EAESMemoryNote` only copies the stored fields into the runtime retrieval representation.
-- Fail fast when `--eaes_typed_memory` is used with a legacy rewrite file that lacks valid semantic fields.
-
-### Migration
-
-For samples generated before v114, regenerate the sample's rewrite file and its derived keyword and embedding files once. No additional typed cache is introduced.
-
-### Evaluation Result
-
-Pending. Run retrieval-only typed/untyped comparisons from the same regenerated rewrite memories.
-
 ## v113-20260721
 
 ### Goal

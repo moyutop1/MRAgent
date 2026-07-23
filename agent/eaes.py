@@ -15,14 +15,6 @@ class EAESMixin:
         "", "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December",
     )
-    _EAES_MEMORY_TYPES = {
-        "event_action",
-        "state_opinion",
-        "profile_preference",
-        "relation_social",
-        "fact_background",
-    }
-    _EAES_PERSISTENCE_VALUES = {"transient", "episodic", "durable", "unknown"}
 
     @staticmethod
     def _eaes_query_question(question):
@@ -38,68 +30,6 @@ class EAESMixin:
     @staticmethod
     def _eaes_memory_id(event_id):
         return "M_" + re.sub(r"[^A-Za-z0-9]+", "_", event_id).strip("_")
-
-    @classmethod
-    def _eaes_normalize_labels(cls, values, allowed_values):
-        """Return at most three unique labels from a controlled vocabulary."""
-        if values is None:
-            values = []
-        elif not isinstance(values, (list, tuple, set)):
-            values = [values]
-        labels = []
-        for item in values:
-            if isinstance(item, dict):
-                value = str(item.get("value") or item.get("type") or "").lower().strip()
-            else:
-                value = str(item or "").lower().strip()
-            if value in allowed_values and value not in labels:
-                labels.append(value)
-        return labels[:3]
-
-    @classmethod
-    def _eaes_normalize_memory_types(cls, values):
-        """Normalize memory-side multi-label types using controlled labels only."""
-        return cls._eaes_normalize_labels(values, cls._EAES_MEMORY_TYPES)
-
-    @classmethod
-    def _eaes_normalize_persistence(cls, value):
-        """Normalize one persistence label; malformed values become unknown."""
-        if isinstance(value, dict):
-            label = str(value.get("value") or "unknown").lower().strip()
-        else:
-            label = str(value or "unknown").lower().strip()
-        if label not in cls._EAES_PERSISTENCE_VALUES:
-            return "unknown"
-        return label
-
-    @classmethod
-    def _eaes_read_semantic_properties(cls, memory, require=False):
-        """Read semantic fields from the persisted rewrite memory.
-
-        The rewrite JSON is the source of truth. EAES never reclassifies a memory
-        during indexing; it only normalizes the stored labels for retrieval. Typed
-        runs fail fast on legacy rewrite files so experiments cannot silently mix
-        generated labels with runtime heuristics.
-        """
-        memory = memory if isinstance(memory, dict) else {}
-        memory_types = cls._eaes_normalize_memory_types(
-            memory.get("memory_types")
-        )
-        raw_persistence = memory.get("persistence")
-        persistence = cls._eaes_normalize_persistence(raw_persistence)
-        persistence_valid = (
-            isinstance(raw_persistence, str)
-            and raw_persistence.lower().strip() in cls._EAES_PERSISTENCE_VALUES
-        )
-        if require and (not memory_types or not persistence_valid):
-            event_id = memory.get("id") or "<unknown>"
-            raise ValueError(
-                f"Rewrite memory {event_id} has no valid memory_types/persistence. "
-                "Regenerate this sample's rewrite, keyword, and embedding files "
-                "with the semantic-memory rewrite schema before using "
-                "--eaes_typed_memory."
-            )
-        return memory_types, persistence
 
     @staticmethod
     def _eaes_infer_lifecycle(text, explicit=None):
@@ -378,29 +308,14 @@ class EAESMixin:
             ]
             attributes = [a for a in attributes if a]
             lifecycle = str(item.get("event_lifecycle") or "").lower().strip()
-            index_data = {
+            indexed[event_id] = {
                 "entities": list(dict.fromkeys(entities))[:8],
                 "attribute_paths": list(dict.fromkeys(attributes))[:12],
                 "event_lifecycle": lifecycle if lifecycle in {"planned", "current", "historical"} else None,
             }
-            indexed[event_id] = index_data
         return indexed
 
     def _eaes_build_notes_for_session(self, events, keyword_by_sentence, conversation_time):
-        # Validate persisted semantic fields before the optional LLM entity/
-        # attribute index call. A legacy rewrite should fail without spending an
-        # indexing request that cannot produce a valid typed experiment.
-        semantic_properties = {}
-        for memory in self._as_list(events.get("sentence")):
-            if not isinstance(memory, dict):
-                continue
-            semantic_properties[memory.get("id")] = (
-                self._eaes_read_semantic_properties(
-                    memory,
-                    require=config.EAES_TYPED_MEMORY,
-                )
-            )
-
         llm_index = {}
         if config.EAES_INDEX_MODE == "llm":
             try:
@@ -431,12 +346,6 @@ class EAESMixin:
                     attribute_paths.append(f"event.summary: {short}")
             attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
             raw_source_text = self._eaes_raw_source_text(ev)
-            # Semantic properties are generated and persisted with the rewrite
-            # memory. EAESMemoryNote is only the runtime retrieval representation.
-            memory_types, persistence = semantic_properties.get(
-                event_id,
-                ([], "unknown"),
-            )
             note = EAESMemoryNote(
                 memory_id=self._eaes_memory_id(event_id),
                 event_id=event_id,
@@ -452,8 +361,6 @@ class EAESMixin:
                 event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
-                memory_types=memory_types,
-                persistence=persistence,
             )
             self.memory.add_eaes_memory_note(note)
 
@@ -511,16 +418,9 @@ class EAESMixin:
 
     def parse_eaes_query(self, question, question_emb=None):
         query_question = self._eaes_query_question(question)
-        # Keep the legacy prompt and result shape untouched unless the ablation
-        # flag is enabled; this makes typed vs. untyped runs directly comparable.
-        query_prompt = (
-            Prompts.EAES_TYPED_QUERY_SYSTEM_PROMPT
-            if config.EAES_TYPED_MEMORY
-            else Prompts.EAES_QUERY_SYSTEM_PROMPT
-        )
         query_out = self.llm.chat_text(
             messages=[
-                {"role": "system", "content": query_prompt},
+                {"role": "system", "content": Prompts.EAES_QUERY_SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps({"question": query_question}, ensure_ascii=False)},
             ],
             model=config.RE_MODEL
@@ -540,19 +440,6 @@ class EAESMixin:
                 "keywords": self._as_list(query_out.get("keywords")),
                 "query_mode": "question_only",
             }
-            if config.EAES_TYPED_MEMORY:
-                # Query labels are set-valued soft requirements, not hard filters.
-                required_memory_types = self._eaes_normalize_labels(
-                    query_out.get("required_memory_types"), self._EAES_MEMORY_TYPES
-                )
-                preferred_persistence = self._eaes_normalize_labels(
-                    query_out.get("preferred_persistence"),
-                    self._EAES_PERSISTENCE_VALUES,
-                )
-                plan.update({
-                    "required_memory_types": required_memory_types,
-                    "preferred_persistence": preferred_persistence,
-                })
             return self._postprocess_eaes_query_plan(query_question, plan)
         fallback_query = {
             "entities": [],
@@ -563,12 +450,6 @@ class EAESMixin:
             "keywords": [],
             "query_mode": "question_text_fallback",
         }
-        if config.EAES_TYPED_MEMORY:
-            # A failed query parse must not fabricate typed requirements.
-            fallback_query.update({
-                "required_memory_types": [],
-                "preferred_persistence": ["unknown"],
-            })
         return self._postprocess_eaes_query_plan(query_question, fallback_query)
 
     def rerank_eaes_candidates(self, question, query_plan, candidates):
@@ -637,13 +518,7 @@ class EAESMixin:
                 note = self.memory.get_eaes_note(mid)
                 if note is None:
                     continue
-                enriched_evidence.append({
-                    **ev,
-                    **note.to_dict(
-                        include_raw=False,
-                        include_typed=config.EAES_TYPED_MEMORY,
-                    ),
-                })
+                enriched_evidence.append({**ev, **note.to_dict(include_raw=False)})
             if enriched_evidence:
                 enriched_items.append({
                     "item": item.get("item"),

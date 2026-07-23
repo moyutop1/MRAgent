@@ -36,14 +36,6 @@ TASK:
 - Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
 - The "id" field may be any valid placeholder matching the first source id, because code will rewrite ids deterministically after validation.
 - Use PREVIOUS_REWRITE_MEMORIES only to avoid repeating already-written memories; do not copy them unless CURRENT_DIALOGUE_WINDOW adds new information.
-- For every memory in "sentence", assign 1-3 "memory_types" from this fixed vocabulary:
-  - event_action: a bounded action, occurrence, attendance, execution, or event.
-  - state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
-  - profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
-  - relation_social: a family, friendship, interpersonal, membership, or organizational relation.
-  - fact_background: a descriptive fact about an object, place, situation, or external background.
-- For every memory in "sentence", assign exactly one "persistence": transient for a momentary state, episodic for a particular event, durable for a lasting relation/profile/preference/fact, or unknown when the source does not establish persistence.
-- "memory_types" and "persistence" describe the generated memory itself. Generate them together with the memory; do not defer classification to a later retrieval/indexing stage.
 - Topics: derive concrete topic summaries from the memories in this window. Assign topic IDs (t1..tn). In each memory, fill "topic" with topic IDs that apply; use [] if none.
 - Personal information: extract person-related stable facts into "personal_sentences". If a fact is already in a memory, also duplicate a concise normalized version here.
 Schema:
@@ -56,15 +48,13 @@ Schema:
       "tag":"short concrete tag",
       "origin":"D1:1",
       "topic": ["t1","t3"],
-      "time":"YYYY-MM-DD",
-      "memory_types":["event_action","state_opinion"],
-      "persistence":"episodic"
+      "time":"YYYY-MM-DD"
     }
   ],
   "topics":{
     "t1": "Nate plans the charity race route",
     "t2": "Joanna discusses aquarium maintenance"
-    },
+    }
   "personal_sentences":[{
   "id":"p1",
   "text":"Nate enjoys long-distance running.",
@@ -323,27 +313,6 @@ Rules:
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
 - Do not answer the question."""
-
-    EAES_TYPED_QUERY_SYSTEM_PROMPT = EAES_QUERY_SYSTEM_PROMPT + """
-
-When typed memory is enabled, also output these orthogonal evidence preferences:
-{
-  "required_memory_types": ["event_action"],
-  "preferred_persistence": ["episodic"]
-}
-Typed-memory rules:
-- Predict what kinds of evidence the question needs, never the answer itself.
-- Use 1-3 required_memory_types. Multi-hop questions may require several types.
-- event_action: a bounded action, occurrence, attendance, execution, or event.
-- state_opinion: a reaction, feeling, opinion, intention, decision, or temporary state.
-- profile_preference: a stable interest, preference, occupation, goal, or personal attribute.
-- relation_social: a family, friendship, interpersonal, membership, or organizational relation.
-- fact_background: a descriptive fact about an object, place, situation, or external background.
-- transient: a momentary reaction or short-lived state.
-- episodic: information tied to a particular event or occurrence.
-- durable: a relation, preference, profile, goal, or fact expected to remain useful across time.
-- unknown means the question does not establish a useful persistence preference.
-- These fields express soft retrieval preferences and must not exclude other useful evidence."""
 
     EAES_INDEX_SYSTEM_PROMPT = """You build an entity-attribute-memory index for long-term conversational memory. Only output valid JSON.
 For each memory sentence, identify:

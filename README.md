@@ -121,7 +121,7 @@ Place the benchmark file at `data/dataset_<name>.json`. Generated intermediate
 artifacts and results are written under per-dataset subfolders:
 
 ```
-data/<dataset>/rewrite_<model>/<sample_id>_rewrite.json   # stage 1 memories, including memory_types and persistence
+data/<dataset>/rewrite_<model>/<sample_id>_rewrite.json   # stage 1 output
 data/<dataset>/keyword_<model>/<sample_id>_keyword.json       # stage 3 output
 data/<dataset>/embedding/gpt_<model>/<sample_id>_embedding.pkl# stage 2 output
 result/<dataset>/<sample_id>_result_<model>_<file>.jsonl      # predictions (the only run output)
@@ -159,9 +159,6 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
-| `--eaes_typed_memory` | enable orthogonal semantic memory types and persistence as weak EAES retrieval bonuses | off |
-| `--eaes_type_weight` | semantic-type compatibility bonus weight | `0.15` |
-| `--eaes_persistence_weight` | persistence compatibility bonus weight | `0.05` |
 | `--disable_evidence_selector` | EAES answer ablation: pass all reranked candidates directly to the final reader | off |
 
 ### 5.2 LoCoMo
@@ -189,12 +186,6 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eae
 
 # answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
 python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
-
-# typed-memory retrieval ablation (adds the _typed suffix)
-# Legacy rewrite files created before the semantic fields were added must be regenerated once,
-# together with their derived keyword and embedding files.
-python run.py --data locomo --model deepseek-chat --file typed_retrieval --sample 26 --workers 1 --retrieval_only --eaes --eaes_typed_memory --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file typed_retrieval --sample conv-26 --eaes --typed_memory
 
 # compare against the older free keyword extraction path
 python run.py --data locomo --model deepseek-chat --file retr50_extract --sample 26 --max_questions 50 --workers 1 --retrieval_only --query_key_mode extract
@@ -238,9 +229,6 @@ temporal questions).
 
 - The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
   `embedding` files to force regeneration of a sample.
-- `memory_types` and `persistence` are generated and permanently stored in every
-  rewrite `sentence`; `EAESMemoryNote` only copies them into the runtime retrieval
-  representation. Typed mode rejects legacy rewrite files that lack these fields.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - Tool inventory (7 tools): `edges_by_tag`, `query_conversation_time`,
   `query_event_keywords`, `query_event_context`, `query_personal_information`,

@@ -27,25 +27,6 @@ parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=o
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Memories kept by the EAES attribute reranker for evidence selection.")
 parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
-# Feature-gated to preserve legacy prompts, candidate JSON, and filenames unless
-# an experiment explicitly opts into semantic typed memory.
-parser.add_argument(
-    "--eaes_typed_memory",
-    action="store_true",
-    help="Enable orthogonal EAES memory types and persistence as weak retrieval bonuses.",
-)
-parser.add_argument(
-    "--eaes_type_weight",
-    type=float,
-    default=float(os.getenv("EAES_TYPE_WEIGHT", "0.15")),
-    help="Weak EAES semantic-type compatibility bonus when --eaes_typed_memory is enabled.",
-)
-parser.add_argument(
-    "--eaes_persistence_weight",
-    type=float,
-    default=float(os.getenv("EAES_PERSISTENCE_WEIGHT", "0.05")),
-    help="Weak EAES persistence compatibility bonus when --eaes_typed_memory is enabled.",
-)
 parser.add_argument(
     "--disable_evidence_selector",
     action="store_true",
@@ -177,15 +158,6 @@ MAX_ROUNDS=8         # tool-calling loop: max assistant rounds
 MAX_TOOL_CALLS=50    # tool-calling loop: safety cap on total tool calls
 EAES_MODE = args.eaes
 RETRIEVAL_ONLY = args.retrieval_only
-# Orthogonal fields only refine EAES retrieval, so enabling them outside EAES is
-# rejected instead of silently producing a misleading experiment name.
-EAES_TYPED_MEMORY = args.eaes_typed_memory
-if EAES_TYPED_MEMORY and not EAES_MODE:
-    raise ValueError("--eaes_typed_memory requires --eaes.")
-EAES_TYPE_WEIGHT = args.eaes_type_weight
-EAES_PERSISTENCE_WEIGHT = args.eaes_persistence_weight
-if EAES_TYPE_WEIGHT < 0 or EAES_PERSISTENCE_WEIGHT < 0:
-    raise ValueError("EAES typed-memory weights must be non-negative.")
 DISABLE_EVIDENCE_SELECTOR = args.disable_evidence_selector
 if DISABLE_EVIDENCE_SELECTOR and not EAES_MODE:
     raise ValueError("--disable_evidence_selector requires --eaes.")
@@ -246,13 +218,11 @@ EMBEDDING_TAG = os.getenv(
     "text_embedding_3_large" if EMBEDDING_PROVIDER in {"openrouter", "ofox"} else "local_bge"
 )
 ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
-# Keep suffix ordering synchronized with eval/evaluate_retrieval.py.
 ADDITIONAL_RE = (
     f"_{args.model}_{args.file}"
     f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
     f"{'_xcat' + '-'.join(sorted(EXCLUDED_CATEGORIES)) if EXCLUDED_CATEGORIES else ''}"
     f"{'_eaes' if EAES_MODE else ''}"
-    f"{'_typed' if EAES_TYPED_MEMORY else ''}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"

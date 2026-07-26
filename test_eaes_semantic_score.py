@@ -15,7 +15,7 @@ from agent.eaes import EAESMixin
 from common import config
 from memory.system import EAESMemoryNote, EpisodeEvent, MemorySystem
 from prompts.prompts import Prompts
-from prompts.schema import check_rewrite_json
+from prompts.schema import SCHEMA, check_rewrite_json
 
 HAS_JSONSCHEMA = importlib.util.find_spec("jsonschema") is not None
 HAS_RUNTIME_DEPENDENCIES = all(
@@ -42,7 +42,6 @@ def _valid_rewrite():
             "tag": "Personal Profile",
             "origin": "D1:1",
             "topic": [],
-            "time": "2023-07-22",
             "semantic_properties": ["personal_profile", "durable"],
         }],
         "topics": {},
@@ -52,6 +51,11 @@ def _valid_rewrite():
 
 class SemanticRewriteSchemaTests(unittest.TestCase):
     dialogue = "time:2023-07-22\ndia_id:D1:1 Caroline: I own a dog."
+
+    def test_sentence_schema_does_not_define_or_require_time(self):
+        sentence_schema = SCHEMA["properties"]["sentence"]["items"]
+        self.assertNotIn("time", sentence_schema["required"])
+        self.assertNotIn("time", sentence_schema["properties"])
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_valid_semantic_properties_pass_schema(self):
@@ -141,7 +145,7 @@ class SemanticPersistenceTests(unittest.TestCase):
             ["personal_profile", "durable"],
         )
 
-    def test_eaes_memory_note_remains_unchanged(self):
+    def test_eaes_memory_note_exposes_conversation_time_only(self):
         note = EAESMemoryNote(
             memory_id="M_D1_1_1",
             event_id="D1:1-1",
@@ -149,12 +153,15 @@ class SemanticPersistenceTests(unittest.TestCase):
             attribute_paths=["profile.pet: Caroline owns a dog."],
             raw_text="Caroline: I own a dog.",
             rewrite_content="Caroline owns a dog.",
-            time_interval={"start": "2023-07-22", "end": "2023-07-22"},
+            conversation_time="2023-07-22",
             event_lifecycle="current",
             origin="D1:1",
         )
+        payload = note.to_dict()
+        self.assertEqual(payload["conversation_time"], "2023-07-22")
+        self.assertNotIn("time_interval", payload)
         self.assertFalse(hasattr(note, "semantic_properties"))
-        self.assertNotIn("semantic_properties", note.to_dict())
+        self.assertNotIn("semantic_properties", payload)
 
 
 class _QueryLLM:
@@ -242,7 +249,7 @@ class SemanticScoringTests(unittest.TestCase):
             attribute_paths=["profile.pet: Caroline owns a dog."],
             raw_text="Caroline: I own a dog.",
             rewrite_content="Caroline owns a dog.",
-            time_interval={"start": "2023-07-22", "end": "2023-07-22"},
+            conversation_time="2023-07-22",
             event_lifecycle="current",
             origin="D1:1",
             retrieval_embedding=np.array([1.0, 0.0], dtype=np.float32),

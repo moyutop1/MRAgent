@@ -116,7 +116,7 @@ class EAESMemoryNote:
             attribute_paths: List[str],
             raw_text: str,
             rewrite_content: str,
-            time_interval: Dict[str, Any],
+            conversation_time: str,
             event_lifecycle: str,
             origin: str,
             embedding=None,
@@ -128,7 +128,7 @@ class EAESMemoryNote:
         self.attribute_paths = attribute_paths
         self.raw_text = raw_text
         self.rewrite_content = rewrite_content
-        self.time_interval = time_interval
+        self.conversation_time = conversation_time
         self.event_lifecycle = event_lifecycle
         self.origin = origin
         self.embedding = embedding
@@ -141,7 +141,7 @@ class EAESMemoryNote:
             "entities": self.entities,
             "attribute_paths": self.attribute_paths,
             "rewrite_content": self.rewrite_content,
-            "time_interval": self.time_interval,
+            "conversation_time": self.conversation_time,
             "event_lifecycle": self.event_lifecycle,
             "origin": self.origin,
         }

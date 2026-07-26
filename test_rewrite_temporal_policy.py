@@ -41,33 +41,28 @@ class RewriteTemporalPolicyTests(unittest.TestCase):
         normalize_rewrite_temporal_granularity(output, dialogue)
         return output["sentence"][0]
 
-    def test_named_weekday_stays_anchored_but_indexes_actual_day(self):
+    def test_named_weekday_stays_anchored_in_text(self):
         sentence = self._normalize("last Friday")
         self.assertIn("the Friday before 22 July 2023", sentence["text"])
-        self.assertEqual(sentence["time"], "2023-07-21")
+        self.assertNotIn("time", sentence)
 
-    def test_last_week_uses_anchored_text_and_period_start_index(self):
+    def test_last_week_uses_anchored_text(self):
         sentence = self._normalize("last week")
         self.assertIn("the week before 22 July 2023", sentence["text"])
-        self.assertEqual(sentence["time"], "2023-07-10")
 
-    def test_last_weekend_uses_anchored_text_and_period_start_index(self):
+    def test_last_weekend_uses_anchored_text(self):
         sentence = self._normalize("last weekend")
         self.assertIn("the weekend before 22 July 2023", sentence["text"])
-        self.assertEqual(sentence["time"], "2023-07-15")
 
     def test_exact_day_cues_become_absolute_dates(self):
         yesterday = self._normalize("yesterday")
         two_days = self._normalize("two days ago")
         self.assertIn("21 July 2023", yesterday["text"])
-        self.assertEqual(yesterday["time"], "2023-07-21")
         self.assertIn("20 July 2023", two_days["text"])
-        self.assertEqual(two_days["time"], "2023-07-20")
 
-    def test_last_month_keeps_month_precision_and_indexes_month_start(self):
+    def test_last_month_keeps_month_precision_in_text(self):
         sentence = self._normalize("last month")
         self.assertIn("June 2023", sentence["text"])
-        self.assertEqual(sentence["time"], "2023-06-01")
 
     def test_absolute_model_month_is_reduced_to_source_month_precision(self):
         sentence = self._normalize(
@@ -77,11 +72,10 @@ class RewriteTemporalPolicyTests(unittest.TestCase):
             "Caroline described the event in June 2023.",
         )
 
-    def test_last_year_keeps_year_precision_and_indexes_year_start(self):
+    def test_last_year_keeps_year_precision_in_text(self):
         sentence = self._normalize("last year")
         self.assertIn("2022", sentence["text"])
         self.assertNotIn("2022-01-01", sentence["text"])
-        self.assertEqual(sentence["time"], "2022-01-01")
 
     def test_absolute_model_year_is_reduced_to_source_year_precision(self):
         sentence = self._normalize(
@@ -96,11 +90,23 @@ class RewriteTemporalPolicyTests(unittest.TestCase):
             "Caroline described the event on the Friday before 22 July 2023.",
         )
 
-    def test_prompt_documents_text_and_index_granularity_separately(self):
+    def test_prompt_requires_available_time_in_all_memory_text(self):
         prompt = Prompts.REWRITE_SYSTEM_PROMPT
+        self.assertIn(
+            "For every memory, regardless of its semantic properties",
+            prompt,
+        )
+        self.assertIn(
+            'include that time directly in the memory "text"',
+            prompt,
+        )
         self.assertIn('"last month" -> "June 2023"', prompt)
         self.assertIn('"last year" -> "2022"', prompt)
-        self.assertIn('"time" = "2022-01-01"', prompt)
+
+    def test_prompt_strengthens_time_requirement_for_episodic_memories(self):
+        prompt = Prompts.REWRITE_SYSTEM_PROMPT
+        self.assertIn('For memories classified as "episodic"', prompt)
+        self.assertIn("never omit it during compression or merging", prompt)
 
 
 class RewriteWindowContextTests(unittest.TestCase):
@@ -144,7 +150,6 @@ class RewriteWindowContextTests(unittest.TestCase):
                             "tag": "Duplicate",
                             "origin": "D1:4",
                             "topic": ["t1"],
-                            "time": "2023-07-22",
                         },
                         {
                             "id": "D1:4-2",
@@ -152,7 +157,6 @@ class RewriteWindowContextTests(unittest.TestCase):
                             "tag": "Boundary Answer",
                             "origin": "D1:4,D1:5",
                             "topic": ["t2"],
-                            "time": "2023-07-22",
                         },
                     ],
                     "topics": {
@@ -213,7 +217,6 @@ class RewriteWindowContextTests(unittest.TestCase):
                         "tag": "Duplicate",
                         "origin": "D1:4",
                         "topic": ["t1"],
-                        "time": "2023-07-22",
                     }],
                     "topics": {"t1": "Context-only topic"},
                     "personal_sentences": [],
@@ -257,7 +260,6 @@ class RewriteWindowContextTests(unittest.TestCase):
                             "tag": "Family Breakfast",
                             "origin": "D1:1",
                             "topic": [],
-                            "time": "2023-07-22",
                         }],
                         "topics": {},
                         "personal_sentences": [],
@@ -312,7 +314,6 @@ class RewriteWindowContextTests(unittest.TestCase):
                         "tag": "Park Visit",
                         "origin": "D1:4,D1:5",
                         "topic": [],
-                        "time": "2023-07-22",
                     }],
                     "topics": {},
                     "personal_sentences": [],
@@ -348,7 +349,7 @@ class RewriteWindowContextTests(unittest.TestCase):
             "the week before 22 July 2023",
             output["sentence"][0]["text"],
         )
-        self.assertEqual(output["sentence"][0]["time"], "2023-07-10")
+        self.assertNotIn("time", output["sentence"][0])
 
 
 if __name__ == "__main__":

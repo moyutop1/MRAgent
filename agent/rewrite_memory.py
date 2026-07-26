@@ -235,14 +235,20 @@ def _replace_or_append_time(text: str, cue: str, display: str, index_start: date
 
 
 def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
-    """Normalize rewrite text granularity and its ISO date index from raw sources."""
+    """Normalize source-supported temporal wording directly in rewrite text."""
     if not isinstance(rewrite_out, dict):
         return
+    sentences = rewrite_out.get("sentence") or []
+    # Event time is represented in the self-contained memory text. Strip the
+    # retired structured field even if a model emits the legacy schema.
+    for sentence in sentences:
+        if isinstance(sentence, dict):
+            sentence.pop("time", None)
     conversation_time = _conversation_time_from_text(dialogue_text)
     if not conversation_time:
         return
     dialogue = _dialogue_by_origin(dialogue_text)
-    for sentence in rewrite_out.get("sentence") or []:
+    for sentence in sentences:
         if not isinstance(sentence, dict):
             continue
         source = "\n".join(
@@ -253,8 +259,9 @@ def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
         matches = list(_RELATIVE_TIME_RE.finditer(source))
         if not matches:
             continue
-        # A compressed memory with several distinct temporal cues cannot be represented
-        # by the schema's single time field, so leave it for the model instead of guessing.
+        # Several distinct temporal cues may apply to different clauses. Leave
+        # their placement to the rewrite model instead of attaching one cue to
+        # the whole compressed memory and changing its meaning.
         unique_cues = list(dict.fromkeys(
             re.sub(r"\s+", " ", match.group(0)).strip().lower()
             for match in matches
@@ -268,7 +275,6 @@ def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
         display, index_start = rendering
         sentence["text"] = _replace_or_append_time(
             sentence.get("text"), cue, display, index_start)
-        sentence["time"] = index_start.isoformat()
 
 
 class _RewriteWindow(NamedTuple):
@@ -363,7 +369,6 @@ def _rewrite_window(
             "id": memory.get("id"),
             "text": memory.get("text"),
             "origin": memory.get("origin"),
-            "time": memory.get("time"),
             "tag": memory.get("tag"),
         }
         for memory in previous_slice

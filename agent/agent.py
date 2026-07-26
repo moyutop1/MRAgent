@@ -590,7 +590,7 @@ class Agent(EAESMixin, RetrievalMixin):
                     logger.warning(f"record_rewrite[{i}] value is None; writing null placeholder")
                     f.write("null\n")
                     continue
-                # feed only {id, text} to extract_keys, dropping the rewrite-stage tag/origin/topic/time,
+                # feed only {id, text} to extract_keys, dropping rewrite-stage metadata,
                 # to avoid leaking existing tag/topic into the keyword-extraction prompt (the LLM would copy them).
                 sentences = session_data.get("sentence") or []
                 filtered_sentences = []
@@ -691,11 +691,15 @@ class Agent(EAESMixin, RetrievalMixin):
                 )
                 ee_event.tag_t = ee.get("tag")
                 self.memory.episode_events[id] = ee_event
-                try:
-                    self.memory.add_event_time(id,time)
-                except Exception as _e:
-                    # guard: some samples rewrite to unparseable dates; skip time indexing instead of crashing
-                    logging.warning(f"add_event_time skip {id} time={time!r}: {_e}")
+                # New rewrite memories carry source-supported event time in
+                # their text. Keep legacy cached structured times readable,
+                # but do not try to index a missing retired field.
+                if time:
+                    try:
+                        self.memory.add_event_time(id, time)
+                    except Exception as _e:
+                        # guard: some legacy rewrites contain unparseable dates
+                        logging.warning(f"add_event_time skip {id} time={time!r}: {_e}")
                 eid_topic_dict[id] = topics
 
         self.memory.add_topics(topic_sentences, eid_topic_dict, session_id)

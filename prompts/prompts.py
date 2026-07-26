@@ -23,13 +23,16 @@ TASK:
 - Each memory in "sentence" must be self-contained, explicit, and useful without the raw dialogue context.
 - Resolve all pronouns ("I", "you", "he", "she", "it", "they", "we", "this", "that", "these", "those") into concrete people, objects, events, or noun phrases from the window.
 - Keep top-level "conversation_time" equal to the dialogue's session date. Never replace it with an event date.
-- Resolve relative time into the separate "time" field as an indexable YYYY-MM-DD start date. For a day use that day; for a week/weekend/month/year use the normalized beginning of that period. If no event time is mentioned, use conversation_time.
+- For every memory, regardless of its semantic properties, if the occurrence time or validity time of the remembered information can be obtained from its source dialogue, include that time directly in the memory "text".
+- For memories classified as "episodic", occurrence time is especially important: actively preserve it whenever it is available from any contributing source turn, and never omit it during compression or merging.
+- A temporal qualifier contained in a question or surrounding turn must be carried into the memory text when it applies to the corresponding answer.
+- Do not invent an occurrence time when the source dialogue does not provide one. Top-level conversation_time is an anchor for resolving relative expressions, not evidence that an event occurred on that date.
 - Preserve temporal granularity in memory "text" with these exact rules (anchor = conversation_time):
-  - Named weekdays, weeks, and weekends stay anchored-relative instead of becoming a calendar date: "last Friday" + anchor 2023-07-22 -> "the Friday before 22 July 2023"; "last week" -> "the week before 22 July 2023"; "last weekend" -> "the weekend before 22 July 2023". Their "time" values are 2023-07-21, 2023-07-10, and 2023-07-15 respectively.
+  - Named weekdays, weeks, and weekends stay anchored-relative instead of becoming a calendar date: "last Friday" + anchor 2023-07-22 -> "the Friday before 22 July 2023"; "last week" -> "the week before 22 July 2023"; "last weekend" -> "the weekend before 22 July 2023".
   - Exact-day expressions become human-readable absolute dates: with anchor 2023-07-22, "yesterday" -> "21 July 2023" and "two days ago" -> "20 July 2023".
-  - Month expressions keep month precision: "last month" -> "June 2023", with "time" = "2023-06-01".
-  - Year expressions keep year precision in text: "last year" -> "2022", with "time" = "2022-01-01" for indexing.
-- If several adjacent turns describe the same fact/event, merge them into one dense memory.
+  - Month expressions keep month precision: "last month" -> "June 2023".
+  - Year expressions keep year precision in text: "last year" -> "2022".
+- If several adjacent turns describe the same fact/event, merge them into one dense memory, but do not merge otherwise similar events that occurred at different times.
 - PREVIOUS_DIALOGUE_CONTEXT contains the tail of the preceding raw-dialogue window. Use it to resolve cross-window questions and answers, ellipsis, pronouns, entities, and qualifiers such as time and place.
 - Create a memory only when CURRENT_DIALOGUE_WINDOW adds answer-bearing information. Never create a memory supported only by PREVIOUS_DIALOGUE_CONTEXT.
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
@@ -60,7 +63,6 @@ Schema:
       "tag":"short concrete tag",
       "origin":"D1:1",
       "topic": ["t1","t3"],
-      "time":"YYYY-MM-DD",
       "semantic_properties":["personal_profile","durable"]
     }
   ],
@@ -434,7 +436,7 @@ Rules:
 - Give the minimal answer requested by the question.
 - For list questions, return a concise comma-separated list.
 - Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.
-- For time questions, preserve the source wording and its precision. Use time_interval.start as the conversation time only when a relative expression needs that reference point.
+- For time questions, preserve the source wording and its precision. Use conversation_time only when a relative expression needs that reference point.
 - For a single-time question, return exactly one best time expression, not a list of multiple candidate dates.
 - If the question asks for an exact date, output a human-readable absolute date like "10 July 2023".
 - When multiple candidates mention similar events, choose the one whose entity, event type, month/season, and wording best match the question; do not merge conflicting times.

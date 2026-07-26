@@ -90,6 +90,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         self.assertEqual(supports, ["M_1"])
         self.assertEqual(agent.selector_calls, 0)
         package = agent.llm.inputs[0]["evidence_package"]
+        self.assertNotIn("backup_candidates", agent.llm.inputs[0])
         self.assertEqual(len(package["answer_items"]), 20)
         self.assertEqual(
             [item["evidence"][0]["memory_id"] for item in package["answer_items"]],
@@ -107,8 +108,13 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             agent.answer_question_eaes("question", category=1)
 
         self.assertEqual(agent.selector_calls, 1)
-        package = agent.llm.inputs[0]["evidence_package"]
+        reader_input = agent.llm.inputs[0]
+        package = reader_input["evidence_package"]
         self.assertEqual(len(package["answer_items"]), 1)
+        self.assertEqual(
+            [item["memory_id"] for item in reader_input["backup_candidates"]],
+            [f"M_{i}" for i in range(1, 13)],
+        )
 
 
 if __name__ == "__main__":

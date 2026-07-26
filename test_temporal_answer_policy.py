@@ -87,7 +87,7 @@ class TemporalAnswerPolicyTests(unittest.TestCase):
                 "evidence": [{
                     "memory_id": "M_D8_9_1",
                     "event_id": "D8:9-1",
-                    "time_interval": {"start": "2023-07-15"},
+                    "conversation_time": "2023-07-15",
                 }],
             }],
         }
@@ -116,14 +116,14 @@ class TemporalAnswerPolicyTests(unittest.TestCase):
                 "evidence": [{
                     "memory_id": "supported",
                     "event_id": "supported-event",
-                    "time_interval": {"start": "2023-07-12"},
+                    "conversation_time": "2023-07-12",
                 }],
             }],
         }
         candidates = [{
             "memory_id": "unrelated",
             "event_id": "unrelated-event",
-            "time_interval": {"start": "2023-07-15"},
+            "conversation_time": "2023-07-15",
         }]
         answer = mixin._eaes_temporal_answer(
             "10 July 2023", ["supported"], evidence, candidates)

@@ -222,10 +222,9 @@ class EAESMixin:
             if not source_expression:
                 source_expression = self._eaes_extract_temporal_expression(
                     record.get("rewrite_content") or event.text)
-            interval = record.get("time_interval") or {}
             rendered = self._eaes_anchor_relative_answer(
                 source_expression,
-                event.conversation_time or interval.get("start"),
+                event.conversation_time or record.get("conversation_time"),
             )
             if not rendered:
                 rendered = self._eaes_precise_temporal_answer(
@@ -278,7 +277,6 @@ class EAESMixin:
                 "raw_text": self._eaes_raw_source_text(ev),
                 "tag": ee.get("tag"),
                 "keywords": self._as_list(keyword_by_sentence.get(event_id))[:12],
-                "time": ee.get("time"),
             })
         if not memories:
             return {}
@@ -353,11 +351,7 @@ class EAESMixin:
                 attribute_paths=attribute_paths,
                 raw_text=raw_source_text,
                 rewrite_content=rewrite_content,
-                time_interval={
-                    "type": "conversation_time",
-                    "start": conversation_time,
-                    "end": conversation_time,
-                },
+                conversation_time=conversation_time,
                 event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
@@ -638,8 +632,9 @@ class EAESMixin:
             "question": question,
             "query_plan": query_plan,
             "evidence_package": evidence_package,
-            "backup_candidates": candidates[:12],
         }
+        if not config.DISABLE_EVIDENCE_SELECTOR:
+            final_input["backup_candidates"] = candidates[:12]
         use_anchored_temporal_style = (
             str(config.dataset).lower() == "locomo" and str(category) == "2"
         )

@@ -2,6 +2,32 @@
 
 > Evaluation recording convention: whenever a new experiment result is reported, append its scope, metrics, and diagnosis to the corresponding version entry.
 
+## v115-20260726
+
+### Goal
+
+Make rewritten memories temporally self-contained without retaining an ambiguous per-memory structured `time` field, expose the EAES dialogue anchor explicitly as `conversation_time`, and remove duplicate final-reader backup input when the evidence selector is disabled.
+
+### Changes
+
+- Remove `time` from the rewrite sentence schema and rewrite prompt output format; keep the session-level `conversation_time` field.
+- Require every rewrite memory to include source-supported occurrence or validity time directly in its text whenever available, with a stronger preservation requirement for `episodic` memories.
+- Preserve the existing anchored rendering rules for relative weekdays, weeks, weekends, months, years, and exact-day expressions, but stop writing a separate normalized event-time field.
+- Strip legacy sentence-level `time` values during rewrite normalization so regenerated memories follow the new schema even if the rewrite model emits the retired field.
+- Replace EAES note/candidate `time_interval` with the scalar `conversation_time` dialogue anchor and update the final-reader temporal instruction accordingly.
+- When `--disable_evidence_selector` is enabled, omit `backup_candidates` because every reranked candidate is already present in `evidence_package`; keep the existing top-12 backup path when the selector is enabled.
+- Retain read compatibility for legacy cached rewrite memories that still contain `time`, while avoiding empty event-time indexing for newly generated memories.
+
+### Expected Effect
+
+- Help the final reader distinguish similar memories from different times using the answer-bearing rewrite text itself, especially for repeated episodic events and count questions.
+- Remove duplicated top-12 candidates from no-selector reader input, reducing token use and evidence repetition while keeping the selector-enabled path unchanged.
+- Regenerated memories no longer populate the structured event timeline from rewrite output; experiments that depend on non-EAES time-filtered retrieval must account for this tradeoff.
+
+### Evaluation Result
+
+Pending. First reuse the existing v114 memories to isolate the no-selector backup removal. Then regenerate rewrite, keyword, embedding, and EAES index files to evaluate the temporal-text change separately.
+
 ## v114-20260723
 
 ### Goal
@@ -32,7 +58,47 @@ Add query-adaptive semantic-property scoring to the existing EAES retrieval path
 
 ### Evaluation Result
 
-Pending. Regenerate rewrite memories before the comparison because existing rewrite JSONL files do not contain `semantic_properties`. Compare the same regenerated memories with semantic scoring disabled versus enabled, focusing on ExactCover and MRR for categories 1 and 3.
+Scope: LoCoMo `conv-26`, `deepseek-chat`, first 100 questions after excluding category 5, with regenerated semantic-property memories, EAES LLM indexing, and `--eaes_semantic_score` enabled. Retrieval-only metrics cover 98 questions because two questions have no normalized gold evidence and therefore receive `None` retrieval metrics.
+
+#### Answer Metrics and v112 Comparison
+
+| Category | n | F1 | Delta F1 vs v112 | Judge Correct | Judge Accuracy | Delta Accuracy vs v112 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 32 | 0.3855 | -0.0662 | 21 | 0.6562 | -0.1563 |
+| 2 | 37 | 0.8764 | -0.0024 | 32 | 0.8649 | 0.0000 |
+| 3 | 13 | 0.2758 | +0.0476 | 9 | 0.6923 | 0.0000 |
+| 4 | 18 | 0.4864 | +0.0107 | 14 | 0.7778 | +0.0556 |
+| Overall | 100 | 0.5710 (weighted) | -0.0140 | 76 | 0.7600 | -0.0400 |
+
+The end-to-end result is lower than v112. Category 1 loses five judge-correct answers (`26 -> 21`), category 4 gains one (`13 -> 14`), and categories 2 and 3 are unchanged; therefore the net four-answer decline comes entirely from category 1 after the category-4 offset. Category 3's F1 rises while its judge correctness stays at `9/13`, indicating improved lexical overlap rather than more semantically correct answers.
+
+This is an end-to-end version comparison, not a clean estimate of the semantic score's causal effect: v114 regenerated memories with a changed rewrite prompt, whereas v112 used the previous rewrite memories. A controlled ablation must reuse the exact same v114 rewrite/keyword/embedding files and change only `--eaes_semantic_score`.
+
+#### Retrieval-Only Metrics
+
+| Stage | n | Hit@K | Recall@K | ExactCover@K | MRR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Combined prefilter | 98 | 0.9490 | 0.9243 | 0.8878 | 0.6178 |
+| LLM rerank output | 98 | 0.9184 | 0.8639 | 0.8061 | 0.6546 |
+| Delta (rerank - prefilter) | - | -0.0306 | -0.0604 | -0.0817 | +0.0368 |
+
+The LLM rerank/narrowing stage improves the first relevant evidence rank (`MRR +0.0368`) but reduces evidence coverage: approximately 87 of 98 questions have full gold-origin coverage before reranking, versus 79 of 98 afterward. This relevance-versus-coverage tradeoff is especially risky for category-1 multi-hop questions that need complementary memories.
+
+#### Diagnosis: Why Top-10 Gold Retrieval Can Still Produce a Wrong Answer
+
+- Retrieval evaluation matches normalized gold dialogue IDs against memory `origin`. A compressed memory can cite a gold origin while omitting or diluting the exact answer-bearing facet from that source turn, so origin-level ExactCover can overestimate usable textual evidence.
+- Retrieval-only stops after the attribute reranker. The answer path then runs an evidence selector that keeps at most eight answer items and at most three memories per item. A gold memory in the reranked top 10 can still be discarded, grouped under the wrong candidate answer, or separated from complementary multi-hop evidence.
+- The final reader treats the selector's `evidence_package` as primary and consults only the first 12 reranked candidates as backup when the package is empty or clearly insufficient. It can therefore ignore a correct backup candidate when the selected package looks plausible but supports the wrong facet.
+- Even when all required facts reach the final reader, the model may fail answer-slot selection, multi-hop composition, list completeness, or planned-versus-completed distinctions. The category-1 judge drop is consistent with a composition bottleneck, but per-question stage alignment is required before assigning causality.
+- One global `required_semantic_properties` set is applied independently to every memory. A heterogeneous multi-hop question may require different types for different hops; global match bonuses can promote several redundant same-type memories instead of preserving one memory for each required hop.
+
+#### Next Controlled Tests
+
+1. Reuse the regenerated v114 memory files and rerun the same questions without `--eaes_semantic_score`. This isolates semantic scoring from rewrite variation.
+2. On the same memories and semantic setting, run the existing `--disable_evidence_selector` answer ablation. Improvement would locate the bottleneck in selector coverage; no improvement when the correct textual facts are present would point to the final reader/prompt.
+3. Join answer and retrieval rows per question and audit four checkpoints: gold origin in prefilter, gold origin after rerank, answer-bearing text in the retrieved memory, and required memories in the final evidence package. Do not classify an error as a reader failure from retrieval rank alone.
+4. If the selector is responsible, change the existing selector from compact relevance selection to requirement coverage: retain at least one evidence item for every query sub-requirement/hop and preserve complementary evidence before removing redundancy. As a simple diagnostic, union the selector output with a small fixed top-k reranked set rather than immediately adding a new reranker module.
+5. If the correct facts already reach the final package, strengthen the existing final-answer prompt to explicitly resolve the requested answer slot, compose all required facts, and check list completeness before emitting the minimal answer. Consider a stronger reader model only after this stage-specific test.
 
 ## v113-20260721
 

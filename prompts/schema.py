@@ -14,7 +14,7 @@ SCHEMA = {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "text", "tag", "origin", "topic", "time", "semantic_properties"],
+        "required": ["id", "text", "tag", "origin", "topic", "semantic_properties"],
         "properties": {
           "id": {
             "type": "string",
@@ -33,11 +33,6 @@ SCHEMA = {
           },
           "topic": {
             "type": "array",
-          },
-          "time": {
-            "type": "string",
-            "format": "date",
-            "description": "YYYY-MM-DD"
           },
           "semantic_properties": {
             "type": "array",

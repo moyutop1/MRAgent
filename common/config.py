@@ -18,6 +18,13 @@ parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged
 parser.add_argument("--rewrite_window_size", type=int, default=int(os.getenv("REWRITE_WINDOW_SIZE", "40")), help="Current dialogue turns per session-local rewrite window, excluding previous context.")
 parser.add_argument("--rewrite_overlap_size", type=int, default=int(os.getenv("REWRITE_OVERLAP_SIZE", "2")), help="Tail turns from the preceding window shown as context for cross-window completion.")
 parser.add_argument("--rewrite_previous_limit", type=int, default=int(os.getenv("REWRITE_PREVIOUS_LIMIT", "3")), help="Previous compressed memories shown to the next rewrite window for deduplication.")
+parser.add_argument("--semantic_hierarchy", action="store_true", help="Use independent semantic parent/child plans and EAES parent memories.")
+parser.add_argument("--parent_min_turns", type=int, default=int(os.getenv("PARENT_MIN_TURNS", "4")), help="Hard minimum core turns per semantic parent segment, except the final segment.")
+parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PARENT_MAX_TURNS", "20")), help="Hard maximum core turns per semantic parent segment.")
+parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
+parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
+parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Maximum child segments rewritten in one LLM call.")
+parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "8")), help="Semantic parent memories passed directly to the EAES final reader.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
 parser.add_argument("--query_key_mode", choices=["inventory", "extract"], default=os.getenv("QUERY_KEY_MODE", "inventory"), help="Question-key strategy: select from stored keys or freely extract keywords.")
@@ -163,6 +170,7 @@ MAX_ROUNDS=8         # tool-calling loop: max assistant rounds
 MAX_TOOL_CALLS=50    # tool-calling loop: safety cap on total tool calls
 EAES_MODE = args.eaes
 EAES_SEMANTIC_SCORE = args.eaes_semantic_score
+SEMANTIC_HIERARCHY = args.semantic_hierarchy
 # Each exact query-memory semantic-property match adds this weak positive bonus;
 # the scorer caps the effective match count at three and never subtracts points.
 SEMANTIC_MATCH_WEIGHT = 0.1
@@ -172,6 +180,8 @@ if DISABLE_EVIDENCE_SELECTOR and not EAES_MODE:
     raise ValueError("--disable_evidence_selector requires --eaes.")
 if EAES_SEMANTIC_SCORE and not EAES_MODE:
     raise ValueError("--eaes_semantic_score requires --eaes.")
+if SEMANTIC_HIERARCHY and not EAES_MODE:
+    raise ValueError("--semantic_hierarchy requires --eaes.")
 if DISABLE_EVIDENCE_SELECTOR and RETRIEVAL_ONLY:
     raise ValueError(
         "--disable_evidence_selector cannot change --retrieval_only metrics because "
@@ -218,23 +228,41 @@ if REWRITE_OVERLAP_SIZE < 0 or REWRITE_OVERLAP_SIZE >= REWRITE_WINDOW_SIZE:
 REWRITE_PREVIOUS_LIMIT = args.rewrite_previous_limit
 if REWRITE_PREVIOUS_LIMIT < 0:
     raise ValueError("--rewrite_previous_limit must be non-negative.")
+PARENT_MIN_TURNS = args.parent_min_turns
+PARENT_MAX_TURNS = args.parent_max_turns
+PARENT_CONTEXT_TURNS = args.parent_context_turns
+CHILD_MAX_TURNS = args.child_max_turns
+CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
+PARENT_TOP_K = args.parent_top_k
+if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
+    raise ValueError("parent turn limits must satisfy 0 < min <= max.")
+if PARENT_CONTEXT_TURNS < 0:
+    raise ValueError("--parent_context_turns must be non-negative.")
+if CHILD_MAX_TURNS <= 0:
+    raise ValueError("--child_max_turns must be positive.")
+if CHILD_REWRITE_BATCH_SIZE <= 0 or CHILD_REWRITE_BATCH_SIZE > 15:
+    raise ValueError("--child_rewrite_batch_size must be between 1 and 15.")
+if PARENT_TOP_K <= 0:
+    raise ValueError("--parent_top_k must be positive.")
 
 dataset = args.data
 DATASET = dataset
 datapath = f"data/dataset_{dataset}.json"
-ADDITIONAL_TK = f"_{args.model}"#"_gpt4o-mini"
+HIERARCHY_SUFFIX = "_hierarchy" if SEMANTIC_HIERARCHY else ""
+ADDITIONAL_TK = f"_{args.model}{HIERARCHY_SUFFIX}"#"_gpt4o-mini"
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 EMBEDDING_TAG = os.getenv(
     "EMBEDDING_TAG",
     "text_embedding_3_large" if EMBEDDING_PROVIDER in {"openrouter", "ofox"} else "local_bge"
 )
-ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}"#
+ADDITIONAL_EM = f"_{args.model}_{EMBEDDING_TAG}{HIERARCHY_SUFFIX}"#
 ADDITIONAL_RE = (
     f"_{args.model}_{args.file}"
     f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
     f"{'_xcat' + '-'.join(sorted(EXCLUDED_CATEGORIES)) if EXCLUDED_CATEGORIES else ''}"
     f"{'_eaes' if EAES_MODE else ''}"
     f"{'_semantic' if EAES_SEMANTIC_SCORE else ''}"
+    f"{HIERARCHY_SUFFIX}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"

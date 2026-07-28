@@ -30,6 +30,7 @@ class MemoryController:
         self.queried_event = []
         self.queried_keyword = []
         self._eaes_query_embedding_cache = {}
+        self._eaes_parent_query_embedding_cache = {}
 
     # Dispatcher op
 
@@ -177,6 +178,50 @@ class MemoryController:
                 )
             for note, vector in zip(pending, vectors):
                 note.retrieval_embedding = vector
+
+    def prepare_eaes_parent_embeddings(self):
+        pending = [
+            parent for parent in self.memory.eaes_parent_nodes.values()
+            if parent.retrieval_embedding is None and parent.rewrite_content
+        ]
+        if not pending:
+            return
+        with _EAES_EMBEDDING_LOCK:
+            pending = [
+                parent for parent in self.memory.eaes_parent_nodes.values()
+                if parent.retrieval_embedding is None and parent.rewrite_content
+            ]
+            if not pending:
+                return
+            vectors = self._normalize_embedding_rows(
+                get_embedding([parent.rewrite_content for parent in pending])
+            )
+            if len(vectors) != len(pending):
+                raise RuntimeError(
+                    f"EAES parent embedding count mismatch: {len(vectors)} != {len(pending)}"
+                )
+            for parent, vector in zip(pending, vectors):
+                parent.retrieval_embedding = vector
+
+    def _eaes_parent_keyword_embeddings(self, query_plan, question_emb=None):
+        keywords = [
+            str(value).strip()
+            for value in self._as_list((query_plan or {}).get("keywords"))
+            if str(value).strip()
+        ]
+        if keywords:
+            cache_key = tuple(keywords)
+            vectors = self._eaes_parent_query_embedding_cache.get(cache_key)
+            if vectors is None:
+                with _EAES_EMBEDDING_LOCK:
+                    vectors = self._normalize_embedding_rows(get_embedding(keywords))
+                self._eaes_parent_query_embedding_cache[cache_key] = vectors
+            return vectors, keywords
+        if question_emb is not None:
+            return self._normalize_embedding_rows(question_emb), [
+                "__question_embedding_fallback__"
+            ]
+        return np.empty((0, 0), dtype=np.float32), []
 
     def _eaes_query_embeddings(self, query_plan, question_emb=None):
         query_attributes = [
@@ -327,6 +372,39 @@ class MemoryController:
     def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
         limit = limit or config.EAES_CANDIDATE_LIMIT
         return self.score_eaes_candidates(query_plan, question_emb, limit=limit, include_rank=True)
+
+    def retrieve_eaes_parent_candidates(
+            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None
+    ):
+        """Retrieve parents independently; this never filters child candidates."""
+        if not config.SEMANTIC_HIERARCHY:
+            return []
+        self.prepare_eaes_parent_embeddings()
+        query_vectors, keywords = self._eaes_parent_keyword_embeddings(
+            query_plan, question_emb
+        )
+        if query_vectors.size == 0:
+            return []
+        scored = []
+        for parent in self.memory.eaes_parent_nodes.values():
+            if parent.retrieval_embedding is None:
+                continue
+            vector = self._normalize_embedding_rows(parent.retrieval_embedding)[0]
+            similarities = np.dot(query_vectors, vector)
+            best_index = int(np.argmax(similarities))
+            score = float(similarities[best_index])
+            scored.append((score, best_index, parent))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = scored[:limit or config.PARENT_TOP_K]
+        return [
+            {
+                **parent.to_reader_dict(),
+                "score": round(score, 4),
+                "rank": rank,
+                "matched_keyword": keywords[best_index],
+            }
+            for rank, (score, best_index, parent) in enumerate(selected, start=1)
+        ]
 
     def expand_eaes_raw_text(self, memory_ids: List[str]):
         expanded = []

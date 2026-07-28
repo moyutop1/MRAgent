@@ -1,5 +1,44 @@
 # Version Iterations
 
+## v116-20260728
+
+### Goal
+
+Replace fixed-length rewrite windows with an opt-in semantic parent/child hierarchy while preserving the existing EAES child retrieval path and all behavior when the feature is disabled.
+
+### Changes
+
+- Add `--semantic_hierarchy` plus explicit parent/child size and retrieval parameters.
+  - Parent core segments use a hard 4-20 turn range by default; only the final session segment may be shorter than the minimum.
+  - Child semantic spans use a hard maximum of 8 turns, and child rewrite calls contain at most 15 segments.
+  - Hierarchical rewrite, embedding, and result paths receive a separate `_hierarchy` suffix so legacy caches remain reusable.
+- Plan parent and child boundaries with two independent full-session LLM calls.
+  - Parent planning creates contiguous coarse topic/episode segments and returns all boundaries at once.
+  - Child planning independently emits answer-bearing semantic units and omits greetings, acknowledgements, generic advice, and other low-value turns.
+  - A child belongs to the parent whose core contains the child's first source `dia_id`; later child evidence may cross the parent boundary.
+- Use separate parent and child rewrite prompts.
+  - Each child segment produces exactly one atomic rewrite sentence, validated one-to-one and in order.
+  - A unique child uses its first source `dia_id` as its ID; repeated first origins receive only a local defensive suffix such as `D1:5-1` and `D1:5-2`.
+  - Each parent stores its own coarse `rewrite_content`, all linked child IDs, and all attributes already stored on those child nodes.
+- Add independent parent retrieval without changing EAES child recall.
+  - Parent embeddings are computed only from the parent's own `rewrite_content`.
+  - Every raw `query_plan["keywords"]` item is embedded without deduplication; each parent is ranked by its maximum keyword cosine similarity.
+  - The top eight parents are sent directly to the final reader even when the selector is disabled, while child candidates continue through the existing global EAES path without parent filtering.
+- Keep parent internals out of the final-reader payload.
+  - The reader receives only each parent's ID, rewrite content, score, rank, and matched keyword; `child_attributes` and `child_ids` remain internal.
+  - All retrieved parent IDs are added to final supports, and support resolution retains their linked child dialogue origins for provenance evaluation.
+
+### Expected Effect
+
+- Produce topic-coherent coarse memories and atomic answer-bearing child memories without coupling their retrieval recall.
+- Give the final reader broader relationship, personality, and episode context from parents while preserving fine-grained child evidence.
+- Avoid fixed-window boundary artifacts and retain the legacy rewrite/retrieval behavior unless `--semantic_hierarchy` is explicitly enabled.
+
+### Verification
+
+- Added semantic-hierarchy unit coverage for independent planning, first-origin ownership, duplicate-origin IDs, the 15-child batch limit, one-to-one rewrites, hidden parent attributes, and support expansion.
+- Relevant rewrite, temporal-answer, selector-ablation, semantic-score, and judge-prompt regression suites pass.
+
 > Evaluation recording convention: whenever a new experiment result is reported, append its scope, metrics, and diagnosis to the corresponding version entry.
 
 ## v115-20260726

@@ -108,6 +108,133 @@ CURRENT_DIALOGUE_WINDOW (produce memories for new information here):
             PREVIOUS_DIALOGUE_CONTEXT=previous_dialogue_context,
         )
 
+    PARENT_SEGMENT_SYSTEM_PROMPT = """You plan coarse semantic parent segments for one dialogue session. Only output valid JSON.
+Rules:
+- Return the complete plan for the entire session in one response.
+- Parent segments must cover every input turn exactly once, in dialogue order, with no gaps or core overlap.
+- Choose boundaries where a broad topic, event episode, or discourse unit is semantically closed.
+- Avoid cutting an unresolved question/answer pair, pronoun reference, temporal qualifier, or causal explanation when a legal alternative exists.
+- Every non-final segment must respect minimum_turns and every segment must respect maximum_turns.
+- Only the final segment may be shorter than minimum_turns.
+- Copy start_origin and end_origin exactly from the input; do not generate summaries or new IDs.
+Schema:
+{
+  "parent_segments": [
+    {"start_origin": "D1:1", "end_origin": "D1:12"}
+  ]
+}"""
+
+    PARENT_SEGMENT_PROMPT = """SESSION_AND_LIMITS:
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_parent_segment_prompt(cls, payload: str) -> str:
+        return cls.PARENT_SEGMENT_PROMPT.format(PAYLOAD=payload)
+
+    CHILD_SEGMENT_SYSTEM_PROMPT = """You plan atomic, answer-bearing child semantic segments for one dialogue session. Only output valid JSON.
+Rules:
+- Return the complete child plan for the entire session in one response.
+- Parent planning is independent and is not provided here.
+- Each child segment describes exactly one fact, event, plan, state, preference, relationship, decision, task result, or image/caption fact.
+- source_origins must contain the real dia_ids whose text supplies that semantic unit, in dialogue order.
+- The raw turn span from the first through last source origin must not exceed maximum_turns.
+- Several turns may form one semantic unit. One turn containing several independent facts may appear in several child segments with different focus values.
+- Keep child segments ordered by their first source origin. Do not duplicate an identical source_origins plus focus pair.
+- Omit greetings, acknowledgements, boilerplate, generic advice, repeated confirmations, and other low-value turns rather than creating child segments for them.
+- Copy source origins exactly. Do not rewrite the memories and do not invent IDs.
+Schema:
+{
+  "child_segments": [
+    {
+      "source_origins": ["D1:3", "D1:5"],
+      "focus": "Caroline was inspired by transgender stories at the support group"
+    }
+  ]
+}"""
+
+    CHILD_SEGMENT_PROMPT = """SESSION_AND_LIMITS:
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_child_segment_prompt(cls, payload: str) -> str:
+        return cls.CHILD_SEGMENT_PROMPT.format(PAYLOAD=payload)
+
+    PARENT_REWRITE_SYSTEM_PROMPT = """You create one coarse-grained parent memory from one dialogue segment. Only output valid JSON.
+Rules:
+- Produce exactly one self-contained parent rewrite for PARENT_DIALOGUE_WINDOW and echo parent_id exactly.
+- Summarize the segment's central people, relationships, personality traits, preferences, recurring goals, background states, major events, plans, outcomes, and meaningful causal connections.
+- Prefer a coherent overview over an atomic fact list. Preserve important names, time precision, places, event status, and changes over time.
+- Ignore greetings, acknowledgements, boilerplate, generic advice, and repeated confirmations.
+- PREVIOUS_DIALOGUE_CONTEXT may resolve references but cannot independently support a claim.
+- Do not invent information and do not generate child IDs, attributes, topics, or semantic properties.
+Schema:
+{
+  "parent_id": "D1:t1",
+  "rewrite_content": "One self-contained coarse-grained memory."
+}"""
+
+    PARENT_REWRITE_PROMPT = """PARENT_INPUT:
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_parent_rewrite_prompt(cls, payload: str) -> str:
+        return cls.PARENT_REWRITE_PROMPT.format(PAYLOAD=payload)
+
+    CHILD_BATCH_REWRITE_SYSTEM_PROMPT = """You create atomic child memories from pre-segmented dialogue windows. Only output valid JSON.
+Rules:
+- Produce exactly one sentence object for every input child, preserve input order, and echo each child_id exactly.
+- Never omit, duplicate, merge, split, reorder, or add a child.
+- Each rewrite must express only its child's focus as one self-contained answer-bearing memory.
+- Resolve pronouns into concrete entities and preserve source-supported people, relationships, time, place, state, causality, and task outcomes.
+- origin is the comma-separated list of all dia_ids that directly contribute to the memory. Use only IDs present in that child's current_dialogue_window.
+- origin must start with the child window's first source origin so its deterministic child_id remains provenance-aligned. Previous context may resolve a reference but cannot be cited as independent support; the child planner must place every contributing turn inside the current child window.
+- Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
+- Preserve source-supported temporal information directly in text using the same precision as the dialogue.
+- Use a short concrete tag of at most three words and set topic to [].
+- semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
+- personal_sentences may duplicate stable person facts, but it does not change the required one-to-one sentence output.
+Schema:
+{
+  "conversation_time": "YYYY-MM-DD",
+  "sentence": [
+    {
+      "id": "D1:5",
+      "text": "One atomic self-contained memory.",
+      "tag": "short tag",
+      "origin": "D1:5",
+      "topic": [],
+      "semantic_properties": ["event_action", "episodic"]
+    }
+  ],
+  "topics": {},
+  "personal_sentences": []
+}"""
+
+    CHILD_BATCH_REWRITE_PROMPT = """PREVIOUS_REWRITE_MEMORIES:
+<<<
+{PREVIOUS_MEMORIES}
+>>>
+
+CHILD_BATCH (at most 15 children):
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_child_batch_rewrite_prompt(
+            cls, payload: str, previous_memories: str = "[]"
+    ) -> str:
+        return cls.CHILD_BATCH_REWRITE_PROMPT.format(
+            PAYLOAD=payload,
+            PREVIOUS_MEMORIES=previous_memories,
+        )
+
 
     KEYWORD_SYSTEM_PROMPT = """You are an information extraction system. Only output valid JSON.
 Keyword Extraction
@@ -434,6 +561,8 @@ Limits:
 Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
+- parent_memories, when present, are independently retrieved coarse-grained rewrite memories. They are direct supporting context and do not restrict or rank the child evidence package.
+- A relevant parent memory may support the answer even when its children are absent from the child candidate list. Cite its parent_id in supports when used.
 - For list questions, return a concise comma-separated list.
 - Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.
 - For time questions, preserve the source wording and its precision. Use conversation_time only when a relative expression needs that reference point.

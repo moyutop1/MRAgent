@@ -7,6 +7,13 @@ from typing import List, NamedTuple
 from common import config
 from prompts import schema as json_scheme
 from prompts.prompts import Prompts
+from agent.semantic_segmentation import (
+    attach_child_ids_to_parents,
+    iter_child_batches,
+    parse_session_turns,
+    plan_child_segments,
+    plan_parent_segments,
+)
 
 
 _MONTH_NAMES = (
@@ -472,7 +479,208 @@ def _merge_window_rewrites(window_outputs: List[dict], conversation_time: str):
     return merged
 
 
+def _rewrite_parent_segment(llm, parent, conversation_time, logger=None):
+    payload = {
+        "parent_id": parent.parent_id,
+        "conversation_time": conversation_time,
+        "previous_dialogue_context": [
+            turn.line for turn in parent.previous_context
+        ],
+        "parent_dialogue_window": [turn.line for turn in parent.current_turns],
+    }
+    user_prompt = Prompts.extract_parent_rewrite_prompt(
+        json.dumps(payload, ensure_ascii=False)
+    )
+    last_error = ""
+    for attempt in range(4):
+        system_prompt = Prompts.PARENT_REWRITE_SYSTEM_PROMPT
+        if attempt:
+            system_prompt += (
+                "\nThe previous output was invalid. Return the complete object again. "
+                f"Validation error: {last_error}"
+            )
+        output = llm.chat_text(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0 if attempt == 0 else 0.7,
+        )
+        if not isinstance(output, dict):
+            last_error = "parent rewrite must be a JSON object"
+            continue
+        if output.get("parent_id") != parent.parent_id:
+            last_error = f"parent_id must equal {parent.parent_id!r}"
+            continue
+        rewrite_content = str(output.get("rewrite_content") or "").strip()
+        if not rewrite_content:
+            last_error = "rewrite_content must be non-empty"
+            continue
+        parent.rewrite_content = rewrite_content
+        return parent
+    if logger:
+        logger.error(
+            "parent rewrite failed for %s after retries: %s",
+            parent.parent_id,
+            last_error,
+        )
+    raise ValueError(
+        f"parent rewrite failed for {parent.parent_id}: {last_error}"
+    )
+
+
+def _child_batch_source_text(batch, conversation_time):
+    lines = []
+    seen = set()
+    for child in batch:
+        for turn in child.previous_context + child.current_turns:
+            if turn.origin in seen:
+                continue
+            seen.add(turn.origin)
+            lines.append(turn.line)
+    dialogue = "\n".join(lines)
+    if conversation_time:
+        return f"time:{conversation_time}\n{dialogue}"
+    return dialogue
+
+
+def _rewrite_child_batch(
+        llm,
+        batch,
+        conversation_time,
+        previous_memories=None,
+        logger=None,
+):
+    if len(batch) > config.CHILD_REWRITE_BATCH_SIZE or len(batch) > 15:
+        raise ValueError("child rewrite batch exceeds its configured hard limit")
+    children_payload = []
+    for child in batch:
+        children_payload.append({
+            "child_id": child.child_id,
+            "focus": child.focus,
+            "source_origins": child.source_origins,
+            "previous_dialogue_context": [
+                turn.line for turn in child.previous_context
+            ],
+            "current_dialogue_window": [turn.line for turn in child.current_turns],
+        })
+    previous_slice = (
+        (previous_memories or [])[-config.REWRITE_PREVIOUS_LIMIT:]
+        if config.REWRITE_PREVIOUS_LIMIT
+        else []
+    )
+    previous_payload = [
+        {
+            "id": item.get("id"),
+            "text": item.get("text"),
+            "origin": item.get("origin"),
+        }
+        for item in previous_slice
+        if isinstance(item, dict)
+    ]
+    user_prompt = Prompts.extract_child_batch_rewrite_prompt(
+        json.dumps({
+            "conversation_time": conversation_time,
+            "children": children_payload,
+        }, ensure_ascii=False),
+        json.dumps(previous_payload, ensure_ascii=False),
+    )
+    source_text = _child_batch_source_text(batch, conversation_time)
+    last_error = ""
+    for attempt in range(4):
+        system_prompt = Prompts.CHILD_BATCH_REWRITE_SYSTEM_PROMPT
+        if attempt:
+            system_prompt += (
+                "\nThe previous complete batch was invalid. Return the entire batch again. "
+                f"Validation error: {last_error}"
+            )
+        output = llm.chat_text(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0 if attempt == 0 else 0.7,
+        )
+        normalize_rewrite_temporal_granularity(output, source_text)
+        valid, last_error = json_scheme.check_child_batch_rewrite_json(
+            output, list(batch), source_text
+        )
+        if valid:
+            output["conversation_time"] = conversation_time or output.get(
+                "conversation_time"
+            )
+            return output
+    if logger:
+        logger.error("child rewrite batch failed after retries: %s", last_error)
+    raise ValueError(f"child rewrite batch failed after retries: {last_error}")
+
+
+def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
+    conversation_time = _conversation_time_from_text(text)
+    turns = parse_session_turns(text)
+    if not turns:
+        empty = _empty_rewrite(conversation_time)
+        empty["parent_nodes"] = []
+        return empty
+
+    parents = plan_parent_segments(llm, turns, conversation_time)
+    children = plan_child_segments(llm, turns, conversation_time)
+    parents = attach_child_ids_to_parents(parents, children)
+
+    parent_outputs = []
+    for parent in parents:
+        if not parent.child_ids:
+            continue
+        parent = _rewrite_parent_segment(
+            llm, parent, conversation_time, logger=logger
+        )
+        parent_outputs.append({
+            "parent_id": parent.parent_id,
+            "rewrite_content": parent.rewrite_content,
+            "child_ids": list(parent.child_ids),
+        })
+
+    batch_outputs = []
+    previous_memories = []
+    for batch in iter_child_batches(children):
+        output = _rewrite_child_batch(
+            llm,
+            batch,
+            conversation_time,
+            previous_memories=previous_memories,
+            logger=logger,
+        )
+        batch_outputs.append(output)
+        previous_memories.extend(_as_list(output.get("sentence")))
+
+    merged = _empty_rewrite(conversation_time)
+    merged["parent_nodes"] = parent_outputs
+    personal_counter = 1
+    for output in batch_outputs:
+        for sentence in output.get("sentence") or []:
+            if not isinstance(sentence, dict):
+                continue
+            item = dict(sentence)
+            item["origin"] = ",".join(origin_ids(item.get("origin")))
+            item["topic"] = []
+            merged["sentence"].append(item)
+        for personal in output.get("personal_sentences") or []:
+            if not isinstance(personal, dict) or not personal.get("text"):
+                continue
+            item = dict(personal)
+            item["id"] = f"p{personal_counter}"
+            personal_counter += 1
+            if item.get("origin"):
+                item["origin"] = ",".join(
+                    origin_ids(item.get("origin"))
+                ) or item.get("origin")
+            merged["personal_sentences"].append(item)
+    return merged
+
+
 def rewrite_windowed_session(llm, text: str, logger=None):
+    if getattr(config, "SEMANTIC_HIERARCHY", False):
+        return rewrite_semantic_hierarchy_session(llm, text, logger=logger)
     conversation_time = _conversation_time_from_text(text)
     turns = _dialogue_turn_lines(text)
     if not turns:

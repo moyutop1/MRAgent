@@ -150,6 +150,29 @@ class EAESMemoryNote:
         return data
 
 
+class EAESParentNode:
+    def __init__(
+            self,
+            parent_id: str,
+            rewrite_content: str,
+            child_ids: List[str],
+            child_attributes: List[dict],
+            retrieval_embedding=None,
+    ):
+        self.parent_id = parent_id
+        self.rewrite_content = rewrite_content
+        self.child_ids = list(child_ids or [])
+        self.child_attributes = list(child_attributes or [])
+        self.retrieval_embedding = retrieval_embedding
+
+    def to_reader_dict(self):
+        """Expose only the parent rewrite; child attributes stay internal."""
+        return {
+            "parent_id": self.parent_id,
+            "rewrite_content": self.rewrite_content,
+        }
+
+
 class MemorySystem:
     def __init__(self):
         self.keys: Dict[str, KeyNode] = {}  # key -> meta {'aliases': set(), ...}
@@ -173,6 +196,7 @@ class MemorySystem:
         self.topic_dict: Dict[str, Topic] = {}
         self.tid2emb = {}
         self.eaes_notes: Dict[str, EAESMemoryNote] = {}
+        self.eaes_parent_nodes: Dict[str, EAESParentNode] = {}
         self.eaes_event_to_memory: Dict[str, str] = {}
         self.eaes_by_entity: Dict[str, Set[str]] = defaultdict(set)
         self.eaes_by_attribute: Dict[str, Set[str]] = defaultdict(set)
@@ -358,12 +382,28 @@ class MemorySystem:
     def get_eaes_note(self, memory_id: str):
         return self.eaes_notes.get(memory_id)
 
+    def add_eaes_parent_node(self, parent: EAESParentNode):
+        self.eaes_parent_nodes[parent.parent_id] = parent
+
+    def get_eaes_parent_node(self, parent_id: str):
+        return self.eaes_parent_nodes.get(parent_id)
+
     def get_eaes_support_origin(self, memory_ids):
         origins = []
         for mid in memory_ids or []:
             note = self.eaes_notes.get(mid)
             if note is not None and note.origin not in origins:
                 origins.append(note.origin)
+                continue
+            parent = self.eaes_parent_nodes.get(mid)
+            if parent is None:
+                continue
+            if parent.parent_id not in origins:
+                origins.append(parent.parent_id)
+            for child_id in parent.child_ids:
+                child = self.eaes_notes.get(child_id)
+                if child is not None and child.origin not in origins:
+                    origins.append(child.origin)
         return origins
 
 

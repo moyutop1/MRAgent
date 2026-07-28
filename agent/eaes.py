@@ -4,7 +4,7 @@ import re
 from datetime import date
 
 from common import config
-from memory.system import EAESMemoryNote
+from memory.system import EAESMemoryNote, EAESParentNode
 from prompts.prompts import Prompts
 
 logger = logging.getLogger(__name__)
@@ -358,6 +358,37 @@ class EAESMixin:
             )
             self.memory.add_eaes_memory_note(note)
 
+    def _eaes_build_parent_nodes_for_session(self, events):
+        if not getattr(config, "SEMANTIC_HIERARCHY", False):
+            return
+        for spec in self._as_list(events.get("parent_nodes")):
+            if not isinstance(spec, dict):
+                continue
+            parent_id = str(spec.get("parent_id") or "").strip()
+            rewrite_content = str(spec.get("rewrite_content") or "").strip()
+            if not parent_id or not rewrite_content:
+                continue
+            child_memory_ids = []
+            child_attributes = []
+            for event_id in self._as_list(spec.get("child_ids")):
+                memory_id = self.memory.eaes_event_to_memory.get(event_id)
+                note = self.memory.get_eaes_note(memory_id) if memory_id else None
+                if note is None:
+                    continue
+                child_memory_ids.append(memory_id)
+                child_attributes.append({
+                    "child_id": memory_id,
+                    "attributes": list(note.attribute_paths or []),
+                })
+            if not child_memory_ids:
+                continue
+            self.memory.add_eaes_parent_node(EAESParentNode(
+                parent_id=parent_id,
+                rewrite_content=rewrite_content,
+                child_ids=child_memory_ids,
+                child_attributes=child_attributes,
+            ))
+
     @staticmethod
     def _eaes_should_use_unknown_lifecycle(question, query_plan):
         if not isinstance(query_plan, dict):
@@ -611,12 +642,19 @@ class EAESMixin:
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
         query_plan = self.parse_eaes_query(question, question_emb)
+        parent_candidates = []
+        if getattr(config, "SEMANTIC_HIERARCHY", False):
+            parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
+                query_plan, question_emb, limit=config.PARENT_TOP_K
+            )
         embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
             query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
-        if not embedding_candidates:
+        if not embedding_candidates and not parent_candidates:
             return "no information available", []
-        candidates = self.rerank_eaes_candidates(question, query_plan, embedding_candidates)
-        if not candidates:
+        candidates = self.rerank_eaes_candidates(
+            question, query_plan, embedding_candidates
+        ) if embedding_candidates else []
+        if not candidates and not parent_candidates:
             return "no information available", []
         if config.DISABLE_EVIDENCE_SELECTOR:
             evidence_package = self._fallback_eaes_package(
@@ -633,6 +671,8 @@ class EAESMixin:
             "query_plan": query_plan,
             "evidence_package": evidence_package,
         }
+        if parent_candidates:
+            final_input["parent_memories"] = parent_candidates
         if not config.DISABLE_EVIDENCE_SELECTOR:
             final_input["backup_candidates"] = candidates[:12]
         use_anchored_temporal_style = (
@@ -661,8 +701,12 @@ class EAESMixin:
                 model=config.RE_MODEL
             )
             if not isinstance(answer_obj, dict):
+                fallback_supports = [c.get("memory_id") for c in candidates[:3]]
+                fallback_supports.extend(
+                    parent.get("parent_id") for parent in parent_candidates
+                )
                 return "no information available", self.memory.get_eaes_support_origin(
-                    [c.get("memory_id") for c in candidates[:3]])
+                    fallback_supports)
         supports = self._as_list(answer_obj.get("supports"))
         if not supports:
             for item in self._as_list(evidence_package.get("answer_items")):
@@ -674,6 +718,10 @@ class EAESMixin:
                     mid = ev.get("memory_id")
                     if mid and mid not in supports:
                         supports.append(mid)
+        for parent in parent_candidates:
+            parent_id = parent.get("parent_id")
+            if parent_id and parent_id not in supports:
+                supports.append(parent_id)
         answer = answer_obj.get("answer", "no information available")
         if use_anchored_temporal_style:
             answer = self._eaes_temporal_answer(

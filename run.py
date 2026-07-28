@@ -362,6 +362,8 @@ def main():
             agent.store_keyword(keyword_path, rewrite_path)
             if config.EAES_MODE:
                 memory_controller.prepare_eaes_retrieval_embeddings()
+            if config.EAES_MODE and config.SEMANTIC_HIERARCHY:
+                memory_controller.prepare_eaes_parent_embeddings()
 
             result_path = config.result_template.format(dataset=dataset, sample_id=sample_id)
             if config.RETRIEVAL_ONLY:

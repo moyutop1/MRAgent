@@ -756,6 +756,7 @@ class Agent(EAESMixin, RetrievalMixin):
         self.episode_link_num = self.episode_link_num + i
         if config.EAES_MODE:
             self._eaes_build_notes_for_session(events, keyword_by_sentence, conversation_time)
+            self._eaes_build_parent_nodes_for_session(events)
 
     def store_raw_text(self, raw_text, conv_embeddings=None, topic_id_list=None, topic_embeddings=None):
         self.memory.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)

@@ -79,7 +79,7 @@ KEY_SCHEMA = {
         "properties": {
           "sentence_id": {
             "type": "string",
-            "pattern": "^D\\d+:\\d+-\\d+$",
+            "pattern": "^D\\d+:\\d+(?:-\\d+)?$",
           },
           "keyword": {
             "type": "array",
@@ -94,6 +94,7 @@ KEY_SCHEMA = {
 
 import re, json, csv, os
 from datetime import datetime
+from copy import deepcopy
 from typing import List, Dict, Any, Tuple, Set
 
 ID_RE = re.compile(r'^D\d+:\d+-\d+$')
@@ -101,13 +102,18 @@ ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
 DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 
 
-def check_rewrite_json(text, dialogue_text):
+def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
   from jsonschema import Draft202012Validator, ValidationError
   import re
-  schema = SCHEMA
+  schema = deepcopy(SCHEMA) if allow_origin_id else SCHEMA
+  if allow_origin_id:
+    schema["properties"]["sentence"]["items"]["properties"]["id"]["pattern"] = (
+      "^D\\d+:\\d+(?:-\\d+)?$"
+    )
 
   validator = Draft202012Validator(schema)
-  ID_RE = re.compile(r'^D\d+:\d+-\d+$')
+  id_pattern = r'^D\d+:\d+(?:-\d+)?$' if allow_origin_id else r'^D\d+:\d+-\d+$'
+  ID_RE = re.compile(id_pattern)
   ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
   DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 
@@ -173,6 +179,45 @@ def check_rewrite_json(text, dialogue_text):
         msg = f"sentence[{i}]: origin ids not found in allowed dia_id list: {missing}"
         return False, msg
 
+  return True, ""
+
+
+def check_child_batch_rewrite_json(text, child_segments, dialogue_text):
+  """Validate the strict one-child-segment to one-rewrite-sentence contract."""
+  flag, err = check_rewrite_json(text, dialogue_text, allow_origin_id=True)
+  if not flag:
+    return flag, err
+  if not isinstance(child_segments, list) or len(child_segments) > 15:
+    return False, "child batch must be a list containing at most 15 segments"
+  sentences = text.get("sentence") or []
+  if len(sentences) != len(child_segments):
+    return False, (
+      f"child batch cardinality mismatch: expected {len(child_segments)} "
+      f"sentences, got {len(sentences)}"
+    )
+  if text.get("topics") not in ({}, None):
+    return False, "hierarchical child rewrite topics must be empty"
+  for index, (sentence, child) in enumerate(zip(sentences, child_segments)):
+    child_id = getattr(child, "child_id", None)
+    current_turns = getattr(child, "current_turns", [])
+    if sentence.get("id") != child_id:
+      return False, (
+        f"sentence[{index}].id must echo {child_id!r}, "
+        f"got {sentence.get('id')!r}"
+      )
+    if sentence.get("topic") != []:
+      return False, f"sentence[{index}].topic must be []"
+    current_ids = {getattr(turn, "origin", None) for turn in current_turns}
+    used_order = re.findall(r"D\d+:\d+", sentence.get("origin") or "")
+    used_ids = set(used_order)
+    if not used_ids or not used_ids.issubset(current_ids):
+      return False, f"sentence[{index}] uses origins outside its child window"
+    source_origins = getattr(child, "source_origins", [])
+    if not source_origins or used_order[0] != source_origins[0]:
+      return False, (
+        f"sentence[{index}].origin must start with the child window's first "
+        f"source origin {source_origins[0] if source_origins else None!r}"
+      )
   return True, ""
 
 def check_key_json(text, ref_obj=None, replace=False):

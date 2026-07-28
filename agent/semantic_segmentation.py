@@ -1,0 +1,236 @@
+import json
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Iterable, List, Sequence
+
+from common import config
+from prompts.prompts import Prompts
+
+
+_ORIGIN_RE = re.compile(r"\bdia_id\s*:\s*(D\d+:\d+)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class TurnRecord:
+    origin: str
+    line: str
+    index: int
+
+
+@dataclass
+class ParentSegment:
+    parent_id: str
+    start_index: int
+    end_index: int
+    current_turns: List[TurnRecord]
+    previous_context: List[TurnRecord]
+    child_ids: List[str] = field(default_factory=list)
+    rewrite_content: str = ""
+
+
+@dataclass
+class ChildSegment:
+    child_id: str
+    source_origins: List[str]
+    focus: str
+    current_turns: List[TurnRecord]
+    previous_context: List[TurnRecord]
+
+
+def parse_session_turns(text: str) -> List[TurnRecord]:
+    turns = []
+    for line in str(text or "").splitlines():
+        match = _ORIGIN_RE.search(line)
+        if match:
+            turns.append(TurnRecord(match.group(1), line.strip(), len(turns)))
+    return turns
+
+
+def _request_complete_plan(llm, system_prompt, user_prompt, validate, label):
+    last_error = ""
+    for attempt in range(4):
+        prompt = system_prompt
+        if attempt:
+            prompt += (
+                "\nThe previous complete plan was invalid. Return the entire plan again. "
+                f"Validation error: {last_error}"
+            )
+        output = llm.chat_text(
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0 if attempt == 0 else 0.7,
+        )
+        valid, last_error, value = validate(output)
+        if valid:
+            return value
+    raise ValueError(f"{label} failed validation after retries: {last_error}")
+
+
+def _turn_payload(turns: Sequence[TurnRecord]):
+    return [{"origin": turn.origin, "text": turn.line} for turn in turns]
+
+
+def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
+    if not isinstance(output, dict):
+        return False, "parent plan must be a JSON object", None
+    raw_segments = output.get("parent_segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return False, "parent_segments must be a non-empty list", None
+    origin_to_index = {turn.origin: turn.index for turn in turns}
+    expected_start = 0
+    parents = []
+    session_prefix = turns[0].origin.split(":", 1)[0]
+    for number, raw in enumerate(raw_segments, start=1):
+        if not isinstance(raw, dict):
+            return False, f"parent_segments[{number - 1}] must be an object", None
+        start_origin = str(raw.get("start_origin") or "")
+        end_origin = str(raw.get("end_origin") or "")
+        if start_origin not in origin_to_index or end_origin not in origin_to_index:
+            return False, f"parent segment has unknown boundary: {start_origin}, {end_origin}", None
+        start = origin_to_index[start_origin]
+        end = origin_to_index[end_origin]
+        if start != expected_start or end < start:
+            return False, "parent segments must cover the session contiguously in order", None
+        length = end - start + 1
+        is_final = number == len(raw_segments)
+        if length > config.PARENT_MAX_TURNS:
+            return False, f"parent segment length {length} exceeds maximum", None
+        if length < config.PARENT_MIN_TURNS and not is_final:
+            return False, f"non-final parent segment length {length} is below minimum", None
+        context_start = max(0, start - config.PARENT_CONTEXT_TURNS)
+        parents.append(ParentSegment(
+            parent_id=f"{session_prefix}:t{number}",
+            start_index=start,
+            end_index=end,
+            current_turns=list(turns[start:end + 1]),
+            previous_context=list(turns[context_start:start]),
+        ))
+        expected_start = end + 1
+    if expected_start != len(turns):
+        return False, "parent segments do not cover the end of the session", None
+    return True, "", parents
+
+
+def plan_parent_segments(llm, turns: Sequence[TurnRecord], conversation_time=None):
+    if not turns:
+        return []
+    user_prompt = Prompts.extract_parent_segment_prompt(
+        json.dumps({
+            "conversation_time": conversation_time,
+            "minimum_turns": config.PARENT_MIN_TURNS,
+            "maximum_turns": config.PARENT_MAX_TURNS,
+            "turns": _turn_payload(turns),
+        }, ensure_ascii=False)
+    )
+    return _request_complete_plan(
+        llm,
+        Prompts.PARENT_SEGMENT_SYSTEM_PROMPT,
+        user_prompt,
+        lambda output: _validate_parent_plan(output, turns),
+        "parent semantic plan",
+    )
+
+
+def _validate_child_plan(output, turns: Sequence[TurnRecord]):
+    if not isinstance(output, dict):
+        return False, "child plan must be a JSON object", None
+    raw_segments = output.get("child_segments")
+    if not isinstance(raw_segments, list):
+        return False, "child_segments must be a list", None
+    origin_to_index = {turn.origin: turn.index for turn in turns}
+    seen_specs = set()
+    prepared = []
+    previous_first = -1
+    for position, raw in enumerate(raw_segments):
+        if not isinstance(raw, dict):
+            return False, f"child_segments[{position}] must be an object", None
+        source_origins = raw.get("source_origins")
+        focus = str(raw.get("focus") or "").strip()
+        if not isinstance(source_origins, list) or not source_origins or not focus:
+            return False, f"child_segments[{position}] needs source_origins and focus", None
+        source_origins = [str(origin) for origin in source_origins]
+        if len(set(source_origins)) != len(source_origins):
+            return False, f"child_segments[{position}] repeats an origin", None
+        if any(origin not in origin_to_index for origin in source_origins):
+            return False, f"child_segments[{position}] contains an unknown origin", None
+        indices = [origin_to_index[origin] for origin in source_origins]
+        if indices != sorted(indices):
+            return False, f"child_segments[{position}] origins must follow dialogue order", None
+        first_index, last_index = indices[0], indices[-1]
+        if first_index < previous_first:
+            return False, "child segments must follow dialogue order", None
+        if last_index - first_index + 1 > config.CHILD_MAX_TURNS:
+            return False, f"child_segments[{position}] exceeds the child window maximum", None
+        spec_key = (tuple(source_origins), focus.casefold())
+        if spec_key in seen_specs:
+            return False, f"child_segments[{position}] duplicates an earlier semantic unit", None
+        seen_specs.add(spec_key)
+        prepared.append((source_origins, focus, first_index, last_index))
+        previous_first = first_index
+
+    total_by_first_origin = defaultdict(int)
+    for source_origins, _, _, _ in prepared:
+        total_by_first_origin[source_origins[0]] += 1
+    counters = defaultdict(int)
+    children = []
+    for source_origins, focus, first_index, last_index in prepared:
+        first_origin = source_origins[0]
+        counters[first_origin] += 1
+        child_id = first_origin
+        if total_by_first_origin[first_origin] > 1:
+            child_id = f"{first_origin}-{counters[first_origin]}"
+        context_start = max(0, first_index - config.PARENT_CONTEXT_TURNS)
+        children.append(ChildSegment(
+            child_id=child_id,
+            source_origins=source_origins,
+            focus=focus,
+            current_turns=list(turns[first_index:last_index + 1]),
+            previous_context=list(turns[context_start:first_index]),
+        ))
+    return True, "", children
+
+
+def plan_child_segments(llm, turns: Sequence[TurnRecord], conversation_time=None):
+    if not turns:
+        return []
+    user_prompt = Prompts.extract_child_segment_prompt(
+        json.dumps({
+            "conversation_time": conversation_time,
+            "maximum_turns": config.CHILD_MAX_TURNS,
+            "turns": _turn_payload(turns),
+        }, ensure_ascii=False)
+    )
+    return _request_complete_plan(
+        llm,
+        Prompts.CHILD_SEGMENT_SYSTEM_PROMPT,
+        user_prompt,
+        lambda output: _validate_child_plan(output, turns),
+        "child semantic plan",
+    )
+
+
+def attach_child_ids_to_parents(
+        parent_segments: Sequence[ParentSegment],
+        child_segments: Sequence[ChildSegment],
+):
+    parent_by_turn = {}
+    for parent in parent_segments:
+        for turn in parent.current_turns:
+            parent_by_turn[turn.origin] = parent
+    for child in child_segments:
+        owner = parent_by_turn.get(child.source_origins[0])
+        if owner is None:
+            raise ValueError(
+                f"no parent core contains child first origin {child.source_origins[0]}"
+            )
+        owner.child_ids.append(child.child_id)
+    return list(parent_segments)
+
+
+def iter_child_batches(children: Sequence[ChildSegment]) -> Iterable[List[ChildSegment]]:
+    size = config.CHILD_REWRITE_BATCH_SIZE
+    for start in range(0, len(children), size):
+        yield list(children[start:start + size])

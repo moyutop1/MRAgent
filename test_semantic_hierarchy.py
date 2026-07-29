@@ -69,6 +69,28 @@ def _dialogue(turn_count=5):
 
 
 class SemanticHierarchyTests(unittest.TestCase):
+    def test_parent_retry_explains_required_split_for_twenty_one_turns(self):
+        turns = parse_session_turns(_dialogue(21))
+        llm = SequenceLLM([
+            {"parent_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:21"}
+            ]},
+            {"parent_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:11"},
+                {"start_origin": "D1:12", "end_origin": "D1:21"},
+            ]},
+        ])
+
+        parents = plan_parent_segments(llm, turns, "2023-05-08")
+
+        self.assertEqual(len(parents), 2)
+        initial_payload = llm.calls[0][1]["content"]
+        self.assertIn('"minimum_segment_count": 2', initial_payload)
+        self.assertIn('"position": 21', initial_payload)
+        repair_payload = llm.calls[1][1]["content"]
+        self.assertIn("must return at least 2 parent segments", repair_payload)
+        self.assertIn('"end_origin": "D1:21"', repair_payload)
+
     def test_independent_plans_and_first_origin_parent_ownership(self):
         turns = parse_session_turns(_dialogue(6))
         parent_llm = SequenceLLM([{

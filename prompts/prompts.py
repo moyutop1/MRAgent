@@ -114,8 +114,11 @@ Rules:
 - Parent segments must cover every input turn exactly once, in dialogue order, with no gaps or core overlap.
 - Choose boundaries where a broad topic, event episode, or discourse unit is semantically closed.
 - Avoid cutting an unresolved question/answer pair, pronoun reference, temporal qualifier, or causal explanation when a legal alternative exists.
+- Each turn has a one-based position. Segment length is end position minus start position plus one; count with these positions rather than estimating from the text.
+- Return at least minimum_segment_count segments. If total_turns exceeds maximum_turns, returning the whole session as one segment is invalid even when it is semantically coherent.
 - Every non-final segment must respect minimum_turns and every segment must respect maximum_turns.
 - Only the final segment may be shorter than minimum_turns.
+- Hard length limits override the preference for semantic closure. Within the legal length range, place the boundary at the best semantic closure.
 - Copy start_origin and end_origin exactly from the input; do not generate summaries or new IDs.
 Schema:
 {

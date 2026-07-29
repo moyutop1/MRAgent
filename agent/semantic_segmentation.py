@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -49,20 +50,30 @@ def parse_session_turns(text: str) -> List[TurnRecord]:
 
 def _request_complete_plan(llm, system_prompt, user_prompt, validate, label):
     last_error = ""
+    last_output = None
     for attempt in range(4):
         prompt = system_prompt
+        request = user_prompt
         if attempt:
             prompt += (
                 "\nThe previous complete plan was invalid. Return the entire plan again. "
                 f"Validation error: {last_error}"
             )
+            request += (
+                "\n\nREPAIR_REQUIRED:\n"
+                f"Validation error: {last_error}\n"
+                "The following was the invalid complete plan. Correct its boundaries "
+                "and return the entire plan, not only the changed segment:\n"
+                f"{json.dumps(last_output, ensure_ascii=False)}"
+            )
         output = llm.chat_text(
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": request},
             ],
             temperature=0.0 if attempt == 0 else 0.7,
         )
+        last_output = output
         valid, last_error, value = validate(output)
         if valid:
             return value
@@ -70,7 +81,14 @@ def _request_complete_plan(llm, system_prompt, user_prompt, validate, label):
 
 
 def _turn_payload(turns: Sequence[TurnRecord]):
-    return [{"origin": turn.origin, "text": turn.line} for turn in turns]
+    return [
+        {
+            "position": turn.index + 1,
+            "origin": turn.origin,
+            "text": turn.line,
+        }
+        for turn in turns
+    ]
 
 
 def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
@@ -79,6 +97,13 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
     raw_segments = output.get("parent_segments")
     if not isinstance(raw_segments, list) or not raw_segments:
         return False, "parent_segments must be a non-empty list", None
+    minimum_segment_count = math.ceil(len(turns) / config.PARENT_MAX_TURNS)
+    if len(raw_segments) < minimum_segment_count:
+        return False, (
+            f"this {len(turns)}-turn session must return at least "
+            f"{minimum_segment_count} parent segments because the hard maximum is "
+            f"{config.PARENT_MAX_TURNS}; received {len(raw_segments)}"
+        ), None
     origin_to_index = {turn.origin: turn.index for turn in turns}
     expected_start = 0
     parents = []
@@ -97,9 +122,19 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
         length = end - start + 1
         is_final = number == len(raw_segments)
         if length > config.PARENT_MAX_TURNS:
-            return False, f"parent segment length {length} exceeds maximum", None
+            required_parts = math.ceil(length / config.PARENT_MAX_TURNS)
+            return False, (
+                f"parent segment {number} ({start_origin} through {end_origin}, "
+                f"positions {start + 1}-{end + 1}) contains {length} turns; "
+                f"the hard maximum is {config.PARENT_MAX_TURNS}, so this range must "
+                f"be split into at least {required_parts} segments"
+            ), None
         if length < config.PARENT_MIN_TURNS and not is_final:
-            return False, f"non-final parent segment length {length} is below minimum", None
+            return False, (
+                f"non-final parent segment {number} ({start_origin} through "
+                f"{end_origin}) contains {length} turns; the hard minimum is "
+                f"{config.PARENT_MIN_TURNS}"
+            ), None
         context_start = max(0, start - config.PARENT_CONTEXT_TURNS)
         parents.append(ParentSegment(
             parent_id=f"{session_prefix}:t{number}",
@@ -122,6 +157,10 @@ def plan_parent_segments(llm, turns: Sequence[TurnRecord], conversation_time=Non
             "conversation_time": conversation_time,
             "minimum_turns": config.PARENT_MIN_TURNS,
             "maximum_turns": config.PARENT_MAX_TURNS,
+            "minimum_segment_count": math.ceil(
+                len(turns) / config.PARENT_MAX_TURNS
+            ),
+            "total_turns": len(turns),
             "turns": _turn_payload(turns),
         }, ensure_ascii=False)
     )

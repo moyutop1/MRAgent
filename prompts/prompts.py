@@ -116,6 +116,7 @@ Rules:
 - Avoid cutting an unresolved question/answer pair, pronoun reference, temporal qualifier, or causal explanation when a legal alternative exists.
 - Each turn has a one-based position. Segment length is end position minus start position plus one; count with these positions rather than estimating from the text.
 - Return at least minimum_segment_count segments. If total_turns exceeds maximum_turns, returning the whole session as one segment is invalid even when it is semantically coherent.
+- Never place more than 10 dialogue turns in one parent segment. The supplied maximum_turns may be lower but can never be higher than 10.
 - Every non-final segment must respect minimum_turns and every segment must respect maximum_turns.
 - Only the final segment may be shorter than minimum_turns.
 - Hard length limits override the preference for semantic closure. Within the legal length range, place the boundary at the best semantic closure.
@@ -123,7 +124,7 @@ Rules:
 Schema:
 {
   "parent_segments": [
-    {"start_origin": "D1:1", "end_origin": "D1:12"}
+    {"start_origin": "D1:1", "end_origin": "D1:10"}
   ]
 }"""
 
@@ -169,8 +170,10 @@ Schema:
     PARENT_REWRITE_SYSTEM_PROMPT = """You create one coarse-grained parent memory from one dialogue segment. Only output valid JSON.
 Rules:
 - Produce exactly one self-contained parent rewrite for PARENT_DIALOGUE_WINDOW and echo parent_id exactly.
-- Summarize the segment's central people, relationships, personality traits, preferences, recurring goals, background states, major events, plans, outcomes, and meaningful causal connections.
-- Prefer a coherent overview over an atomic fact list. Preserve important names, time precision, places, event status, and changes over time.
+- Produce a high-level dialogue overview centered on the people involved, their explicitly supported personality characteristics, preferences or values, and their relationships or social dynamics.
+- Describe the main discussion theme and durable interpersonal context rather than listing atomic events, actions, task steps, or detailed outcomes.
+- Do not record any temporal information. Omit dates, years, months, weekdays, clock times, ages, durations, relative-time expressions, conversation_time, event ordering, and temporal calculations even when they appear in the dialogue.
+- Do not turn a one-off action, temporary emotion, or isolated statement into a durable personality trait or relationship claim. Use only explicit or repeatedly supported high-level information.
 - Ignore greetings, acknowledgements, boilerplate, generic advice, and repeated confirmations.
 - PREVIOUS_DIALOGUE_CONTEXT may resolve references but cannot independently support a claim.
 - Do not invent information and do not generate child IDs, attributes, topics, or semantic properties.

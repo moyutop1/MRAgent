@@ -20,7 +20,7 @@ parser.add_argument("--rewrite_overlap_size", type=int, default=int(os.getenv("R
 parser.add_argument("--rewrite_previous_limit", type=int, default=int(os.getenv("REWRITE_PREVIOUS_LIMIT", "3")), help="Previous compressed memories shown to the next rewrite window for deduplication.")
 parser.add_argument("--semantic_hierarchy", action="store_true", help="Use independent semantic parent/child plans and EAES parent memories.")
 parser.add_argument("--parent_min_turns", type=int, default=int(os.getenv("PARENT_MIN_TURNS", "4")), help="Hard minimum core turns per semantic parent segment, except the final segment.")
-parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PARENT_MAX_TURNS", "20")), help="Hard maximum core turns per semantic parent segment.")
+parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PARENT_MAX_TURNS", "10")), help="Hard maximum core turns per semantic parent segment; semantic hierarchy caps this at 10.")
 parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
 parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Maximum child segments rewritten in one LLM call.")
@@ -236,6 +236,10 @@ CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
 PARENT_TOP_K = args.parent_top_k
 if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
     raise ValueError("parent turn limits must satisfy 0 < min <= max.")
+if SEMANTIC_HIERARCHY and PARENT_MAX_TURNS > 10:
+    raise ValueError(
+        "--parent_max_turns cannot exceed 10 when --semantic_hierarchy is enabled."
+    )
 if PARENT_CONTEXT_TURNS < 0:
     raise ValueError("--parent_context_turns must be non-negative.")
 if CHILD_MAX_TURNS <= 0:

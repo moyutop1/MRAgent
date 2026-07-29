@@ -12,7 +12,7 @@ common_module.config = types.SimpleNamespace(
     REWRITE_PREVIOUS_LIMIT=3,
     SEMANTIC_HIERARCHY=True,
     PARENT_MIN_TURNS=4,
-    PARENT_MAX_TURNS=20,
+    PARENT_MAX_TURNS=10,
     PARENT_CONTEXT_TURNS=2,
     CHILD_MAX_TURNS=8,
     CHILD_REWRITE_BATCH_SIZE=15,
@@ -76,19 +76,21 @@ class SemanticHierarchyTests(unittest.TestCase):
                 {"start_origin": "D1:1", "end_origin": "D1:21"}
             ]},
             {"parent_segments": [
-                {"start_origin": "D1:1", "end_origin": "D1:11"},
-                {"start_origin": "D1:12", "end_origin": "D1:21"},
+                {"start_origin": "D1:1", "end_origin": "D1:7"},
+                {"start_origin": "D1:8", "end_origin": "D1:14"},
+                {"start_origin": "D1:15", "end_origin": "D1:21"},
             ]},
         ])
 
         parents = plan_parent_segments(llm, turns, "2023-05-08")
 
-        self.assertEqual(len(parents), 2)
+        self.assertEqual(len(parents), 3)
         initial_payload = llm.calls[0][1]["content"]
-        self.assertIn('"minimum_segment_count": 2', initial_payload)
+        self.assertIn('"maximum_turns": 10', initial_payload)
+        self.assertIn('"minimum_segment_count": 3', initial_payload)
         self.assertIn('"position": 21', initial_payload)
         repair_payload = llm.calls[1][1]["content"]
-        self.assertIn("must return at least 2 parent segments", repair_payload)
+        self.assertIn("must return at least 3 parent segments", repair_payload)
         self.assertIn('"end_origin": "D1:21"', repair_payload)
 
     def test_independent_plans_and_first_origin_parent_ownership(self):
@@ -194,6 +196,14 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertEqual(
             len(llm.calls[-1][1]["content"].split('"child_id"')), 4
         )
+        parent_rewrite_call = llm.calls[2]
+        self.assertNotIn("conversation_time", parent_rewrite_call[1]["content"])
+        self.assertIn(
+            "Do not record any temporal information",
+            parent_rewrite_call[0]["content"],
+        )
+        child_rewrite_call = llm.calls[-1]
+        self.assertIn("conversation_time", child_rewrite_call[1]["content"])
 
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):
         memory = MemorySystem()

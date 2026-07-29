@@ -479,10 +479,9 @@ def _merge_window_rewrites(window_outputs: List[dict], conversation_time: str):
     return merged
 
 
-def _rewrite_parent_segment(llm, parent, conversation_time, logger=None):
+def _rewrite_parent_segment(llm, parent, logger=None):
     payload = {
         "parent_id": parent.parent_id,
-        "conversation_time": conversation_time,
         "previous_dialogue_context": [
             turn.line for turn in parent.previous_context
         ],
@@ -632,7 +631,7 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         if not parent.child_ids:
             continue
         parent = _rewrite_parent_segment(
-            llm, parent, conversation_time, logger=logger
+            llm, parent, logger=logger
         )
         parent_outputs.append({
             "parent_id": parent.parent_id,

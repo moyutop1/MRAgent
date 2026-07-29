@@ -9,7 +9,7 @@ Replace fixed-length rewrite windows with an opt-in semantic parent/child hierar
 ### Changes
 
 - Add `--semantic_hierarchy` plus explicit parent/child size and retrieval parameters.
-  - Parent core segments use a hard 4-20 turn range by default; only the final session segment may be shorter than the minimum.
+  - Parent core segments use a hard 4-10 turn range by default; only the final session segment may be shorter than the minimum.
   - Child semantic spans use a hard maximum of 8 turns, and child rewrite calls contain at most 15 segments.
   - Hierarchical rewrite, embedding, and result paths receive a separate `_hierarchy` suffix so legacy caches remain reusable.
 - Plan parent and child boundaries with two independent full-session LLM calls.
@@ -20,6 +20,7 @@ Replace fixed-length rewrite windows with an opt-in semantic parent/child hierar
   - Each child segment produces exactly one atomic rewrite sentence, validated one-to-one and in order.
   - A unique child uses its first source `dia_id` as its ID; repeated first origins receive only a local defensive suffix such as `D1:5-1` and `D1:5-2`.
   - Each parent stores its own coarse `rewrite_content`, all linked child IDs, and all attributes already stored on those child nodes.
+  - Parent rewrites omit all temporal information and focus on dialogue overview, well-supported personality characteristics, and interpersonal relationships; child rewrites retain the existing time-sensitive behavior.
 - Add independent parent retrieval without changing EAES child recall.
   - Parent embeddings are computed only from the parent's own `rewrite_content`.
   - Every raw `query_plan["keywords"]` item is embedded without deduplication; each parent is ranked by its maximum keyword cosine similarity.

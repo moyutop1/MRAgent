@@ -608,6 +608,30 @@ class EAESMixin:
             "answer_items": answer_items,
         }
 
+    @staticmethod
+    def _eaes_reader_child_memory(candidate):
+        """Expose only answer content plus the ID required for support citation."""
+        return {
+            "memory_id": candidate.get("memory_id"),
+            "conversation_time": candidate.get("conversation_time"),
+            "rewrite_content": candidate.get("rewrite_content"),
+        }
+
+    def _eaes_reader_evidence_package(self, package):
+        """Remove retrieval/index metadata before the final-reader call."""
+        answer_items = []
+        for item in self._as_list((package or {}).get("answer_items")):
+            if not isinstance(item, dict):
+                continue
+            evidence = []
+            for candidate in self._as_list(item.get("evidence")):
+                if not isinstance(candidate, dict) or not candidate.get("memory_id"):
+                    continue
+                evidence.append(self._eaes_reader_child_memory(candidate))
+            if evidence:
+                answer_items.append({"evidence": evidence})
+        return {"answer_items": answer_items}
+
     def select_eaes_evidence(self, question, query_plan, candidates):
         selection_input = {
             "question": question,
@@ -669,12 +693,17 @@ class EAESMixin:
         final_input = {
             "question": question,
             "query_plan": query_plan,
-            "evidence_package": evidence_package,
+            "evidence_package": self._eaes_reader_evidence_package(
+                evidence_package
+            ),
         }
         if parent_candidates:
             final_input["parent_memories"] = parent_candidates
         if not config.DISABLE_EVIDENCE_SELECTOR:
-            final_input["backup_candidates"] = candidates[:12]
+            final_input["backup_candidates"] = [
+                self._eaes_reader_child_memory(candidate)
+                for candidate in candidates[:12]
+            ]
         use_anchored_temporal_style = (
             str(config.dataset).lower() == "locomo" and str(category) == "2"
         )
@@ -692,7 +721,12 @@ class EAESMixin:
         )
         if not isinstance(answer_obj, dict):
             evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
-            fallback_input = {**final_input, "evidence_package": evidence_package}
+            fallback_input = {
+                **final_input,
+                "evidence_package": self._eaes_reader_evidence_package(
+                    evidence_package
+                ),
+            }
             answer_obj = self.llm.chat_text(
                 messages=[
                     {"role": "system", "content": final_answer_prompt},

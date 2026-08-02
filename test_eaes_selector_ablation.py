@@ -73,6 +73,7 @@ def _candidates(count=20):
             "event_id": f"D1:{i}-1",
             "origin": f"D1:{i}",
             "rewrite_content": f"Memory {i}",
+            "conversation_time": "2023-05-08",
             "score": 1.0 / i,
         }
         for i in range(1, count + 1)
@@ -97,9 +98,12 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             [f"M_{i}" for i in range(1, 21)],
         )
         self.assertTrue(all(
-            item["evidence"][0]["role"] == "reranked_candidate"
+            set(item["evidence"][0]) == {
+                "memory_id", "conversation_time", "rewrite_content"
+            }
             for item in package["answer_items"]
         ))
+        self.assertTrue(all(set(item) == {"evidence"} for item in package["answer_items"]))
 
     def test_enabled_selector_keeps_existing_path(self):
         agent = _AblationAgent(_candidates())
@@ -115,6 +119,10 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             [item["memory_id"] for item in reader_input["backup_candidates"]],
             [f"M_{i}" for i in range(1, 13)],
         )
+        self.assertTrue(all(
+            set(item) == {"memory_id", "conversation_time", "rewrite_content"}
+            for item in reader_input["backup_candidates"]
+        ))
 
 
 if __name__ == "__main__":

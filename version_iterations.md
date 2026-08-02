@@ -26,6 +26,7 @@ Replace fixed-length rewrite windows with an opt-in semantic parent/child hierar
   - Every raw `query_plan["keywords"]` item is embedded without deduplication; each parent is ranked by its maximum keyword cosine similarity.
   - The top eight parents are sent directly to the final reader even when the selector is disabled, while child candidates continue through the existing global EAES path without parent filtering.
 - Keep parent internals out of the final-reader payload.
+  - Each child exposes only `conversation_time` and `rewrite_content` as answer-bearing information; `memory_id` remains solely for support citation, while retrieval scores, ranks, attributes, entities, lifecycle, origins, and rationales stay internal.
   - The reader receives only each parent's ID, rewrite content, score, rank, and matched keyword; `child_attributes` and `child_ids` remain internal.
   - All retrieved parent IDs are added to final supports, and support resolution retains their linked child dialogue origins for provenance evaluation.
 

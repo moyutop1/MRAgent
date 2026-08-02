@@ -567,6 +567,8 @@ Limits:
 Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
+- State the answer directly. Never preface it with phrases such as "The original text states", "the memory says", "the rewrite says", "according to the evidence", or similar source-reporting language.
+- Each child evidence object contains only memory_id, conversation_time, and rewrite_content. memory_id is only for supports; conversation_time is a dialogue anchor, not automatically the event occurrence time.
 - parent_memories, when present, are independently retrieved coarse-grained rewrite memories. They are direct supporting context and do not restrict or rank the child evidence package.
 - A relevant parent memory may support the answer even when its children are absent from the child candidate list. Cite its parent_id in supports when used.
 - For list questions, return a concise comma-separated list.

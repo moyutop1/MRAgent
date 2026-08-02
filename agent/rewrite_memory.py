@@ -543,6 +543,24 @@ def _child_batch_source_text(batch, conversation_time):
     return dialogue
 
 
+def _apply_child_segment_provenance(output, batch):
+    """Keep planner-selected child provenance authoritative during rewriting."""
+    if not isinstance(output, dict):
+        return
+    sentences = output.get("sentence")
+    if not isinstance(sentences, list) or len(sentences) != len(batch):
+        return
+    for sentence, child in zip(sentences, batch):
+        if not isinstance(sentence, dict):
+            continue
+        # Do not hide missing/reordered child outputs: the validator below must
+        # still reject an incorrect ID. Once the ID matches, however, rewriting
+        # must not be allowed to redefine the planner's source boundary.
+        if sentence.get("id") != child.child_id:
+            continue
+        sentence["origin"] = ",".join(child.source_origins)
+
+
 def _rewrite_child_batch(
         llm,
         batch,
@@ -600,6 +618,7 @@ def _rewrite_child_batch(
             ],
             temperature=0.0 if attempt == 0 else 0.7,
         )
+        _apply_child_segment_provenance(output, batch)
         normalize_rewrite_temporal_granularity(output, source_text)
         valid, last_error = json_scheme.check_child_batch_rewrite_json(
             output, list(batch), source_text

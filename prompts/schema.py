@@ -212,11 +212,11 @@ def check_child_batch_rewrite_json(text, child_segments, dialogue_text):
     used_ids = set(used_order)
     if not used_ids or not used_ids.issubset(current_ids):
       return False, f"sentence[{index}] uses origins outside its child window"
-    source_origins = getattr(child, "source_origins", [])
-    if not source_origins or used_order[0] != source_origins[0]:
+    source_origins = list(getattr(child, "source_origins", []))
+    if not source_origins or used_order != source_origins:
       return False, (
-        f"sentence[{index}].origin must start with the child window's first "
-        f"source origin {source_origins[0] if source_origins else None!r}"
+        f"sentence[{index}].origin must exactly equal the child planner's "
+        f"source_origins {source_origins!r}"
       )
   return True, ""
 

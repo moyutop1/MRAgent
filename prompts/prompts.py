@@ -198,8 +198,8 @@ Rules:
 - Never omit, duplicate, merge, split, reorder, or add a child.
 - Each rewrite must express only its child's focus as one self-contained answer-bearing memory.
 - Resolve pronouns into concrete entities and preserve source-supported people, relationships, time, place, state, causality, and task outcomes.
-- origin is the comma-separated list of all dia_ids that directly contribute to the memory. Use only IDs present in that child's current_dialogue_window.
-- origin must start with the child window's first source origin so its deterministic child_id remains provenance-aligned. Previous context may resolve a reference but cannot be cited as independent support; the child planner must place every contributing turn inside the current child window.
+- Copy origin exactly from that child's source_origins, joined as a comma-separated string. Do not omit, add, reorder, or independently choose source IDs during rewriting.
+- The child planner has already fixed the source boundary and deterministic child_id. Previous context may resolve a reference but cannot be cited as independent support.
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
 - Use a short concrete tag of at most three words and set topic to [].

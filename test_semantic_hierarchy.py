@@ -205,6 +205,42 @@ class SemanticHierarchyTests(unittest.TestCase):
         child_rewrite_call = llm.calls[-1]
         self.assertIn("conversation_time", child_rewrite_call[1]["content"])
 
+    def test_child_rewrite_cannot_redefine_planner_provenance(self):
+        llm = SequenceLLM([
+            {"parent_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:4"}
+            ]},
+            {"child_segments": [{
+                "source_origins": ["D1:2", "D1:3"],
+                "focus": "a fact supported by two turns",
+            }]},
+            {
+                "parent_id": "D1:t1",
+                "rewrite_content": "A coarse parent memory.",
+            },
+            {
+                "conversation_time": "2023-05-08",
+                "sentence": [{
+                    "id": "D1:2",
+                    "text": "A fact supported by two turns.",
+                    "tag": "Supported Fact",
+                    # Reproduce the production failure: the rewrite model
+                    # drops the planner's first source origin.
+                    "origin": "D1:3",
+                    "topic": [],
+                    "semantic_properties": ["event_action", "episodic"],
+                }],
+                "topics": {},
+                "personal_sentences": [],
+            },
+        ])
+
+        output = rewrite_semantic_hierarchy_session(llm, _dialogue(4))
+
+        self.assertEqual(output["sentence"][0]["id"], "D1:2")
+        self.assertEqual(output["sentence"][0]["origin"], "D1:2,D1:3")
+        self.assertEqual(len(llm.calls), 4)
+
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):
         memory = MemorySystem()
         note = EAESMemoryNote(

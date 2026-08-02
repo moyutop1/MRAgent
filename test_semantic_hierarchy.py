@@ -202,6 +202,14 @@ class SemanticHierarchyTests(unittest.TestCase):
             "Do not record any temporal information",
             parent_rewrite_call[0]["content"],
         )
+        self.assertIn(
+            "PERSON PROFILE MEMORY",
+            parent_rewrite_call[0]["content"],
+        )
+        self.assertIn(
+            "INVALID event-summary style",
+            parent_rewrite_call[0]["content"],
+        )
         child_rewrite_call = llm.calls[-1]
         self.assertIn("conversation_time", child_rewrite_call[1]["content"])
 

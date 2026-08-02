@@ -21,6 +21,7 @@ Replace fixed-length rewrite windows with an opt-in semantic parent/child hierar
   - A unique child uses its first source `dia_id` as its ID; repeated first origins receive only a local defensive suffix such as `D1:5-1` and `D1:5-2`.
   - Each parent stores its own coarse `rewrite_content`, all linked child IDs, and all attributes already stored on those child nodes.
   - Parent rewrites omit all temporal information and focus on dialogue overview, well-supported personality characteristics, and interpersonal relationships; child rewrites retain the existing time-sensitive behavior.
+  - Parent rewrite prompting treats raw events only as evidence for person-centric profile facts, prioritizing traits, preferences, sustained pursuits, pets or stable possessions, and recurring relationship patterns while prohibiting event recaps.
 - Add independent parent retrieval without changing EAES child recall.
   - Parent embeddings are computed only from the parent's own `rewrite_content`.
   - Every raw `query_plan["keywords"]` item is embedded without deduplication; each parent is ranked by its maximum keyword cosine similarity.

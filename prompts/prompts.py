@@ -167,20 +167,27 @@ Schema:
     def extract_child_segment_prompt(cls, payload: str) -> str:
         return cls.CHILD_SEGMENT_PROMPT.format(PAYLOAD=payload)
 
-    PARENT_REWRITE_SYSTEM_PROMPT = """You create one coarse-grained parent memory from one dialogue segment. Only output valid JSON.
+    PARENT_REWRITE_SYSTEM_PROMPT = """You create one person-centric profile memory from one dialogue segment. Only output valid JSON.
 Rules:
-- Produce exactly one self-contained parent rewrite for PARENT_DIALOGUE_WINDOW and echo parent_id exactly.
-- Produce a high-level dialogue overview centered on the people involved, their explicitly supported personality characteristics, preferences or values, and their relationships or social dynamics.
-- Describe the main discussion theme and durable interpersonal context rather than listing atomic events, actions, task steps, or detailed outcomes.
+- Produce exactly one concise, self-contained rewrite_content for PARENT_DIALOGUE_WINDOW and echo parent_id exactly.
+- rewrite_content is a PERSON PROFILE MEMORY, not a dialogue summary, event memory, timeline, or turn-by-turn recap. Raw events are only evidence from which to extract profile-level information.
+- Prioritize explicitly supported personality traits and recurring tendencies; likes, dislikes, interests, hobbies, and values; occupation, skills, long-term goals, and sustained pursuits; stable possessions or pets; and interpersonal relationships or recurring support patterns.
+- Prefer direct person-centered clauses such as "Joanna is...", "Joanna likes...", "Nate has...", or "Nate supports...". Name the person instead of using ambiguous pronouns.
+- Convert event evidence into a durable or ongoing profile fact when justified. For example, repeated writing effort and difficulty switching off may support "Joanna is a dedicated screenwriter who struggles to disengage from her work"; do not retell which script she finished or what happened next.
+- Do not narrate completed actions, conversations, reactions, congratulations, photos, task steps, event outcomes, or sequences of who said or did what. Omit such details unless they directly establish a stable preference, possession, relationship, or sustained pursuit, and then state only that profile fact.
 - Do not record any temporal information. Omit dates, years, months, weekdays, clock times, ages, durations, relative-time expressions, conversation_time, event ordering, and temporal calculations even when they appear in the dialogue.
-- Do not turn a one-off action, temporary emotion, or isolated statement into a durable personality trait or relationship claim. Use only explicit or repeatedly supported high-level information.
+- Do not turn a one-off action, temporary emotion, isolated statement, or single polite response into a durable personality trait, broad preference, or relationship claim. Keep claims as narrow as the evidence requires; for example, evidence about turtles supports liking turtles, not necessarily liking all animals.
+- If one participant has no supported profile information in this window, omit that participant instead of filling the rewrite with their event reactions. When profile evidence is sparse, return only the narrowest supported profile fact rather than an event recap.
 - Ignore greetings, acknowledgements, boilerplate, generic advice, and repeated confirmations.
 - PREVIOUS_DIALOGUE_CONTEXT may resolve references but cannot independently support a claim.
 - Do not invent information and do not generate child IDs, attributes, topics, or semantic properties.
+Style calibration:
+- INVALID event-summary style: "On 2022-03-18, Joanna finished her second script, felt anxious, and Nate congratulated her and shared a tortoise photo."
+- VALID profile-memory style: "Joanna is a dedicated screenwriter who struggles to switch off from her work and balances ambition with self-doubt. Nate is drawn to turtles, keeps them as calming pets, and consistently supports Joanna's writing ambitions."
 Schema:
 {
   "parent_id": "D1:t1",
-  "rewrite_content": "One self-contained coarse-grained memory."
+  "rewrite_content": "One concise person-centric profile memory."
 }"""
 
     PARENT_REWRITE_PROMPT = """PARENT_INPUT:

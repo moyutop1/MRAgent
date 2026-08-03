@@ -6,35 +6,6 @@ from datetime import datetime, date
 from typing import List, Dict, Set, Any
 from collections import defaultdict
 
-
-
-
-
-
-
-
-class KeyNode:
-    def __init__(self, key_id: str):
-        self.key_id = key_id
-        self.text = key_id
-        self.tag_list = []
-        self.tag_dict = {}
-
-    def add_tag(self, tag, episode_id):
-        if tag not in self.tag_list:
-            self.tag_list.append(tag)
-        if tag not in self.tag_dict:
-            self.tag_dict[tag] = []
-        self.tag_dict[tag].append(episode_id)
-
-    def get_tag_link(self, tag):
-        return self.tag_dict.get(tag, [])
-
-
-    def get_tag_list(self):
-        return self.tag_list
-
-
 class Topic:
     def __init__(self, topic_id: str, text: str):
         self.topic_id = topic_id
@@ -82,30 +53,12 @@ class EpisodeEvent:
         self.time = time
         self.true_time = true_time
         self.tag_t = ""
-        self.tag_list = []
-        self.tag_dict = {}
         self.origin = origin
         self.embedding = embedding
         self.conversation_time = conv_time
         # Persist rewrite-time semantic labels on the real memory object. EAES
         # notes remain a derived entity/attribute index and do not own this field.
         self.semantic_properties = list(semantic_properties or [])
-
-
-    def add_tag(self, tag, episode_id):
-        self.tag_list.append(tag)
-        if tag not in self.tag_dict:
-            self.tag_dict[tag] = []
-        self.tag_dict[tag].append(episode_id)
-
-
-class Link:
-    def __init__(self, key_id: str, event_id: str, event_type: str, tag: str):
-        self.key_id = key_id
-        self.event_id = event_id
-        self.event_type = event_type
-        self.tag = tag
-
 
 class EAESMemoryNote:
     def __init__(
@@ -175,15 +128,7 @@ class EAESParentNode:
 
 class MemorySystem:
     def __init__(self):
-        self.keys: Dict[str, KeyNode] = {}  # key -> meta {'aliases': set(), ...}
         self.episode_events: Dict[str, EpisodeEvent] = {}
-        self.episode_links: Dict[str, Link] = {}
-        self.tag_list: List[str] = []
-        self.key_to_values: Dict[str, Set[tuple]] = defaultdict(set)
-        self.event_to_keys: Dict[str, Set[str]] = defaultdict(set)
-
-        self.by_tag: Dict[str, List[str]] = {}  # tag -> [edge_id]
-        self.by_key: Dict[str, List[str]] = {}  # key -> [edge_id]
         self.timeline: Dict[datetime, List[str]] = {} # -> event_id
         self.topic_to_event: Dict[str, List[str]] = {}
         self.persona_list: Dict[str, Persona] = {}
@@ -317,23 +262,6 @@ class MemorySystem:
         self.topic_id_list = topic_id_list
         self.topic_embeddings = topic_embeddings
 
-
-
-    def get_tag_list(self, key_id):
-        if key_id not in self.keys:
-            return []
-        return self.keys[key_id].get_tag_list()
-
-
-    def add_tag(self, tag, eid, key_id):
-        if tag not in self.tag_list:
-            self.tag_list.append(tag)
-            self.by_tag[tag] = [eid]
-        else:
-            self.by_tag[tag].append(eid)
-        self.event_to_keys[eid].add(key_id)
-
-
     def add_topics(self, topic_sentences, eid_topic_dict, session_id):
         if not isinstance(topic_sentences, dict):
             topic_sentences = {}
@@ -406,30 +334,11 @@ class MemorySystem:
                     origins.append(child.origin)
         return origins
 
-
-
-    def event_by_tag(self, key: str, tag: str):
-        if key not in self.keys:
-            return [], [], []
-        links = self.keys[key].get_tag_link(tag)
-        text = []
-        origin = []
-        event_ids = []
-        for link in links:
-            episode_event = self.episode_events[link]
-            text.append(episode_event.event_id + ":" + episode_event.text)
-            origin.append(episode_event.origin)
-            event_ids.append(episode_event.event_id)
-        return text, origin, event_ids
-
     def query_conversation_time(self, event_id):
         pattern = re.compile(r'^(D\d+):(\d+)$')
         if pattern.match(event_id):
             return self.episode_events[event_id+"-1"].conversation_time
         return self.episode_events[event_id].conversation_time
-
-    def query_event_keywords(self, event_id):
-        return [{"key": k, "tags": self.get_tag_list(k)} for k in self.event_to_keys[event_id]]
 
     def query_personal_information(self, person):
         return {"person":person, "aspects":self.persona_list[person].tag_list}

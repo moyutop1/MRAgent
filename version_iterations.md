@@ -1,5 +1,30 @@
 # Version Iterations
 
+## v117-20260803
+
+### Goal
+
+Keep query-generated keywords exclusively as the semantic-hierarchy parent retrieval signal, and remove the obsolete non-EAES keyword graph path.
+
+### Changes
+
+- Continue generating raw `query_plan["keywords"]` values without deduplication and embedding them against each parent's own `rewrite_content`.
+- Derive a child query plan with `keywords` removed before child prefilter scoring, attribute reranking, evidence selection, and final reading; also hide the parent's matched keyword from the reader payload.
+- Remove the child lexical-overlap keyword score and its diagnostic field; child retrieval continues to use entities, query-attribute embeddings, lifecycle, original embeddings, and optional semantic-property bonuses.
+- Retain build-side rewrite keyword files only as hints for EAES entity/attribute indexing.
+- Remove the non-EAES query-key inventory/extraction flow, keyword graph nodes/links, keyword tools, tool loop, prompts, and CLI configuration.
+- Require `--eaes` for `run.py` invocations and update usage documentation accordingly.
+
+### Expected Effect
+
+- Prevent noisy lexical keyword overlap from changing child recall or answer evidence while preserving keyword-based coarse parent context.
+- Keep parent retrieval independent of child retrieval and eliminate two competing query-key mechanisms.
+
+### Verification
+
+- Add coverage that query keywords reach parent embedding retrieval but are absent from child scoring, reranking/selection inputs, and the final-reader query plan.
+- Add coverage that changing query keywords cannot change a child candidate score or create a child `keyword` score component.
+
 ## v116-20260728
 
 ### Goal

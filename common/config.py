@@ -27,13 +27,10 @@ parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.geten
 parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "8")), help="Semantic parent memories passed directly to the EAES final reader.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
-parser.add_argument("--query_key_mode", choices=["inventory", "extract"], default=os.getenv("QUERY_KEY_MODE", "inventory"), help="Question-key strategy: select from stored keys or freely extract keywords.")
-parser.add_argument("--key_candidate_dense_k", type=int, default=int(os.getenv("KEY_CANDIDATE_DENSE_K", "40")), help="Dense events used to build the stored-key candidate pool.")
-parser.add_argument("--key_candidate_limit", type=int, default=int(os.getenv("KEY_CANDIDATE_LIMIT", "120")), help="Maximum stored-key candidates shown to the LLM.")
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Memories kept by the EAES attribute reranker for evidence selection.")
-parser.add_argument("--eaes", action="store_true", help="Use EAES-Mem answer-oriented evidence selection instead of the default graph tool loop.")
+parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")
 parser.add_argument(
     "--eaes_semantic_score",
     action="store_true",
@@ -114,7 +111,7 @@ elif args.model == "ofox":
 else:
     raise ValueError("Use --model gemini, --model deepseek, --model deepseek-pro, or --model ofox.")
 CHOOSE_MODEL = MODEL
-MODEL_NAME = args.model  # short name (gemini/claude/...), used by the LM temporal method answer_question_with_time_lm
+MODEL_NAME = args.model
 if args.re_model:
     if args.re_model == "gpt4.1mini":
         RE_MODEL = "openai/gpt-4.1-mini"
@@ -161,13 +158,7 @@ DEEPSEEK_THINKING_MODE = os.getenv("DEEPSEEK_THINKING_MODE", "disabled").lower()
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"
 K1=80                 # coarse retrieval breadth (embedding similarity)
 K2=20                 # fine retrieval breadth (LLM re-ranking)
-TAG_MAX=15            # select_key_tag: re-rank a key's tags only when it has more than this many
-TAG_LIMIT=10         # select_key_tag: keep at most this many tags after re-ranking
-TIME_EVENT_LIMIT=50  # answer_question_with_time: dense-time fast path threshold (locomo)
 TOPIC_K=8            # select_topic: number of topic candidates
-RERANK_LIMIT=20      # event_by_tag: re-rank events only when more than this many match
-MAX_ROUNDS=8         # tool-calling loop: max assistant rounds
-MAX_TOOL_CALLS=50    # tool-calling loop: safety cap on total tool calls
 EAES_MODE = args.eaes
 EAES_SEMANTIC_SCORE = args.eaes_semantic_score
 SEMANTIC_HIERARCHY = args.semantic_hierarchy
@@ -208,13 +199,6 @@ if QUESTION_WORKERS <= 0:
 DENSE_RETRIEVAL_K = args.dense_k
 if DENSE_RETRIEVAL_K <= 0:
     raise ValueError("--dense_k must be a positive integer.")
-QUERY_KEY_MODE = args.query_key_mode
-KEY_CANDIDATE_DENSE_K = args.key_candidate_dense_k
-if KEY_CANDIDATE_DENSE_K <= 0:
-    raise ValueError("--key_candidate_dense_k must be a positive integer.")
-KEY_CANDIDATE_LIMIT = args.key_candidate_limit
-if KEY_CANDIDATE_LIMIT <= 0:
-    raise ValueError("--key_candidate_limit must be a positive integer.")
 EAES_INDEX_MODE = args.eaes_index_mode
 qu = args.qu
 ca = args.ca

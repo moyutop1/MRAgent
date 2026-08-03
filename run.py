@@ -1,16 +1,15 @@
 """
-Main entry: tool-calling QA over a graph-structured episodic memory of conversations.
+Main entry: EAES retrieval and answering over reconstructed conversational memory.
 
 Pipeline (per sample):
-  rewrite (per-session rewrite/sentence extraction) -> embed (sentence/topic vectors) -> extract_keyword (keywords)
-  -> store (build the graph memory) -> per question answer_question (coarse K1 -> fine K2 -> tool-calling loop)
+  rewrite -> embed -> extract_keyword (memory-index hints) -> build EAES notes
+  -> parse query plan -> retrieve/rerank evidence -> final reader
 
 Usage:
-  python run.py --data locomo --model gemini --file <tag> [--sample 42]
-  python run.py --data LM --model gemini --file <tag> --ca {0|1|2}   # LM's three categories
+  python run.py --data locomo --model gemini --file <tag> --eaes [--sample 42]
+  python run.py --data LM --model gemini --file <tag> --eaes --ca {0|1|2}
 """
 
-from agent.tools import TOOLS
 import os
 import json
 import re
@@ -294,6 +293,10 @@ def get_conv_embeddings(embedding_path):
 def main():
 
     dataset = config.dataset
+    if not config.EAES_MODE:
+        raise ValueError(
+            "--eaes is required because the non-EAES keyword retrieval path has been removed."
+        )
     datapath = config.datapath
     conversation_list, question_list, raw_conversation_list, raw_text_list = get_data(dataset, datapath)
     i=0

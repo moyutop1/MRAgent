@@ -3,22 +3,23 @@
 > This repository contains the code for the paper
 > **"Memory is Reconstructed, Not Retrieved: Graph Memory for LLM Agents"** ([arXiv:2606.06036](https://arxiv.org/abs/2606.06036)).
 
-A retrieval-augmented question-answering system that builds a **graph-structured
-episodic memory** from long multi-session dialogues and answers questions through an
-**LLM tool-calling reasoning loop**. The system is evaluated on the **LoCoMo** and
+A retrieval-augmented question-answering system that reconstructs hierarchical
+episodic memory from long multi-session dialogues and answers questions through the
+**EAES retrieval and reader pipeline**. The system is evaluated on the **LoCoMo** and
 **LongMemEval (LM)** benchmarks.
 
 The pipeline has two phases:
 
-**Phase 1 — Build the graph memory** (once per conversation sample):
+**Phase 1 — Build memory** (once per conversation sample):
 
 - **rewrite** — compress dialogue into self-contained memories: resolve pronouns, render relative times at their source granularity, store normalized `YYYY-MM-DD` start dates for indexing, attach topic tags, and extract topics and person-level facts.
-- **extract_keyword** — extract salient keywords for each rewritten sentence.
-- **store** — build the in-memory graph from the above: key nodes, episode / topic / personal events, and the links between them.
+- **extract_keyword** — extract memory-side hints used only to build the EAES entity/attribute index.
+- **store** — build child EAES notes and, with semantic hierarchy enabled, their parent memories.
 
 **Phase 2 — Answer questions** (per question):
 
-- **answer** — run a tool-calling reasoning loop (keyword / topic / personal / temporal / context tools) to produce a short final answer.
+- **answer** — parse an EAES query plan, retrieve/rerank child evidence and independent parent memories, then call the final reader.
+- Query-side `keywords` are embedded only for parent retrieval. They do not score, filter, or rerank child memories and are not sent to the evidence selector or final reader.
 
 ---
 
@@ -31,15 +32,15 @@ common/
     utils.py              # JSON + similarity helpers
     logging_utils.py      # per-sample logging
 memory/
-    system.py             # in-memory graph store
-    controller.py         # graph query tools
+    system.py             # in-memory EAES and hierarchy store
+    controller.py         # child and parent retrieval
 llm/
-    controller.py         # LLM tool-calling wrapper
+    controller.py         # LLM request wrapper
     embeddings.py         # text-embedding client
     rag_utils.py          # batched embedding helper
 agent/
     agent.py              # pipeline orchestration
-    tools.py              # tool schemas + dispatch
+    eaes.py               # EAES indexing, retrieval stages, and final reader
 prompts/
     prompts.py            # all LLM prompts
     schema.py             # output JSON validators
@@ -155,7 +156,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--rewrite_overlap_size` | Tail turns from the preceding window supplied as raw context | `2` |
 | `--rewrite_previous_limit` | Previous compressed memories supplied for deduplication | `3` |
 | `--workers` | concurrent question workers per selected sample | `10` |
-| `--query_key_mode` | question-key strategy (`inventory` selects from stored keys; `extract` uses free extraction) | `inventory` |
+| `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
@@ -166,22 +167,22 @@ The single entry point is `run.py`, invoked from the repository root.
 
 ```bash
 # all conversations
-python run.py --data locomo --model gemini --file myrun
+python run.py --data locomo --model gemini --file myrun --eaes
 
 # a single conversation
-python run.py --data locomo --model gemini --file myrun --sample 42
+python run.py --data locomo --model gemini --file myrun --sample 42 --eaes
 
 # a quick partial run over the first 50 questions of one conversation
-python run.py --data locomo --model qwen --file smoke50 --sample 26 --max_questions 50
+python run.py --data locomo --model qwen --file smoke50 --sample 26 --max_questions 50 --eaes
 
 # a conservative DeepSeek run for unstable networks
-python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_questions 50 --workers 1
+python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_questions 50 --workers 1 --eaes
 
 # retrieval-only diagnostics with global dense fallback mixed in
-python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only
+python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
 
-# entity-attribute-memory retrieval diagnostics
+# entity-attribute-memory retrieval diagnostics with explicit limits
 python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
 
@@ -192,8 +193,6 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file sem
 # answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
 python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
 
-# compare against the older free keyword extraction path
-python run.py --data locomo --model deepseek-chat --file retr50_extract --sample 26 --max_questions 50 --workers 1 --retrieval_only --query_key_mode extract
 ```
 
 ### 5.3 LongMemEval (LM)
@@ -201,9 +200,9 @@ python run.py --data locomo --model deepseek-chat --file retr50_extract --sample
 `--ca` selects the question category (one run per category):
 
 ```bash
-python run.py --data LM --model gemini --file myrun --ca 0 --lm_batch 10   # multi-session
-python run.py --data LM --model gemini --file myrun --ca 1 --lm_batch 10   # single-session-user
-python run.py --data LM --model gemini --file myrun --ca 2 --lm_batch 10   # temporal-reasoning
+python run.py --data LM --model gemini --file myrun --ca 0 --lm_batch 10 --eaes   # multi-session
+python run.py --data LM --model gemini --file myrun --ca 1 --lm_batch 10 --eaes   # single-session-user
+python run.py --data LM --model gemini --file myrun --ca 2 --lm_batch 10 --eaes   # temporal-reasoning
 ```
 
 `--lm_batch` controls rewrite granularity. `--lm_batch 1` (default) rewrites one
@@ -235,6 +234,4 @@ temporal questions).
 - The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
-- Tool inventory (7 tools): `edges_by_tag`, `query_conversation_time`,
-  `query_event_keywords`, `query_event_context`, `query_personal_information`,
-  `query_personal_aspect`, `query_topic_events`.
+- `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.

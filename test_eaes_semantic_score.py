@@ -13,7 +13,7 @@ sys.modules.setdefault("dotenv", dotenv_module)
 
 from agent.eaes import EAESMixin
 from common import config
-from memory.system import EAESMemoryNote, EpisodeEvent, MemorySystem
+from memory.system import EAESMemoryNote, EAESParentNode, EpisodeEvent, MemorySystem
 from prompts.prompts import Prompts
 from prompts.schema import SCHEMA, check_rewrite_json
 
@@ -210,6 +210,7 @@ class SemanticQueryTests(unittest.TestCase):
             agent.llm.messages[0]["content"],
             Prompts.EAES_QUERY_SYSTEM_PROMPT,
         )
+        self.assertEqual(plan["keywords"], ["dog"])
         self.assertNotIn("required_semantic_properties", plan)
 
     def test_enabled_flag_filters_and_deduplicates_query_properties(self):
@@ -233,7 +234,10 @@ class SemanticQueryTests(unittest.TestCase):
 )
 class SemanticScoringTests(unittest.TestCase):
     @staticmethod
-    def _score(memory_properties, required_properties, enabled=True):
+    def _score(
+            memory_properties, required_properties, enabled=True,
+            keywords=None,
+    ):
         memory = MemorySystem()
         event_id = "D1:1-1"
         memory.episode_events[event_id] = EpisodeEvent(
@@ -258,7 +262,7 @@ class SemanticScoringTests(unittest.TestCase):
         controller = MemoryController(memory)
         query_plan = {
             "entities": [],
-            "keywords": [],
+            "keywords": list(keywords or []),
             "required_lifecycle": "unknown",
             "required_semantic_properties": required_properties,
         }
@@ -311,6 +315,39 @@ class SemanticScoringTests(unittest.TestCase):
         self.assertEqual(mismatch["score_parts"]["semantic_bonus"], 0.0)
         self.assertEqual(disabled["score_parts"]["semantic_bonus"], 0.0)
         self.assertEqual(mismatch["score"], disabled["score"])
+
+    def test_keywords_do_not_change_child_score(self):
+        dog = self._score([], [], keywords=["dog"])
+        unrelated = self._score([], [], keywords=["spaceship"])
+
+        self.assertEqual(dog["score"], unrelated["score"])
+        self.assertNotIn("keyword", dog["score_parts"])
+
+    def test_parent_retrieval_embeds_query_keywords(self):
+        memory = MemorySystem()
+        memory.add_eaes_parent_node(EAESParentNode(
+            parent_id="D1:t1",
+            rewrite_content="Caroline likes dogs.",
+            child_ids=[],
+            child_attributes=[],
+            retrieval_embedding=np.array([1.0, 0.0], dtype=np.float32),
+        ))
+        controller = MemoryController(memory)
+
+        with (
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch(
+                "memory.controller.get_embedding",
+                return_value=np.array([[1.0, 0.0]], dtype=np.float32),
+            ) as get_embedding,
+        ):
+            rows = controller.retrieve_eaes_parent_candidates(
+                {"keywords": ["dog"]}, limit=1
+            )
+
+        get_embedding.assert_called_once_with(["dog"])
+        self.assertEqual(rows[0]["parent_id"], "D1:t1")
+        self.assertEqual(rows[0]["matched_keyword"], "dog")
 
 
 if __name__ == "__main__":

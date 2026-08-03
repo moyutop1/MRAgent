@@ -2,19 +2,6 @@
 import json
 
 class Prompts:
-
-    EVENT_KEYWORDS_SYSTEM_PROMPT = """You are going to answer a question with keyword and corresponding tags(fact summary).  For every tag of key, produce a relevance score in [0.0, 1.0] reflecting how useful it is for answering question:
-    {
-      "keyword": "Caroline",
-      "tag_scores": {
-        "Plan": 0.0-1.0,
-        "Conference": 0.0-1.0
-      },
-    }"""
-
-
-
-
     REWRITE_SYSTEM_PROMPT = """You are a memory compressor for long-term conversational memory. Only output valid JSON.
 TASK:
 - Convert the dialogue window into compact rewrite memories, not a sentence-by-sentence transcript.
@@ -276,7 +263,7 @@ Schema:
         """
 
     @classmethod
-    def extract_keyword_prompt(cls, raw_text: str, tag_list:str) -> str:
+    def extract_keyword_prompt(cls, raw_text: str) -> str:
         return cls.KEYWORD_PROMPT.format(
             RAW_TEXT=raw_text
         )
@@ -298,154 +285,6 @@ Schema:
           "events": ["D1:1","D1:2"]
         } DO NOT output extra explanation."""
 
-
-    ANSWER_SYSTEM_PROMPT_FINAL = """
-       You must answer the question with queried contents.
-          Rules:
-          -  For yes/no or binary questions, output 'Yes', 'No', 'Likely yes', 'Likely no'.    
-          -  For "where / location / place" questions, the answer should be a concrete and specific place name. If no exact name is mentioned, describe it instead.
-          -  For "what / which" questions, try to respond with one specific, concrete item directly asked for or descriptions of the answer. 
-          -  For other questions, output only the minimal answer (key phrase or entity) without extra context.
-
-           Format:
-           - "answer": If the events already provide sufficient evidence to answer the question, then produce the final short answer, only asked part, not full sentence.   
-           {
-             "mode": "answer",
-             "answer": "...", 
-             "supports": ["D1:1","D1:2"],
-             "confidence": 0.0-1.0
-           }  """
-
-    # tool-loop system prompt: one shared base template + each variant declares only its differences (locomo / category-3 / LM).
-    # placeholders <<INTRO>>/<<WHERE>>/<<WHAT>>/<<EXTRA>>/<<NAV>> are filled per variant.
-    _ANSWER_TOOL_BASE = """You are a diligent question-answering agent. You always want to gather and verify all relevant information before producing your final answer.
-<<INTRO>>
-   Rules:
-   -  For yes/no or binary questions, output 'Yes', 'No', 'Likely yes', 'Likely no'.
-   -  For "where / location / place" questions, <<WHERE>>
-   -  For "what / which" questions, <<WHAT>>
-<<EXTRA>>   -  For other questions, output only the minimal answer (key phrase or entity) without extra context.
-   -  There may be multiple answers, you should try to explore more relevant information.
-
-    Decide ONE mode of:
-    - "answer": If the events already provide sufficient evidence to answer the question, then produce the final short answer, only asked part, not full sentence.
-   If the information is vague or incomplete, you may further query_personal_information, query_topic_events, query_event_keywords or query_event_context.
-    {
-      "mode": "answer",
-      "answer": "...",
-      "supports": ["D1:1","D1:2"],
-      "confidence": 0.0-1.0
-    }
-
-    - "navigate": If evidence is insufficient, <<NAV>>immediately call the tools with the proper argument. Do NOT describe the call in text or JSON. In each round, you must call as many relevant tools as possible, rather than skipping potential ones. Only avoid calls that are clearly irrelevant."""
-
-    _WHERE_STRONG = "the answer must be a concrete and specific place name. If the sentence only provides a vague or ambiguous location, call query_event_keywords to further explore and identify a more specific place."
-    _WHERE_SIMPLE = "the answer should be a concrete and specific place name."
-    _WHAT_STRONG = "respond with one specific, concrete item (an event, subject, person, organization, place, or titled work) directly asked for\u2014not a category, type, or class."
-    _WHAT_SIMPLE = "respond with one specific, concrete item (an event, subject, person, organization, place, or titled work) directly asked for."
-    _EXTRA_LM = ('   -  For "how many" questions, the answer must be the number of tasks/objects, not the number of physical categories.\n'
-                 '   -  For temporal questions (e.g., "How many days/weeks/months ago...", "How many days passed between..."), use "current_date" in the input as TODAY\'s date to calculate the time difference. Example: if current_date is "2023-02-01" and an event happened on "2023-01-25", then "7 days ago" is the answer.\n')
-
-    # locomo: strict (exact words / strong where+what)
-    ANSWER_SYSTEM_TOOL_PROMPT = (_ANSWER_TOOL_BASE
-        .replace("<<INTRO>>", "You need to answer a question with key candidates and corresponding tags and similar_sentence. Write short answer with exact words from event whenever possible.")
-        .replace("<<WHERE>>", _WHERE_STRONG).replace("<<WHAT>>", _WHAT_STRONG)
-        .replace("<<EXTRA>>", "").replace("<<NAV>>", ""))
-
-    # category-3 (adversarial): lenient (inferred / simple where+what)
-    ANSWER_SYSTEM_TOOL_PROMPT3 = (_ANSWER_TOOL_BASE
-        .replace("<<INTRO>>", "You need to answer a question with key candidates and corresponding tags and similar_sentence. Write short answer infered from sentences.")
-        .replace("<<WHERE>>", _WHERE_SIMPLE).replace("<<WHAT>>", _WHAT_SIMPLE)
-        .replace("<<EXTRA>>", "").replace("<<NAV>>", ""))
-
-    # LM: key_sentence + how-many/temporal rules + forced navigate
-    ANSWER_SYSTEM_TOOL_PROMPT_LM = (_ANSWER_TOOL_BASE
-        .replace("<<INTRO>>", "You need to either answer a question or call tools to get more information with key candidates and corresponding tags and key_sentence. Write short answer with exact words from event whenever possible.")
-        .replace("<<WHERE>>", _WHERE_STRONG).replace("<<WHAT>>", _WHAT_STRONG)
-        .replace("<<EXTRA>>", _EXTRA_LM).replace("<<NAV>>", "you must "))
-
-
-
-
-    """Requirements:
-    - In navigate mode, you must have  multiple tool calls. 
-    - For "what / which / about" questions, the final answer must contain a specific topic or subject, not just a restatement like "do some research". If no concrete topic is available in current evidence, you must switch to "navigate" mode and query event context/keywords and edges_by_tag with tags like "Research", "Topic", "Subject", or "Project".
-    - Only after exhausting all relevant tool queries (event context, keywords, edges_by_tag across related keys and tags) and still finding no clear evidence, you may finally answer with "unknown" or "cannot be determined".
-    """
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    QUESTION_KEY_SYSTEM_PROMPT = """You are a keyword extractor. Only output valid JSON. 
-    Given a question, extract keywords to find answers. Keyword types (all must be extracted for each question): entity | topic | predicate | time | location | task | event | people. For each keyword, also provide possible alternative expressions, including Synonyms, different form, different tense. Different tense of word is mandatory.
-    If the question contains a time limit, return it in "question_time" as: "YYYY-MM-DD, YYYY-MM-DD". If no time info, set "question_time" as "". If no year, then write "MM-DD, MM-DD".If a single day, repeat the same date(e.g., "YYYY-MM-DD, YYYY-MM-DD").
-    If no year appears, DO NOT guess or infer a year. Use only 'MM-DD, MM-DD'.
-    Schema:
-    {
-      "question_time": "YYYY-MM-DD, YYYY-MM-DD or '' or MM-DD, MM-DD",
-      "keywords": [
-        {
-          "id": "Extracted keyword",
-          "alternatives": ["Possible tense", "Different Synonyms", "Different form"]
-        }
-      ] 
-    }"""
-
-    QUESTION_KEY_USER_PROMPT = """QUESTION:
-        <<<
-        {RAW_TEXT}
-        >>>"""
-
-    @classmethod
-    def extract_question_key_prompt(cls, raw_text: str) -> str:
-        return cls.QUESTION_KEY_USER_PROMPT.format(
-            RAW_TEXT=raw_text,
-        )
-
-    QUESTION_KEY_INVENTORY_SYSTEM_PROMPT = """You select retrieval keys for a question from an existing memory-key inventory. Only output valid JSON.
-Rules:
-- You MUST choose keywords only from the provided candidates' "key" values. Copy the key exactly.
-- Do not invent, paraphrase, translate, stem, or normalize keys.
-- Prefer keys that are likely to retrieve answer-bearing evidence, including entity keys and concrete field/topic/action keys.
-- Avoid selecting too many generic keys. Select 2-12 keys when useful.
-- If no candidate is useful, return an empty keywords list.
-- If the question contains a time limit, return it in "question_time" as "YYYY-MM-DD, YYYY-MM-DD". If no time info, set "question_time" as "".
-- If no year appears, do not guess a year. Use only "MM-DD, MM-DD".
-Schema:
-{
-  "question_time": "YYYY-MM-DD, YYYY-MM-DD or '' or MM-DD, MM-DD",
-  "keywords": [
-    {
-      "id": "exact candidate key",
-      "alternatives": []
-    }
-  ]
-}"""
-
-    QUESTION_KEY_INVENTORY_USER_PROMPT = """QUESTION:
-<<<
-{QUESTION}
->>>
-
-CANDIDATE_KEYS:
-{CANDIDATES}"""
-
-    @classmethod
-    def select_question_key_prompt(cls, question: str, candidates: str) -> str:
-        return cls.QUESTION_KEY_INVENTORY_USER_PROMPT.format(
-            QUESTION=question,
-            CANDIDATES=candidates,
-        )
 
     EAES_QUERY_SYSTEM_PROMPT = """You are a query parser for long-term conversational memory. Only output valid JSON.
 Extract fields for answer-oriented evidence selection.

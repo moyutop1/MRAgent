@@ -441,6 +441,15 @@ class EAESMixin:
             plan["no_time_limit"] = False
         return plan
 
+    @staticmethod
+    def _eaes_child_query_plan(query_plan):
+        """Hide parent-only query keywords from every child/reader stage."""
+        if not isinstance(query_plan, dict):
+            return {}
+        plan = dict(query_plan)
+        plan.pop("keywords", None)
+        return plan
+
     def parse_eaes_query(self, question, question_emb=None):
         query_question = self._eaes_query_question(question)
         # Keep the baseline query prompt byte-for-byte unchanged when semantic
@@ -632,6 +641,16 @@ class EAESMixin:
                 answer_items.append({"evidence": evidence})
         return {"answer_items": answer_items}
 
+    @staticmethod
+    def _eaes_reader_parent_memory(candidate):
+        """Hide the matched query keyword while retaining parent rank context."""
+        return {
+            "parent_id": candidate.get("parent_id"),
+            "rewrite_content": candidate.get("rewrite_content"),
+            "score": candidate.get("score"),
+            "rank": candidate.get("rank"),
+        }
+
     def select_eaes_evidence(self, question, query_plan, candidates):
         selection_input = {
             "question": question,
@@ -666,17 +685,18 @@ class EAESMixin:
 
     def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
         query_plan = self.parse_eaes_query(question, question_emb)
+        child_query_plan = self._eaes_child_query_plan(query_plan)
         parent_candidates = []
         if getattr(config, "SEMANTIC_HIERARCHY", False):
             parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
                 query_plan, question_emb, limit=config.PARENT_TOP_K
             )
         embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-            query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+            child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
         if not embedding_candidates and not parent_candidates:
             return "no information available", []
         candidates = self.rerank_eaes_candidates(
-            question, query_plan, embedding_candidates
+            question, child_query_plan, embedding_candidates
         ) if embedding_candidates else []
         if not candidates and not parent_candidates:
             return "no information available", []
@@ -689,16 +709,21 @@ class EAESMixin:
                 rationale="Reranked memory passed directly to the final reader.",
             )
         else:
-            evidence_package = self.select_eaes_evidence(question, query_plan, candidates)
+            evidence_package = self.select_eaes_evidence(
+                question, child_query_plan, candidates
+            )
         final_input = {
             "question": question,
-            "query_plan": query_plan,
+            "query_plan": child_query_plan,
             "evidence_package": self._eaes_reader_evidence_package(
                 evidence_package
             ),
         }
         if parent_candidates:
-            final_input["parent_memories"] = parent_candidates
+            final_input["parent_memories"] = [
+                self._eaes_reader_parent_memory(parent)
+                for parent in parent_candidates
+            ]
         if not config.DISABLE_EVIDENCE_SELECTOR:
             final_input["backup_candidates"] = [
                 self._eaes_reader_child_memory(candidate)

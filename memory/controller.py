@@ -5,12 +5,9 @@ import re
 import threading
 from datetime import date
 from typing import List, Dict, Any, Optional, Tuple, Set
-from collections import defaultdict
 import numpy as np
 from nltk.stem import PorterStemmer
 from common import config
-from prompts.prompts import Prompts
-from common.utils import topk_answers_by_similarity
 from llm.controller import LLM
 from llm.embeddings import get_embedding
 from memory.system import MemorySystem
@@ -28,100 +25,12 @@ class MemoryController:
         self.llm = llm
         self.question_emb = None
         self.queried_event = []
-        self.queried_keyword = []
         self._eaes_query_embedding_cache = {}
         self._eaes_parent_query_embedding_cache = {}
-
-    # Dispatcher op
-
-    def event_by_tag(self, key, tag, note):
-
-        text, origin, event_ids = self.memory.event_by_tag(key, tag)
-
-        if len(event_ids) > config.RERANK_LIMIT:
-            embeddings = []
-            for id in event_ids:
-                embeddings.append(self.memory.episode_events[id].embedding)
-            embeddings = np.vstack(embeddings)
-
-            top_ids, _, top_embs, top_texts = topk_answers_by_similarity(self.question_emb, embeddings, event_ids,
-                                                                          k=config.K2, answer_texts=text)
-
-            origin_list = []
-            for tid in top_ids:
-                origin_list.append(self.memory.episode_events[tid].origin)
-                self.queried_event.append(tid)
-            # evidence is the retrieved event_ids
-            return top_texts, origin_list, top_ids
-        return text, origin, event_ids
 
 
     def query_conversation_time(self, event_id):
         return f"Conversation_time:{event_id}:{self.memory.query_conversation_time(event_id)}"
-
-    def query_event_keywords_single(self, event_id, key_list):
-
-        key_candidates = self.memory.query_event_keywords(event_id)
-        key_candidates_new = []
-        text = self.memory.episode_events[event_id].text
-        for kdict in key_candidates:
-            if kdict['key'] in self.queried_keyword:
-                idx = key_candidates.index(kdict)
-                del key_candidates[idx]
-            else:
-                self.set_queried_keywords(kdict, tool=True)
-                key = kdict['key']
-                tag = kdict['tags']
-                if len(tag) > config.TAG_MAX and (key not in key_list):
-                    ans_input_tag = {
-                        "question": text,
-                        "keyword": key,
-                        "tags": tag
-                    }
-                    key_out = self.llm.chat_text(
-                        messages=[{"role": "system", "content": Prompts.EVENT_KEYWORDS_SYSTEM_PROMPT},
-                                  {"role": "user", "content": json.dumps(ans_input_tag, ensure_ascii=False)}],
-                        model=config.RE_MODEL
-
-                    )
-
-                    scores = key_out.get("tag_scores")
-
-                    logger.info(f"[tool-tag-sort] {scores}")
-
-                    tag_dict = sorted(
-                        ((k, v) for k, v in scores.items() if v != 0),
-                        key=lambda kv: kv[1],
-                        reverse=True
-                    )[:config.TAG_LIMIT]
-                    selected_tags = [k for k, _ in tag_dict]
-                    key_candidates_new.append({"key": key, "tags": selected_tags})
-                else:
-                    key_candidates_new.append({"key": key, "tags": tag})
-                key_list.append(key)
-
-        return key_candidates_new, key_list
-
-    def query_event_keywords(self, event_id):
-        key_list = []
-        key_candidates = []
-        pattern = re.compile(r'^(D\d+):(\d+)$')
-        pattern_split = re.compile(r'^(D\d+):(\d+)-(\d+)$')
-        if pattern_split.match(event_id):
-            event_id = event_id.split("-")[0]
-
-        if pattern.match(event_id):
-            for i in range(1,10):
-                if f"{event_id}-{i}" in self.memory.episode_events:
-                    key_tag, key_list = self.query_event_keywords_single(f"{event_id}-{i}", key_list)
-                    key_candidates.extend(key_tag)
-                else:
-                    # for LM, collect all variants of an event (skip numbering gaps) for richer keywords/tags; locomo stops at the first gap
-                    if config.dataset == "LM":
-                        continue
-                    break
-
-        return json.dumps(key_candidates, ensure_ascii=False)
 
     def query_event_context(self, event_id):
         return self.memory.query_event_context(event_id)
@@ -258,7 +167,6 @@ class MemoryController:
         self.prepare_eaes_retrieval_embeddings()
         query_vectors, query_attributes = self._eaes_query_embeddings(query_plan, question_emb)
         query_entities = self._as_list(query_plan.get("entities"))
-        keywords = self._as_list(query_plan.get("keywords"))
         required_lifecycle = str(query_plan.get("required_lifecycle") or "").lower().strip()
         required_semantic_properties = []
         if config.EAES_SEMANTIC_SCORE:
@@ -268,10 +176,6 @@ class MemoryController:
                     required_semantic_properties.append(value)
 
         entity_words = [self._eaes_words(entity) for entity in query_entities]
-        keyword_words = set()
-        for keyword in keywords:
-            keyword_words |= self._eaes_words(keyword)
-
         scored = []
         for note in self.memory.eaes_notes.values():
             if note.retrieval_embedding is None or query_vectors.size == 0:
@@ -286,9 +190,6 @@ class MemoryController:
             for entity in self._as_list(note.entities):
                 note_entity_words |= self._eaes_words(entity)
             note_text_words = self._eaes_words(note.rewrite_content)
-            note_attr_words = set()
-            for attribute in self._as_list(note.attribute_paths):
-                note_attr_words |= self._eaes_words(attribute)
 
             if entity_words:
                 entity_score = max(
@@ -297,9 +198,6 @@ class MemoryController:
                 )
             else:
                 entity_score = 0.2
-            keyword_score = self._eaes_overlap_score(
-                keyword_words, note_text_words | note_attr_words
-            )
             lifecycle_score = 0.0
             if required_lifecycle in {"planned", "current", "historical"}:
                 lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else 0.0
@@ -336,7 +234,6 @@ class MemoryController:
             score = (
                 2.0 * entity_score
                 + 1.4 * attribute_score
-                + 1.2 * keyword_score
                 + 0.1 * lifecycle_score
                 + 0.2 * original_embedding_score
                 + semantic_bonus
@@ -348,7 +245,6 @@ class MemoryController:
                     "entity": round(entity_score, 3),
                     "attribute": round(attribute_score, 4),
                     "attribute_embedding_raw": round(raw_attribute_score, 4),
-                    "keyword": round(keyword_score, 3),
                     "lifecycle": round(lifecycle_score, 3),
                     "embedding": round(original_embedding_score, 3),
                     "semantic_match_count": semantic_match_count,
@@ -492,170 +388,6 @@ class MemoryController:
         s = re.sub(r"[\s\-]+", "_", s)
         return s.strip("_")
 
-    @staticmethod
-    def _tokens(s: str) -> Set[str]:
-        return set([t for t in re.split(r"[_\s]+", (s or "").lower()) if t])
-
-    # ---------------- match a single query atomic key against graph KeyNodes (text-only, no vectors) ----------------
-    def match_query_key_to_graph_keys(
-            self,
-            q_text: str,
-            *,
-            q_alternative: list,
-            jaccard_thresh: float = 0.6
-    ) -> Set[str]:
-        """
-        Return the set of graph key_ids matching the query atomic key, using text similarity only:
-        1) types must match
-        2) normalized exact-equal  OR  token-subset containment  OR  Jaccard >= threshold
-        """
-        q_list = [q_text] + (q_alternative or [])
-        out: Set[str] = set()
-
-        norm_queries = []
-        for q in q_list:
-            norm_q = self._snake_norm(q)
-            Tq = self._tokens(norm_q)
-            norm_queries.append((norm_q, Tq))
-
-            # iterate over all keys in the graph
-        for kid, kn in self.memory.keys.items():
-            norm_k = self._snake_norm(kn.text)
-            Tk = self._tokens(norm_k)
-
-            # compare against any one query phrase
-            for norm_q, Tq in norm_queries:
-                # exact equal
-                if norm_k == norm_q:
-                    out.add(kid)
-                    break
-
-                # subset containment
-                if (Tq and Tq.issubset(Tk)) or (Tk and Tk.issubset(Tq)):
-                    out.add(kid)
-                    break
-
-                # Jaccard similarity
-                inter = len(Tq & Tk)
-                union = len(Tq | Tk) if (Tq or Tk) else 1
-                jac = inter / union
-                if jac >= jaccard_thresh:
-                    out.add(kid)
-                    break  # one match is enough; no need to try other alternatives
-
-        return out
-
-    # ---------------- compute fully/partially satisfied Values from relations ----------------
-    def evaluate_relations_over_graph(
-            self,
-            query_keys: List[Dict[str, Any]],
-            relations: List[List[str]] = None,
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        query_keys: [{"key_id":"k1","text":"caroline","type":"entity", "key_quality_score":...}, ...]
-        relations:  [["k1","k2"], ["k3"]]  -> (k1 AND k2) OR (k3)
-
-        Returns:
-        {
-          "full_matches":   [ {value_id, value_text, via_group, matched_keys, total_keys, coverage, last_used_at}, ...],
-          "partial_matches":[ { ... as above (coverage<1.0) ... } ]
-        }
-        """
-        # 1) build a dict: key_id in the question -> {text,type}
-        qmap: Dict[str, Dict[str, Any]] = {k["id"]: k for k in query_keys}
-        # in LM all events hang under "user"; force-add a "user" query key to recall all user-related events
-        if config.dataset == "LM":
-            if "user" not in qmap:
-                qmap["user"] = {"id": "user", "alternatives": []}
-
-        # 2) for each question key, the set of graph key_ids it matches and the value set they cover
-        qid_to_value_ids: Dict[str, Set[str]] = {}
-        qid_to_seconds: Dict[str, Dict[str, Set[Any]]] = {}
-        #
-        for qid, q in qmap.items():
-            matched_kids = self.match_query_key_to_graph_keys(q["id"], q_alternative = q["alternatives"])
-            vset: Set[str] = set()
-            sec_map: Dict[str, Set[Any]] = defaultdict(set)
-            for mk in matched_kids:
-                for t in self.memory.key_to_values.get(mk, set()):
-                    vid, origin = t[0], t[1]
-                    vset.add(vid)
-                    sec_map[vid].add(origin)
-            qid_to_value_ids[qid] = vset
-            qid_to_seconds[qid] = sec_map
-
-        if relations is None:
-            relations = [[qid for qid in qmap.keys()]]
-
-        full: Dict[str, Dict[str, Any]] = {}
-        partial: Dict[str, Dict[str, Any]] = {}
-
-        # 3) for each AND group, count coverage (how many qids in the group a value hits)
-        for gi, group in enumerate(relations):
-            if not group:
-                continue
-            total = len(group)
-            counts: Dict[str, int] = defaultdict(int)  # value_id -> matched_key_count
-
-            group_seconds: Dict[str, Set[Any]] = defaultdict(set)
-            # accumulate values hit by each qid
-            for qid in group:
-                for vid in qid_to_value_ids.get(qid, set()):
-                    counts[vid] += 1
-                    for sec in qid_to_seconds.get(qid, {}).get(vid, set()):
-                        group_seconds[vid].add(sec)
-
-            # 4) record full / partial
-            for vid, c in counts.items():
-                cov = c / total
-                v = self.memory.episode_events.get(vid)
-                seconds = sorted(list(group_seconds.get(vid, set())), key=lambda x: str(x))
-                rec = {
-                    "value_id": vid,
-                    "value_text": v.text,
-                    "via_group": gi,  # index of this AND group
-                    "matched_keys": c,  # how many atomic keys in the group are hit
-                    "total_keys": total,  # total atomic keys in the group
-                    "coverage": cov,  # hit ratio
-                    "origin": seconds
-                    # "last_used_at": v.last_used_at,  # for sorting
-                }
-                if len(seconds) == 1:
-                    rec["second_value"] = seconds[0]
-                if c == total:
-                    # fully satisfies this AND group
-                    prev = full.get(vid)
-                    if (prev is None) or (cov > prev["coverage"]) or \
-                            (cov == prev["coverage"] and total > prev["total_keys"]):
-                        full[vid] = rec
-                else:
-                    # only partial; keep the record with the highest coverage across all groups for this value
-                    prev = partial.get(vid)
-                    if (prev is None) or (cov > prev["coverage"]) or \
-                            (cov == prev["coverage"] and total > prev["total_keys"]):
-                        partial[vid] = rec
-
-        # 5) OR semantics: a value is full if any AND group is full; remove full ones from partial
-        for vid in list(partial.keys()):
-            if vid in full:
-                partial.pop(vid, None)
-
-        # 6) sort: full by group size desc then last-used time desc; partial by coverage then group size then time
-
-        full_list = sorted(
-            full.values(),
-            key=lambda x: x["total_keys"],
-            reverse=True
-        )
-        partial_list = sorted(
-            partial.values(),
-            key=lambda x: (x["coverage"], x["total_keys"]),
-            reverse=True
-        )
-
-        return {"full_matches": full_list, "partial_matches": partial_list}
-
-
     def extract_json_from_content(self, text: str):
         import json, re
         t = (text or "").strip()
@@ -727,11 +459,3 @@ class MemoryController:
 
     def set_queried_events(self, query_events):
         self.queried_event = query_events
-
-    def set_queried_keywords(self, query_keywords, tool=False):
-        if tool:
-            self.queried_keyword.append(query_keywords['key'])
-        else:
-            for k_dict in query_keywords:
-                self.queried_keyword.append(k_dict['id'])
-            # self.queried_keyword.extend(k_dict['alternatives'])

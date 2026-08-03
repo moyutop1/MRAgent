@@ -37,9 +37,22 @@ class _FakeMemory:
 class _FakeController:
     def __init__(self, candidates):
         self.candidates = candidates
+        self.child_query_plans = []
+        self.parent_query_plans = []
 
-    def retrieve_eaes_candidates(self, *_args, **_kwargs):
+    def retrieve_eaes_candidates(self, query_plan, *_args, **_kwargs):
+        self.child_query_plans.append(dict(query_plan))
         return list(self.candidates)
+
+    def retrieve_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
+        self.parent_query_plans.append(dict(query_plan))
+        return [{
+            "parent_id": "D1:t1",
+            "rewrite_content": "Caroline likes dogs.",
+            "score": 0.9,
+            "rank": 1,
+            "matched_keyword": "dog",
+        }]
 
 
 class _AblationAgent(EAESMixin):
@@ -48,10 +61,15 @@ class _AblationAgent(EAESMixin):
         self.memory = _FakeMemory()
         self.memory_controller = _FakeController(candidates)
         self.selector_calls = 0
+        self.selector_query_plans = []
 
     @staticmethod
     def parse_eaes_query(_question, _question_emb):
-        return {"answer_type": "fact"}
+        return {
+            "answer_type": "fact",
+            "query_attributes": ["profile.pet: pet owned by Caroline"],
+            "keywords": ["dog"],
+        }
 
     @staticmethod
     def _as_list(value):
@@ -61,8 +79,9 @@ class _AblationAgent(EAESMixin):
     def rerank_eaes_candidates(_question, _query_plan, candidates):
         return list(candidates)
 
-    def select_eaes_evidence(self, _question, _query_plan, candidates):
+    def select_eaes_evidence(self, _question, query_plan, candidates):
         self.selector_calls += 1
+        self.selector_query_plans.append(dict(query_plan))
         return self._fallback_eaes_package(candidates[:1], reason="selector enabled")
 
 
@@ -84,7 +103,10 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
     def test_disabled_selector_passes_every_reranked_candidate_to_reader(self):
         agent = _AblationAgent(_candidates())
 
-        with patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True):
+        with (
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", False),
+        ):
             answer, supports = agent.answer_question_eaes("question", category=1)
 
         self.assertEqual(answer, "test answer")
@@ -108,7 +130,10 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
     def test_enabled_selector_keeps_existing_path(self):
         agent = _AblationAgent(_candidates())
 
-        with patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False):
+        with (
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
+            patch.object(config, "SEMANTIC_HIERARCHY", False),
+        ):
             agent.answer_question_eaes("question", category=1)
 
         self.assertEqual(agent.selector_calls, 1)
@@ -123,6 +148,28 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             set(item) == {"memory_id", "conversation_time", "rewrite_content"}
             for item in reader_input["backup_candidates"]
         ))
+
+    def test_query_keywords_are_parent_only(self):
+        agent = _AblationAgent(_candidates())
+
+        with (
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+        ):
+            agent.answer_question_eaes("question", category=1)
+
+        self.assertEqual(
+            agent.memory_controller.parent_query_plans[0]["keywords"],
+            ["dog"],
+        )
+        self.assertNotIn(
+            "keywords", agent.memory_controller.child_query_plans[0]
+        )
+        self.assertNotIn("keywords", agent.selector_query_plans[0])
+        self.assertNotIn("keywords", agent.llm.inputs[0]["query_plan"])
+        self.assertNotIn(
+            "matched_keyword", agent.llm.inputs[0]["parent_memories"][0]
+        )
 
 
 if __name__ == "__main__":

@@ -11,8 +11,7 @@ from common.utils import topk_answers_by_similarity
 from common import config
 from llm.controller import LLM
 from memory.controller import MemoryController
-from memory.system import MemorySystem, KeyNode, EpisodeEvent, Link, EAESMemoryNote
-from agent.tools import TOOLS, ToolBridge
+from memory.system import MemorySystem, EpisodeEvent
 from agent.rewrite_memory import first_origin, normalize_sentence_ids, origin_ids, rewrite_windowed_session
 from agent.eaes import EAESMixin
 from agent.retrieval import RetrievalMixin
@@ -23,24 +22,6 @@ class Agent(EAESMixin, RetrievalMixin):
         self.llm = llm
         self.memory = memory_system
         self.memory_controller = memory_controller
-        self.tools = TOOLS
-        self.tool_bridge = ToolBridge(memory_controller)
-
-        self.episode_link_num = 0
-        self.tags = set()
-
-    # ---------- Core utility: one tool-calling turn (with automatic tool execution) ----------
-    def _chat_with_tools(self, system_prompt: str, user_obj: dict, category):
-        return self.llm.chat_with_tools_once(
-            system_prompt=system_prompt,
-            user_obj=user_obj,
-            tools=self.tools,
-            tool_choice="auto",
-            execute_tool=self.tool_bridge.call,  # bind tool executor
-            temperature=0.0,
-            category=category,
-            model=config.RE_MODEL
-        )
 
     @staticmethod
     def question_format(dataset, qa):
@@ -63,150 +44,6 @@ class Agent(EAESMixin, RetrievalMixin):
             question = qa['question']
 
         return question
-
-    def answer_question_with_time(self, question, question_time, question_keys, category):
-        events_time = self.memory_controller.get_time_event(question_time)
-        events_time_originlist = list()
-        for time in events_time:
-            events_time_originlist.append(time.split("-")[0].strip())
-        if len(events_time) < config.TIME_EVENT_LIMIT:
-            similar_sentences = []
-            queried_origin = []
-            for id in events_time:
-                id_origin = self.memory.episode_events[id].origin
-                if id_origin in queried_origin:
-                    continue
-                similar_sentences.append("Time:"+self.memory.episode_events[id].time+" "+id+":"+self.memory.episode_events[id].text)
-                queried_origin.append(id_origin)
-
-            ans_input = {
-                "question": question,
-                "similar_sentence": similar_sentences,
-            }
-            return ans_input
-
-        else:
-            query_answers = self.memory_controller.evaluate_relations_over_graph(question_keys.get("keywords"))
-            full_ma = query_answers.get("full_matches")
-            part_ma = query_answers.get("partial_matches")
-            similar_sentence = []
-            queried_origin = []
-
-            def _collect(m):
-                origins = []
-                for item in self._as_list(m.get("origin")):
-                    origins.extend(self._origin_ids(item))
-                origin0 = origins[0] if origins else ""
-                if not (set(origins) & set(events_time_originlist)) or origin0 in queried_origin:
-                    return
-                ev = self.memory.episode_events[m.get("value_id")]
-                similar_sentence.append("Time:" + ev.time + " " + m.get("value_id") + ":" + m.get("value_text"))
-                queried_origin.append(origin0)
-
-            for m in full_ma:
-                _collect(m)
-            for m in part_ma:
-                if m.get("matched_keys") >= 1:
-                    _collect(m)
-            ans_input = {
-                "question": question,
-                "similar_sentence": similar_sentence,
-            }
-            return ans_input
-
-    def answer_question_with_time_lm(self, question, question_emb, query_answers, question_time, question_keys, category):
-        # LM-specific temporal handling
-        events_time = self.memory_controller.get_time_event(question_time)
-        events_time_originlist = list()
-        for time in events_time:
-            events_time_originlist.append(time.split("-")[0].strip())
-        if len(events_time) < config.K2:
-            similar_sentences = []
-            queried_origin = []
-            for id in events_time:
-                id_origin = self.memory.episode_events[id].origin
-                if id_origin in queried_origin:
-                    continue
-                similar_sentences.append("Time:"+self.memory.episode_events[id].time+" "+id+":"+self.memory.episode_events[id].text)
-                queried_origin.append(id_origin)
-            ans_input = {
-                "question": question,
-                "key_sentences": similar_sentences,
-                "current_date": question_time.split(",")[0].strip() if question_time else None,  # current date (the "today" at question time)
-            }
-            return ans_input, events_time
-        else:
-            full_ma = query_answers.get("full_matches")
-            part_ma = query_answers.get("partial_matches")
-            similar_sentence_embs = []
-            similar_sentence_ids = []
-            similar_sentence = []
-            queried_origin = []
-
-            def _collect(m):
-                origins = []
-                for item in self._as_list(m.get("origin")):
-                    origins.extend(self._origin_ids(item))
-                origin0 = origins[0] if origins else ""
-                if not (set(origins) & set(events_time_originlist)) or origin0 in queried_origin:
-                    return
-                ev = self.memory.episode_events[m.get("value_id")]
-                similar_sentence.append("Time:" + ev.time + " " + m.get("value_id") + ":" + m.get("value_text"))
-                similar_sentence_embs.append(ev.embedding)
-                similar_sentence_ids.append(m.get("value_id"))
-                queried_origin.append(origin0)
-
-            for m in full_ma:
-                _collect(m)
-            for m in part_ma:
-                if m.get("matched_keys") >= 1:
-                    _collect(m)
-            if len(similar_sentence_embs) > config.K1:
-                similar_sentence_embs = np.vstack(similar_sentence_embs)
-                top_ids, _, top_embs, top_texts = topk_answers_by_similarity(question_emb, similar_sentence_embs, similar_sentence_ids,
-                                                                                  k=config.K1, answer_texts=similar_sentence)
-            else:
-                top_texts = similar_sentence
-                top_ids = similar_sentence_ids
-                top_embs = similar_sentence_embs
-            seen_prefixes = set()
-            pattern = re.compile(r'^(.+)-\d+$')
-            deduplicated_ids, deduplicated_texts, deduplicated_embs = [], [], []
-            for idx, tid in enumerate(top_ids):
-                match = pattern.match(tid)
-                prefix = match.group(1) if match else tid
-                if prefix in seen_prefixes:
-                    continue
-                seen_prefixes.add(prefix)
-                deduplicated_ids.append(tid)
-                deduplicated_texts.append(top_texts[idx])
-                if len(top_embs) > 0:
-                    deduplicated_embs.append(top_embs[idx])
-            top_ids, top_texts, top_embs = deduplicated_ids, deduplicated_texts, deduplicated_embs
-            if len(top_ids) > config.K2:
-                top_ids, top_embs, top_texts = self.select_finegrained_sentence_sort(question, question_emb, top_texts,
-                                                                                     top_ids, top_embs)
-                if config.MODEL_NAME == "gemini":
-                    top_ids2, top_embs2, top_texts2 = self.select_finegrained_sentence(question, question_emb, top_texts,
-                                                                                       top_ids, top_embs)
-                    all_ids = top_ids + top_ids2
-                    all_texts = top_texts + top_texts2
-                    merged = {}
-                    for i, t in zip(all_ids, all_texts):
-                        merged.setdefault(i, t)
-                    top_ids = list(merged.keys())
-                    top_texts = list(merged.values())
-                sort_ids = top_ids
-            queried_similar_sentence_ids = self.extract_id_prefixes(top_ids)
-            key_candidates, key_tag_sentences_id, key_tag_sentences = self.select_key_tag(question, question_keys,
-                                                                                          queried_similar_sentence_ids)
-            self.memory_controller.set_queried_events(top_ids)
-            ans_input = {
-                "question": question,
-                "key_sentences": top_texts,
-                "current_date": question_time.split(",")[0].strip() if question_time else None,  # current date (the "today" at question time)
-            }
-            return ans_input, top_ids
 
     def get_time(self,question_time):
         # 1) "YYYY-MM-DD, YYYY-MM-DD"
@@ -402,68 +239,6 @@ class Agent(EAESMixin, RetrievalMixin):
         return selected_list, emb_list, text_list
 
 
-    def select_key_tag(self, question, question_keys, queried_similar_sentence_ids):
-        key_candidates = []
-        key_tag_sentences = []
-        key_tag_sentences_id = []
-        if not isinstance(question_keys, dict):
-            question_keys = {}
-        for s in self._as_list(question_keys.get("keywords")):
-            if not isinstance(s, dict):
-                continue
-            # [fix] use the raw key (consistent with stored keys and qmap); lemmatize lowercases + stems,
-            # which would mismatch the raw-stored keys (proper nouns / plurals / past tense missed).
-            key = s.get("id")
-            if not key:
-                continue
-            tag = self.memory.get_tag_list(key)
-            if len(tag) != 0:
-                if len(tag) > config.TAG_MAX:
-                    ans_input_tag = {
-                        "question": question,
-                        "keyword": key,
-                        "tags": tag
-                    }
-
-                    key_out = self.llm.chat_text(
-                        messages=[
-                            {"role": "system", "content": Prompts.EVENT_KEYWORDS_SYSTEM_PROMPT},
-                            {"role": "user", "content": json.dumps(ans_input_tag, ensure_ascii=False)},
-                        ],
-                        model=config.RE_MODEL, )
-
-
-                    if key_out is None:
-                        key_candidates.append({"key": key, "tags": tag})
-                    else:
-                        scores = key_out.get("tag_scores")
-
-                        logger.info(f"[sort] {scores}")
-
-                        tag_dict = sorted(
-                            ((k, v) for k, v in scores.items() if v != 0),
-                            key=lambda kv: kv[1],
-                            reverse=True
-                        )[:config.TAG_LIMIT]
-                        tag_list = []
-
-                        for k, v in tag_dict:
-                            tag_list.append(k)
-                            if v >= 0.7:
-                                text_queried, tagids, _ = self.memory_controller.event_by_tag(key, k, "")
-                                selected_sentences = []
-                                for i in range(len(tagids)):
-                                    if tagids[i] in queried_similar_sentence_ids:
-                                        continue
-                                    selected_sentences.append(text_queried[i])
-                                    queried_similar_sentence_ids.append(tagids[i])
-                                key_tag_sentences.append(f"key:{key},tag:{k}:{selected_sentences}")
-                                key_tag_sentences_id.extend(tagids)
-                        key_candidates.append({"key": key, "tags": tag_list})
-                else:
-                    key_candidates.append({"key": key, "tags": tag})
-        return key_candidates, key_tag_sentences_id, key_tag_sentences
-
     @staticmethod
     def _as_list(value):
         if value is None:
@@ -526,7 +301,9 @@ class Agent(EAESMixin, RetrievalMixin):
 
 
     def extract_keys(self, text: str):
-        keys_prompt = Prompts.extract_keyword_prompt(json.dumps(text, ensure_ascii=False), json.dumps(list(self.tags), ensure_ascii=False))
+        keys_prompt = Prompts.extract_keyword_prompt(
+            json.dumps(text, ensure_ascii=False)
+        )
         keys_out = self.llm.chat_text(
             messages=[{"role": "system", "content": Prompts.KEYWORD_SYSTEM_PROMPT},
                       {"role": "user", "content": keys_prompt}],
@@ -639,8 +416,8 @@ class Agent(EAESMixin, RetrievalMixin):
         conversation_time = events.get("conversation_time")
         topic_sentences = events.get("topics") or {}
         personal_sentences = self._as_list(events.get("personal_sentences"))
-        # [removed] summary->semantic memory build: summary is never queried (query_semantic_information is not in the TOOLS given to the LLM), so the whole block is removed.
-        # keys is still used by the keyword-link block below (keys.get("sentence")), so keys=None is guarded there.
+        # Legacy summaries are not used by the EAES retrieval pipeline.
+        # The keyword cache remains an optional hint for EAES indexing.
 
         episode_events = events.get("sentence")
         eid_topic_dict = {}
@@ -717,46 +494,32 @@ class Agent(EAESMixin, RetrievalMixin):
             person = ps.get("person")
             self.memory.add_personal_information(pid,ptext,porigin,ptag,person)
 
-        # [guard] keys=None (the keyword file line is null) means no keyword links; skip this block; topic/episode already registered above
+        # Memory-side keywords remain only as optional hints for EAES
+        # entity/attribute indexing. The removed non-EAES key/link graph is no
+        # longer constructed.
         keywords = keys.get("sentence") if keys is not None else None
         keyword_by_sentence = {}
 
-        i = 0
         for s in (keywords or []):
             sentence_id = s.get("sentence_id")
-            ks = s.get("keyword")
-            if not isinstance(ks, list):
-                ks = []
-            keyword_by_sentence[sentence_id] = ks or []
+            raw_keywords = s.get("keyword")
+            ks = list(raw_keywords) if isinstance(raw_keywords, list) else []
             if sentence_id not in self.memory.episode_events.keys():
+                keyword_by_sentence[sentence_id] = ks
                 continue
-            tag = self.memory.episode_events[sentence_id].tag_t #s.get("tag")
             origin_add = self.memory.episode_events[sentence_id].origin
-            # [batch>1] look up raw text by the origin's own prefix (e.g. D5:3->D5), not the record index session_id;
-            # otherwise cross-session sentences in a merged batch are looked up under the wrong D{session_id} -> None.split crash.
             first_origin = self._first_origin(origin_add)
             _prefix = first_origin.split(":")[0]
             raw_speaker_text = self.memory.raw_text.get(_prefix, {}).get(first_origin, "")
             speaker = raw_speaker_text.split(":", 1)[0].strip()
             if speaker not in ks:
                 ks.append(speaker)
-            for k in ks:
-                if k not in self.memory.keys:
-                    key_node = KeyNode(k)
-                    self.memory.keys[k] = key_node
-                link = Link(k, sentence_id, "episode", tag)
-                self.memory.episode_links[f"el{i + self.episode_link_num}"] = link
-                self.memory.keys[k].add_tag(tag, sentence_id)
-                ori = self.memory.episode_events[sentence_id].origin
-                self.memory.key_to_values[k].add((sentence_id, ori))
-                self.memory.add_tag(tag, sentence_id, k)
-                self.memory.episode_events[sentence_id].add_tag(tag, sentence_id)
-                i += 1
+            keyword_by_sentence[sentence_id] = ks
 
-        self.episode_link_num = self.episode_link_num + i
-        if config.EAES_MODE:
-            self._eaes_build_notes_for_session(events, keyword_by_sentence, conversation_time)
-            self._eaes_build_parent_nodes_for_session(events)
+        self._eaes_build_notes_for_session(
+            events, keyword_by_sentence, conversation_time
+        )
+        self._eaes_build_parent_nodes_for_session(events)
 
     def store_raw_text(self, raw_text, conv_embeddings=None, topic_id_list=None, topic_embeddings=None):
         self.memory.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)

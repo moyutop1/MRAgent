@@ -15,6 +15,11 @@ def parse_args():
         action="store_true",
         help="Read EAES retrieval files produced with --eaes_semantic_score",
     )
+    p.add_argument(
+        "--semantic_hierarchy",
+        action="store_true",
+        help="Read retrieval files produced with --semantic_hierarchy",
+    )
     p.add_argument("--allfile", action="store_true", help="Aggregate all matching samples")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
     return p.parse_args()
@@ -27,6 +32,7 @@ def load_rows(args):
         f"{args.model}_{args.file}"
         f"{'_eaes' if args.eaes else ''}"
         f"{'_semantic' if args.semantic_score else ''}"
+        f"{'_hierarchy' if args.semantic_hierarchy else ''}"
         "_retrieval"
     )
     root = Path(f"result/{args.data}")
@@ -51,22 +57,34 @@ def load_rows(args):
     return rows
 
 
-def print_group(name, rows, metric_key=None):
+def print_group(name, rows, metric_key=None, k_field="retrieval_k"):
     if metric_key:
-        scored = [r[metric_key] for r in rows if r.get(metric_key, {}).get("hit") is not None and "error" not in r]
+        valid_rows = [
+            r for r in rows
+            if r.get(metric_key, {}).get("hit") is not None and "error" not in r
+        ]
+        scored = [r[metric_key] for r in valid_rows]
     else:
-        scored = [r for r in rows if r.get("hit") is not None and "error" not in r]
+        valid_rows = [
+            r for r in rows if r.get("hit") is not None and "error" not in r
+        ]
+        scored = valid_rows
     if not scored:
         print(f"{name}: n=0")
         return
+    k_values = {
+        int(row[k_field]) for row in valid_rows
+        if row.get(k_field) is not None
+    }
+    k_label = str(next(iter(k_values))) if len(k_values) == 1 else "K"
     hit = sum(r["hit"] for r in scored) / len(scored)
     recall = sum(r["recall"] for r in scored) / len(scored)
     exact = sum(r["exact_cover"] for r in scored) / len(scored)
     mrr = sum(r["mrr"] for r in scored) / len(scored)
     print(
         f"{name}: n={len(scored)} "
-        f"Hit@K={hit:.4f} Recall@K={recall:.4f} "
-        f"ExactCover@K={exact:.4f} MRR={mrr:.4f}"
+        f"Hit@{k_label}={hit:.4f} Recall@{k_label}={recall:.4f} "
+        f"ExactCover@{k_label}={exact:.4f} MRR@{k_label}={mrr:.4f}"
     )
 
 
@@ -79,8 +97,13 @@ def main():
 
     print_group("OVERALL", rows)
     if any("prefilter_metrics" in r for r in rows):
-        print_group("OVERALL combined prefilter", rows, "prefilter_metrics")
-        print_group("OVERALL LLM rerank", rows, "combined_metrics")
+        print_group(
+            "OVERALL combined prefilter", rows,
+            "prefilter_metrics", "prefilter_k",
+        )
+        print_group("OVERALL child rerank", rows, "child_metrics", "child_k")
+        print_group("OVERALL parent", rows, "parent_metrics", "parent_k")
+        print_group("OVERALL child+parent", rows, "combined_metrics")
     if any("graph_metrics" in r for r in rows):
         print_group("OVERALL graph", rows, "graph_metrics")
         print_group("OVERALL dense", rows, "dense_metrics")
@@ -91,8 +114,22 @@ def main():
     for cat in sorted(by_cat, key=str):
         print_group(f"category={cat}", by_cat[cat])
         if any("prefilter_metrics" in r for r in by_cat[cat]):
-            print_group(f"category={cat} combined prefilter", by_cat[cat], "prefilter_metrics")
-            print_group(f"category={cat} LLM rerank", by_cat[cat], "combined_metrics")
+            print_group(
+                f"category={cat} combined prefilter", by_cat[cat],
+                "prefilter_metrics", "prefilter_k",
+            )
+            print_group(
+                f"category={cat} child rerank", by_cat[cat],
+                "child_metrics", "child_k",
+            )
+            print_group(
+                f"category={cat} parent", by_cat[cat],
+                "parent_metrics", "parent_k",
+            )
+            print_group(
+                f"category={cat} child+parent", by_cat[cat],
+                "combined_metrics",
+            )
         if any("graph_metrics" in r for r in by_cat[cat]):
             print_group(f"category={cat} graph", by_cat[cat], "graph_metrics")
             print_group(f"category={cat} dense", by_cat[cat], "dense_metrics")

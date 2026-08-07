@@ -46,13 +46,14 @@ class _FakeController:
 
     def retrieve_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
         self.parent_query_plans.append(dict(query_plan))
+        limit = _kwargs.get("limit", 4)
         return [{
-            "parent_id": "D1:t1",
-            "rewrite_content": "Caroline likes dogs.",
-            "score": 0.9,
-            "rank": 1,
+            "parent_id": f"D1:t{i}",
+            "rewrite_content": f"Parent memory {i} about Caroline and dogs.",
+            "score": 1.0 / i,
+            "rank": i,
             "matched_keyword": "dog",
-        }]
+        } for i in range(1, 5)][:limit]
 
 
 class _AblationAgent(EAESMixin):
@@ -77,7 +78,7 @@ class _AblationAgent(EAESMixin):
 
     @staticmethod
     def rerank_eaes_candidates(_question, _query_plan, candidates):
-        return list(candidates)
+        return list(candidates)[:config.EAES_RERANK_LIMIT]
 
     def select_eaes_evidence(self, _question, query_plan, candidates):
         self.selector_calls += 1
@@ -106,6 +107,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", False),
+            patch.object(config, "EAES_RERANK_LIMIT", 20),
         ):
             answer, supports = agent.answer_question_eaes("question", category=1)
 
@@ -126,6 +128,26 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             for item in package["answer_items"]
         ))
         self.assertTrue(all(set(item) == {"evidence"} for item in package["answer_items"]))
+
+    def test_default_hierarchy_budget_is_sixteen_children_plus_four_parents(self):
+        agent = _AblationAgent(_candidates(30))
+
+        with (
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            agent.answer_question_eaes("question", category=4)
+
+        reader_input = agent.llm.inputs[0]
+        self.assertEqual(len(reader_input["evidence_package"]["answer_items"]), 16)
+        self.assertEqual(len(reader_input["parent_memories"]), 4)
+        self.assertEqual(
+            len(reader_input["evidence_package"]["answer_items"])
+            + len(reader_input["parent_memories"]),
+            20,
+        )
 
     def test_enabled_selector_keeps_existing_path(self):
         agent = _AblationAgent(_candidates())

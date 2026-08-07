@@ -1,5 +1,29 @@
 # Version Iterations
 
+## v118-20260807
+
+### Goal
+
+Align retrieval-only evaluation with the 20-memory context used by the semantic-hierarchy no-selector reader.
+
+### Changes
+
+- Change the default final context budget from 30 child plus 8 parent memories to 16 child plus 4 parent memories.
+- Make retrieval-only retrieve the same independently ranked 16 children and 4 parents instead of evaluating children alone.
+- Compute the headline metrics over 20 memory-node provenance groups and report explicit `Hit@20`, `Recall@20`, `ExactCover@20`, and `MRR@20` labels.
+- Keep separate diagnostics for child `@16`, parent `@4`, and embedding prefilter `@120` so gains from broad parent provenance remain visible.
+- Rank a multi-origin child or parent as one memory node for MRR; a parent's provenance group consists of the origins linked through its child IDs.
+- Add semantic-hierarchy filename support to the standalone retrieval evaluator.
+
+### Expected Effect
+
+- Make retrieval metrics directly comparable to the evidence capacity of the final reader while retaining stage-level visibility.
+- Avoid reporting the former child-only `Hit@30` after reducing and restructuring the reader context.
+
+### Verification
+
+- Add tests for the 16-child plus 4-parent reader budget, retrieval-only composition, parent-only keyword routing, and grouped memory-node MRR.
+
 ## v117-20260803
 
 ### Goal

@@ -24,12 +24,12 @@ parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PAREN
 parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
 parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Maximum child segments rewritten in one LLM call.")
-parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "8")), help="Semantic parent memories passed directly to the EAES final reader.")
+parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "4")), help="Semantic parent memories passed directly to the EAES final reader.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
-parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Memories kept by the EAES attribute reranker for evidence selection.")
+parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "16")), help="Child memories kept by the EAES attribute reranker for evidence selection.")
 parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")
 parser.add_argument(
     "--eaes_semantic_score",

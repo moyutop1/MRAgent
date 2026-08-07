@@ -237,6 +237,9 @@ def compact_gold_diag(retrieval_row):
         out.append({
             "origin": gold.get("origin"),
             "covered_by_retrieval": gold.get("covered_by_retrieval"),
+            "covered_by_child": gold.get("covered_by_child"),
+            "covered_by_parent": gold.get("covered_by_parent"),
+            "matched_parent_ids": gold.get("matched_parent_ids"),
             "drop_reason": gold.get("drop_reason"),
             "best_rank": gold.get("best_rank"),
             "best_prefilter_rank": gold.get("best_prefilter_rank"),
@@ -266,11 +269,14 @@ def build_case(row, judge_row, retrieval_row, topk):
         case.update({
             "retrieval_file": retrieval_row.get("_file"),
             "retrieval_metrics": {
+                "k": retrieval_row.get("retrieval_k"),
                 "hit": retrieval_row.get("hit"),
                 "recall": retrieval_row.get("recall"),
                 "exact_cover": retrieval_row.get("exact_cover"),
                 "mrr": retrieval_row.get("mrr"),
             },
+            "child_metrics": retrieval_row.get("child_metrics"),
+            "parent_metrics": retrieval_row.get("parent_metrics"),
             "prefilter_metrics": retrieval_row.get("prefilter_metrics"),
             "question_keys": retrieval.get("question_keys"),
             "query_plan": retrieval.get("query_plan"),
@@ -279,6 +285,7 @@ def build_case(row, judge_row, retrieval_row, topk):
                 compact_candidate(cand, rank)
                 for rank, cand in enumerate(candidates[:topk], start=1)
             ],
+            "parent_candidates": retrieval.get("parent_candidates") or [],
             "embedding_top_candidates": [
                 compact_candidate(cand, rank)
                 for rank, cand in enumerate((retrieval.get("prefilter_candidates") or [])[:topk], start=1)

@@ -159,7 +159,8 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
-| `--eaes_rerank_limit` | memories retained by the attribute LLM reranker for evidence selection | `30` |
+| `--eaes_rerank_limit` | child memories retained by the attribute LLM reranker | `16` |
+| `--parent_top_k` | independently retrieved parent memories sent to the final reader | `4` |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | EAES answer ablation: pass all reranked candidates directly to the final reader | off |
 
@@ -180,18 +181,18 @@ python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_qu
 
 # retrieval-only diagnostics with global dense fallback mixed in
 python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26 --eaes
 
-# entity-attribute-memory retrieval diagnostics with explicit limits
-python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50_eaes --sample conv-26
+# entity-attribute-memory retrieval diagnostics with the default 16-child + 4-parent budget
+python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50 --sample conv-26 --eaes --semantic_hierarchy
 
 # semantic-property scoring ablation (rewrite memories must first be regenerated with semantic_properties)
-python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file semantic50_q50 --sample conv-26 --eaes --semantic_score
+python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file semantic50_q50 --sample conv-26 --eaes --semantic_score --semantic_hierarchy
 
 # answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
-python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 30
+python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
 
 ```
 
@@ -235,3 +236,4 @@ temporal questions).
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
+- With semantic hierarchy enabled, retrieval-only reports the same 20-node budget used by the no-selector reader: `Hit@20` for 16 ranked children plus 4 independently ranked parents. It also reports child `Hit@16`, parent `Hit@4`, and prefilter `Hit@120` separately.

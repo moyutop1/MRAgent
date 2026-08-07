@@ -85,6 +85,10 @@ class RetrievalMixin:
         retrieved_event_ids = {
             item for item in self._as_list(retrieval.get("retrieved_event_ids")) if item
         }
+        parent_ids = self._as_list(retrieval.get("parent_ids"))
+        parent_origin_groups = self._as_list(
+            retrieval.get("parent_origin_groups")
+        )
 
         diagnostics = {
             "prefilter_limit": config.EAES_CANDIDATE_LIMIT,
@@ -163,9 +167,18 @@ class RetrievalMixin:
                         "inside_llm_topk"
                     ),
                 })
-            covered_by_retrieval = any(
+            covered_by_child = any(
                 entry["in_retrieved_candidates"] for entry in memory_entries
             )
+            matched_parent_ids = [
+                parent_id
+                for parent_id, parent_origins in zip(
+                    parent_ids, parent_origin_groups
+                )
+                if origin in self._normalize_evidence_ids(parent_origins)
+            ]
+            covered_by_parent = bool(matched_parent_ids)
+            covered_by_retrieval = covered_by_child or covered_by_parent
             rank_values = [
                 entry["candidate_rank"] for entry in memory_entries
                 if entry["candidate_rank"] is not None
@@ -178,8 +191,10 @@ class RetrievalMixin:
                 origin_drop_reason = "gold_origin_not_in_episode_events"
             elif not memory_ids:
                 origin_drop_reason = "no_gold_memory_built_for_origin"
-            elif covered_by_retrieval:
+            elif covered_by_child:
                 origin_drop_reason = "inside_llm_topk"
+            elif covered_by_parent:
+                origin_drop_reason = "inside_parent_topk"
             elif rank_values and min(rank_values) > config.EAES_CANDIDATE_LIMIT:
                 origin_drop_reason = "rank_beyond_prefilter_topk"
             elif rank_values:
@@ -192,6 +207,9 @@ class RetrievalMixin:
                 "event_ids": event_ids,
                 "memory_ids": memory_ids,
                 "covered_by_retrieval": covered_by_retrieval,
+                "covered_by_child": covered_by_child,
+                "covered_by_parent": covered_by_parent,
+                "matched_parent_ids": matched_parent_ids,
                 "drop_reason": origin_drop_reason,
                 "best_rank": min(rank_values, default=None),
                 "best_prefilter_rank": min(rank_values, default=None),
@@ -223,17 +241,42 @@ class RetrievalMixin:
         if config.EAES_MODE:
             query_plan = self.parse_eaes_query(question, question_emb)
             child_query_plan = self._eaes_child_query_plan(query_plan)
+            parent_candidates = []
+            if getattr(config, "SEMANTIC_HIERARCHY", False):
+                parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
+                    query_plan, question_emb, limit=config.PARENT_TOP_K
+                )
             embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
                 child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
             candidates = self.rerank_eaes_candidates(
                 question, child_query_plan, embedding_candidates
             )
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
-            origins = self._unique_keep_order(
+            child_origins = self._unique_keep_order(
                 [c.get("origin") for c in candidates] or self._origins_for_event_ids(event_ids)
             )
-            if not origins:
-                origins = self._origins_for_event_ids(event_ids)
+            if not child_origins:
+                child_origins = self._origins_for_event_ids(event_ids)
+            child_origin_groups = [
+                [candidate.get("origin")]
+                if candidate.get("origin") else
+                self._origins_for_event_ids([candidate.get("event_id")])
+                for candidate in candidates
+            ]
+            parent_ids = self._unique_keep_order([
+                parent.get("parent_id") for parent in parent_candidates
+            ])
+            parent_origin_groups = [
+                self.memory.get_eaes_support_origin([parent_id])
+                for parent_id in parent_ids
+            ]
+            parent_origins = self._unique_keep_order([
+                origin
+                for group in parent_origin_groups
+                for origin in group
+            ])
+            origins = self._unique_keep_order(child_origins + parent_origins)
+            origin_groups = child_origin_groups + parent_origin_groups
             prefilter_event_ids = self._unique_keep_order(
                 [c.get("event_id") for c in embedding_candidates]
             )
@@ -241,14 +284,40 @@ class RetrievalMixin:
                 [c.get("origin") for c in embedding_candidates]
                 or self._origins_for_event_ids(prefilter_event_ids)
             )
+            prefilter_origin_groups = [
+                [candidate.get("origin")]
+                if candidate.get("origin") else
+                self._origins_for_event_ids([candidate.get("event_id")])
+                for candidate in embedding_candidates
+            ]
+            child_k = config.EAES_RERANK_LIMIT
+            parent_k = config.PARENT_TOP_K if getattr(
+                config, "SEMANTIC_HIERARCHY", False
+            ) else 0
             return {
                 "mode": "eaes",
                 "query_plan": query_plan,
                 "retrieved_event_ids": event_ids,
+                "retrieved_memory_ids": self._unique_keep_order(
+                    [candidate.get("memory_id") for candidate in candidates]
+                    + parent_ids
+                ),
                 "retrieved_origins": origins,
+                "retrieved_origin_groups": origin_groups,
+                "retrieval_k": child_k + parent_k,
+                "child_k": child_k,
+                "parent_k": parent_k,
                 "candidates": candidates,
+                "child_origins": child_origins,
+                "child_origin_groups": child_origin_groups,
+                "parent_candidates": parent_candidates,
+                "parent_ids": parent_ids,
+                "parent_origins": parent_origins,
+                "parent_origin_groups": parent_origin_groups,
                 "prefilter_event_ids": prefilter_event_ids,
                 "prefilter_origins": prefilter_origins,
+                "prefilter_origin_groups": prefilter_origin_groups,
+                "prefilter_k": config.EAES_CANDIDATE_LIMIT,
                 "prefilter_candidates": embedding_candidates,
             }
 

@@ -368,6 +368,32 @@ Schema:
   "ranked_memory_ids": ["M_D1_2_1"]
 }"""
 
+    EAES_ROLLBACK_QUERY_PROMPT = """The input also contains the current query plan and only the rewrite contents of the 20 memories retrieved in the first pass.
+Use those rewrite contents only to identify answer-relevant evidence that may still be missing. Produce one replacement query plan that searches for complementary evidence outside the current memories.
+Keep the same query-plan schema and constraints. Do not add fields, answer the question, assume that a retrieved memory is true, or put a guessed answer into a query attribute.
+Prefer alternate entities, relations, wording, temporal constraints, or answer-slot descriptions only when they are justified by the original question and address a real gap in the current memories."""
+
+    EAES_ROLLBACK_SUPPLEMENT_RERANK_PROMPT = """You select complementary memory nodes for a retrieval rollback check. Only output valid JSON.
+The input contains two separately prefiltered groups: child_candidates has up to 27 child memories and parent_candidates has up to 3 parent memories. Their scores are meaningful only within the same node type; never compare child and parent numeric scores directly.
+Use the question, current query plan, rollback query plan, current top rewrite contents, and candidate contents. Select the requested total number of nodes that add the strongest missing answer evidence. Do not select a node merely because it repeats evidence already present. Do not invent IDs.
+Return exactly limit distinct nodes when at least limit candidates are provided.
+Schema:
+{
+  "ranked_nodes": [
+    {"node_type": "child", "node_id": "M_D1_2_1"},
+    {"node_type": "parent", "node_id": "D1:t2"}
+  ]
+}"""
+
+    EAES_ROLLBACK_FINAL_RERANK_PROMPT = """You rerank one merged child candidate pool and one merged parent candidate pool. Each pool contains the first-pass memories plus any supplemental rollback memories of that type. Only output valid JSON.
+Rank child and parent memories separately. Retrieval ranks and scores are only weak hints because candidates may have been retrieved by different query plans. Prefer nodes that directly answer the question, preserve complementary evidence, and avoid redundancy. A rollback node may replace a first-pass node only when it is more useful for answering the question. Do not invent IDs.
+Return exactly child_limit distinct child IDs and exactly parent_limit distinct parent IDs when each pool is large enough.
+Schema:
+{
+  "ranked_child_ids": ["M_D1_2_1"],
+  "ranked_parent_ids": ["D1:t2"]
+}"""
+
     EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.
 Goal: select valid answer evidence, not merely related memories.
 Consider entity match, attribute match, answer type, lifecycle compatibility, temporal usability, facet specificity, answer density, low redundancy, and coverage.

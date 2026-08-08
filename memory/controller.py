@@ -161,7 +161,7 @@ class MemoryController:
         return [value]
 
     def score_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
-                              include_rank: bool = False):
+                              include_rank: bool = False, exclude_memory_ids=None):
         if not isinstance(query_plan, dict):
             query_plan = {}
         self.prepare_eaes_retrieval_embeddings()
@@ -176,8 +176,11 @@ class MemoryController:
                     required_semantic_properties.append(value)
 
         entity_words = [self._eaes_words(entity) for entity in query_entities]
+        excluded = set(exclude_memory_ids or [])
         scored = []
         for note in self.memory.eaes_notes.values():
+            if note.memory_id in excluded:
+                continue
             if note.retrieval_embedding is None or query_vectors.size == 0:
                 continue
             note_vector = self._normalize_embedding_rows(note.retrieval_embedding)[0]
@@ -265,12 +268,22 @@ class MemoryController:
             return ranked[:limit]
         return ranked
 
-    def retrieve_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None):
+    def retrieve_eaes_candidates(
+            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
+            exclude_memory_ids=None
+    ):
         limit = limit or config.EAES_CANDIDATE_LIMIT
-        return self.score_eaes_candidates(query_plan, question_emb, limit=limit, include_rank=True)
+        return self.score_eaes_candidates(
+            query_plan,
+            question_emb,
+            limit=limit,
+            include_rank=True,
+            exclude_memory_ids=exclude_memory_ids,
+        )
 
     def retrieve_eaes_parent_candidates(
-            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None
+            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
+            exclude_parent_ids=None
     ):
         """Retrieve parents independently; this never filters child candidates."""
         if not config.SEMANTIC_HIERARCHY:
@@ -281,8 +294,11 @@ class MemoryController:
         )
         if query_vectors.size == 0:
             return []
+        excluded = set(exclude_parent_ids or [])
         scored = []
         for parent in self.memory.eaes_parent_nodes.values():
+            if parent.parent_id in excluded:
+                continue
             if parent.retrieval_embedding is None:
                 continue
             vector = self._normalize_embedding_rows(parent.retrieval_embedding)[0]

@@ -251,6 +251,49 @@ class RetrievalMixin:
             candidates = self.rerank_eaes_candidates(
                 question, child_query_plan, embedding_candidates
             )
+            rollback_metadata = {"enabled": False}
+            if getattr(config, "EAES_ROLLBACK_CHECK", False):
+                first_parent_candidates = list(parent_candidates)
+                try:
+                    candidates, parent_candidates, rollback_metadata = (
+                        self.apply_eaes_rollback_check(
+                            question,
+                            query_plan,
+                            candidates,
+                            parent_candidates,
+                            question_emb,
+                        )
+                    )
+                    rollback_metadata["first_prefilter"] = {
+                        "child_ids": [
+                            candidate.get("memory_id")
+                            for candidate in embedding_candidates
+                        ],
+                        "parent_ids": [
+                            candidate.get("parent_id")
+                            for candidate in first_parent_candidates
+                        ],
+                    }
+                except Exception:
+                    logger.warning(
+                        "EAES rollback check failed; retaining first-pass Top20.",
+                        exc_info=True,
+                    )
+                    rollback_metadata = {
+                        "enabled": True,
+                        "first_query_plan": query_plan,
+                        "first_prefilter": {
+                            "child_ids": [
+                                candidate.get("memory_id")
+                                for candidate in embedding_candidates
+                            ],
+                            "parent_ids": [
+                                candidate.get("parent_id")
+                                for candidate in first_parent_candidates
+                            ],
+                        },
+                        "failure_reason": "rollback_exception",
+                    }
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
             child_origins = self._unique_keep_order(
                 [c.get("origin") for c in candidates] or self._origins_for_event_ids(event_ids)
@@ -319,6 +362,7 @@ class RetrievalMixin:
                 "prefilter_origin_groups": prefilter_origin_groups,
                 "prefilter_k": config.EAES_CANDIDATE_LIMIT,
                 "prefilter_candidates": embedding_candidates,
+                "rollback_check": rollback_metadata,
             }
 
         raise RuntimeError(

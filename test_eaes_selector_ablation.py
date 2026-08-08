@@ -67,6 +67,7 @@ class _AblationAgent(EAESMixin):
         self.memory_controller = _FakeController(candidates)
         self.selector_calls = 0
         self.selector_query_plans = []
+        self.rollback_calls = 0
 
     @staticmethod
     def parse_eaes_query(_question, _question_emb):
@@ -88,6 +89,12 @@ class _AblationAgent(EAESMixin):
         self.selector_calls += 1
         self.selector_query_plans.append(dict(query_plan))
         return self._fallback_eaes_package(candidates[:1], reason="selector enabled")
+
+    def apply_eaes_rollback_check(
+            self, _question, _query_plan, candidates, parents, _question_emb
+    ):
+        self.rollback_calls += 1
+        return candidates, parents, {"enabled": True}
 
 
 def _candidates(count=20):
@@ -209,6 +216,21 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         self.assertNotIn(
             "matched_keyword", agent.llm.inputs[0]["parent_memories"][0]
         )
+
+    def test_answer_path_runs_enabled_rollback_check_with_selector_disabled(self):
+        agent = _AblationAgent(_candidates(30))
+
+        with (
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            agent.answer_question_eaes("question", category=4)
+
+        self.assertEqual(agent.rollback_calls, 1)
+        self.assertEqual(agent.selector_calls, 0)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
 | `--eaes_rerank_limit` | child memories retained by the attribute LLM reranker | `16` |
 | `--parent_top_k` | independently retrieved parent memories sent to the final reader | `4` |
+| `--eaes_rollback_check` | after the first Top20, retrieve 27 unseen children plus 3 unseen parents, select 3 supplements, then rerank back to 16 children plus 4 parents | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | EAES answer ablation: pass all reranked candidates directly to the final reader | off |
 
@@ -193,6 +194,12 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file sem
 
 # answer-stage ablation: bypass the EAES evidence selector (do not combine with --retrieval_only)
 python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+
+# rollback check: 27 unseen children + 3 unseen parents -> LLM Top3 -> final 16 + 4
+python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 41 --workers 1 --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+
+# the same rollback retrieval in retrieval-only mode
+python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
 
 ```
 

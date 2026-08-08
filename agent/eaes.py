@@ -450,6 +450,39 @@ class EAESMixin:
         plan.pop("keywords", None)
         return plan
 
+    def _eaes_query_plan_from_output(self, query_question, query_out, query_mode):
+        if not isinstance(query_out, dict):
+            return None
+        query_attributes = []
+        for value in self._as_list(query_out.get("query_attributes")):
+            value = str(value or "").strip()
+            if value and value not in query_attributes:
+                query_attributes.append(value)
+        plan = {
+            "entities": self._as_list(query_out.get("entities")),
+            "query_attributes": query_attributes[:3] or [query_question],
+            "answer_type": query_out.get("answer_type", "unknown"),
+            "temporal_intent": query_out.get("temporal_intent", "none"),
+            "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
+            "keywords": self._as_list(query_out.get("keywords")),
+            "query_mode": query_mode,
+        }
+        if config.EAES_SEMANTIC_SCORE:
+            # Query requirements use exact labels only. Unknown persistence
+            # and unapproved/legacy labels cannot create a scoring bonus.
+            allowed_properties = {
+                "event_action", "state_opinion", "personal_profile",
+                "relation_social", "transient", "episodic", "durable",
+            }
+            required_properties = []
+            for value in self._as_list(
+                    query_out.get("required_semantic_properties")):
+                value = str(value or "").lower().strip()
+                if value in allowed_properties and value not in required_properties:
+                    required_properties.append(value)
+            plan["required_semantic_properties"] = required_properties
+        return self._postprocess_eaes_query_plan(query_question, plan)
+
     def parse_eaes_query(self, question, question_emb=None):
         query_question = self._eaes_query_question(question)
         # Keep the baseline query prompt byte-for-byte unchanged when semantic
@@ -465,35 +498,11 @@ class EAESMixin:
             ],
             model=config.RE_MODEL
         )
-        if isinstance(query_out, dict):
-            query_attributes = []
-            for value in self._as_list(query_out.get("query_attributes")):
-                value = str(value or "").strip()
-                if value and value not in query_attributes:
-                    query_attributes.append(value)
-            plan = {
-                "entities": self._as_list(query_out.get("entities")),
-                "query_attributes": query_attributes[:3] or [query_question],
-                "answer_type": query_out.get("answer_type", "unknown"),
-                "temporal_intent": query_out.get("temporal_intent", "none"),
-                "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
-                "keywords": self._as_list(query_out.get("keywords")),
-                "query_mode": "question_only",
-            }
-            if config.EAES_SEMANTIC_SCORE:
-                # Query requirements use exact labels only. Unknown persistence
-                # and unapproved/legacy labels cannot create a scoring bonus.
-                allowed_properties = {
-                    "event_action", "state_opinion", "personal_profile",
-                    "relation_social", "transient", "episodic", "durable",
-                }
-                required_properties = []
-                for value in self._as_list(query_out.get("required_semantic_properties")):
-                    value = str(value or "").lower().strip()
-                    if value in allowed_properties and value not in required_properties:
-                        required_properties.append(value)
-                plan["required_semantic_properties"] = required_properties
-            return self._postprocess_eaes_query_plan(query_question, plan)
+        parsed_plan = self._eaes_query_plan_from_output(
+            query_question, query_out, "question_only"
+        )
+        if parsed_plan is not None:
+            return parsed_plan
         fallback_query = {
             "entities": [],
             "query_attributes": [query_question],
@@ -558,6 +567,351 @@ class EAESMixin:
             item["rank"] = rerank_rank
             reranked.append(item)
         return reranked
+
+    def build_eaes_rollback_query_plan(
+            self, question, query_plan, child_candidates, parent_candidates
+    ):
+        """Use the first-pass 16 + 4 nodes to plan a complementary retrieval."""
+        query_question = self._eaes_query_question(question)
+        query_prompt = (
+            Prompts.EAES_QUERY_SYSTEM_PROMPT
+            + (Prompts.EAES_SEMANTIC_QUERY_EXTENSION
+               if config.EAES_SEMANTIC_SCORE else "")
+            + "\n"
+            + Prompts.EAES_ROLLBACK_QUERY_PROMPT
+        )
+        payload = {
+            "question": query_question,
+            "current_query_plan": query_plan,
+            "current_top_rewrite_contents": [
+                candidate.get("rewrite_content")
+                for candidate in list(child_candidates or [])
+                + list(parent_candidates or [])
+                if candidate.get("rewrite_content")
+            ],
+        }
+        out = self.llm.chat_text(
+            messages=[
+                {"role": "system", "content": query_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL,
+        )
+        return self._eaes_query_plan_from_output(
+            query_question, out, "rollback_gap"
+        )
+
+    def select_eaes_rollback_supplements(
+            self,
+            question,
+            query_plan,
+            rollback_query_plan,
+            current_children,
+            current_parents,
+            child_candidates,
+            parent_candidates,
+    ):
+        """Select three total nodes from the 27-child + 3-parent rollback pool."""
+        limit = min(
+            config.EAES_ROLLBACK_SUPPLEMENT_LIMIT,
+            len(child_candidates or []) + len(parent_candidates or []),
+        )
+        if limit <= 0:
+            return [], []
+        payload = {
+            "question": self._eaes_query_question(question),
+            "current_query_plan": query_plan,
+            "rollback_query_plan": rollback_query_plan,
+            "current_top_rewrite_contents": [
+                candidate.get("rewrite_content")
+                for candidate in list(current_children or [])
+                + list(current_parents or [])
+                if candidate.get("rewrite_content")
+            ],
+            "limit": limit,
+            "child_candidates": child_candidates,
+            "parent_candidates": parent_candidates,
+        }
+        out = self.llm.chat_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": Prompts.EAES_ROLLBACK_SUPPLEMENT_RERANK_PROMPT,
+                },
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL,
+        )
+        if not isinstance(out, dict):
+            return [], []
+
+        child_by_id = {
+            candidate.get("memory_id"): candidate
+            for candidate in child_candidates or []
+            if candidate.get("memory_id")
+        }
+        parent_by_id = {
+            candidate.get("parent_id"): candidate
+            for candidate in parent_candidates or []
+            if candidate.get("parent_id")
+        }
+        selected_keys = []
+        for item in self._as_list(out.get("ranked_nodes")):
+            if not isinstance(item, dict):
+                continue
+            node_type = str(item.get("node_type") or "").lower().strip()
+            node_id = item.get("node_id")
+            key = (node_type, node_id)
+            if key in selected_keys:
+                continue
+            if (
+                    (node_type == "child" and node_id in child_by_id)
+                    or (node_type == "parent" and node_id in parent_by_id)
+            ):
+                selected_keys.append(key)
+            if len(selected_keys) >= limit:
+                break
+
+        # An incomplete or malformed 30-to-3 result is treated as a failed
+        # rollback check. This keeps the first-pass Top20 unchanged.
+        if len(selected_keys) != limit:
+            return [], []
+        selected_children = [
+            child_by_id[node_id]
+            for node_type, node_id in selected_keys
+            if node_type == "child"
+        ]
+        selected_parents = [
+            parent_by_id[node_id]
+            for node_type, node_id in selected_keys
+            if node_type == "parent"
+        ]
+        return selected_children, selected_parents
+
+    @staticmethod
+    def _eaes_unique_candidate_pool(initial, supplements, id_key):
+        pool = []
+        seen = set()
+        for candidate in list(initial or []) + list(supplements or []):
+            node_id = candidate.get(id_key)
+            if node_id and node_id not in seen:
+                seen.add(node_id)
+                pool.append(candidate)
+        return pool
+
+    @staticmethod
+    def _eaes_finalize_rollback_type(
+            pool, initial, supplements, id_key, ranked_ids, limit, llm_ids
+    ):
+        by_id = {candidate.get(id_key): candidate for candidate in pool}
+        ordered_ids = []
+        for node_id in list(ranked_ids or []) + [
+                candidate.get(id_key) for candidate in initial or []
+        ] + [
+                candidate.get(id_key) for candidate in supplements or []
+        ]:
+            if node_id in by_id and node_id not in ordered_ids:
+                ordered_ids.append(node_id)
+            if len(ordered_ids) >= limit:
+                break
+        supplement_ids = {
+            candidate.get(id_key) for candidate in supplements or []
+        }
+        result = []
+        for final_rank, node_id in enumerate(ordered_ids[:limit], start=1):
+            item = dict(by_id[node_id])
+            item["rank"] = final_rank
+            item["rollback_final_rank"] = final_rank
+            item["rollback_final_source"] = (
+                "llm" if node_id in llm_ids else "first_pass_fill"
+            )
+            item["rollback_candidate_source"] = (
+                "supplement" if node_id in supplement_ids else "first_pass"
+            )
+            if id_key == "memory_id":
+                item["rerank_rank"] = final_rank
+            result.append(item)
+        return result
+
+    def rerank_eaes_rollback_final(
+            self,
+            question,
+            query_plan,
+            rollback_query_plan,
+            initial_children,
+            initial_parents,
+            supplemental_children,
+            supplemental_parents,
+    ):
+        """Rerank the merged pool while enforcing separate child/parent budgets."""
+        child_pool = self._eaes_unique_candidate_pool(
+            initial_children, supplemental_children, "memory_id"
+        )
+        parent_pool = self._eaes_unique_candidate_pool(
+            initial_parents, supplemental_parents, "parent_id"
+        )
+        child_limit = min(config.EAES_RERANK_LIMIT, len(child_pool))
+        parent_limit = min(config.PARENT_TOP_K, len(parent_pool))
+        payload = {
+            "question": self._eaes_query_question(question),
+            "current_query_plan": query_plan,
+            "rollback_query_plan": rollback_query_plan,
+            "child_limit": child_limit,
+            "parent_limit": parent_limit,
+            "child_candidates": child_pool,
+            "parent_candidates": parent_pool,
+        }
+        out = self.llm.chat_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": Prompts.EAES_ROLLBACK_FINAL_RERANK_PROMPT,
+                },
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL,
+        )
+        if not isinstance(out, dict):
+            return list(initial_children or []), list(initial_parents or [])
+
+        child_ids = []
+        child_pool_ids = {candidate.get("memory_id") for candidate in child_pool}
+        for node_id in self._as_list(out.get("ranked_child_ids")):
+            if node_id in child_pool_ids and node_id not in child_ids:
+                child_ids.append(node_id)
+        parent_ids = []
+        parent_pool_ids = {candidate.get("parent_id") for candidate in parent_pool}
+        for node_id in self._as_list(out.get("ranked_parent_ids")):
+            if node_id in parent_pool_ids and node_id not in parent_ids:
+                parent_ids.append(node_id)
+
+        # The final call defines the actual reader Top20. Partial, duplicate,
+        # or invented-ID outputs must not silently alter the first-pass set.
+        if len(child_ids) != child_limit or len(parent_ids) != parent_limit:
+            return list(initial_children or []), list(initial_parents or [])
+
+        final_children = self._eaes_finalize_rollback_type(
+            child_pool,
+            initial_children,
+            supplemental_children,
+            "memory_id",
+            child_ids,
+            child_limit,
+            set(child_ids),
+        )
+        final_parents = self._eaes_finalize_rollback_type(
+            parent_pool,
+            initial_parents,
+            supplemental_parents,
+            "parent_id",
+            parent_ids,
+            parent_limit,
+            set(parent_ids),
+        )
+        return final_children, final_parents
+
+    def apply_eaes_rollback_check(
+            self,
+            question,
+            query_plan,
+            child_candidates,
+            parent_candidates,
+            question_emb=None,
+    ):
+        """Run the optional 27-child + 3-parent complementary retrieval."""
+        metadata = {
+            "enabled": True,
+            "first_query_plan": query_plan,
+            "first_pass": {
+                "child_ids": [
+                    candidate.get("memory_id")
+                    for candidate in child_candidates or []
+                ],
+                "parent_ids": [
+                    candidate.get("parent_id")
+                    for candidate in parent_candidates or []
+                ],
+            },
+        }
+        rollback_query_plan = self.build_eaes_rollback_query_plan(
+            question, query_plan, child_candidates, parent_candidates
+        )
+        if not isinstance(rollback_query_plan, dict):
+            metadata["failure_reason"] = "invalid_rollback_query_plan"
+            return child_candidates, parent_candidates, metadata
+
+        excluded_child_ids = {
+            candidate.get("memory_id")
+            for candidate in child_candidates or []
+            if candidate.get("memory_id")
+        }
+        excluded_parent_ids = {
+            candidate.get("parent_id")
+            for candidate in parent_candidates or []
+            if candidate.get("parent_id")
+        }
+        rollback_children = self.memory_controller.retrieve_eaes_candidates(
+            self._eaes_child_query_plan(rollback_query_plan),
+            question_emb,
+            limit=config.EAES_ROLLBACK_CHILD_PREFILTER_LIMIT,
+            exclude_memory_ids=excluded_child_ids,
+        )
+        rollback_parents = self.memory_controller.retrieve_eaes_parent_candidates(
+            rollback_query_plan,
+            question_emb,
+            limit=config.EAES_ROLLBACK_PARENT_PREFILTER_LIMIT,
+            exclude_parent_ids=excluded_parent_ids,
+        )
+        supplemental_children, supplemental_parents = (
+            self.select_eaes_rollback_supplements(
+                question,
+                query_plan,
+                rollback_query_plan,
+                child_candidates,
+                parent_candidates,
+                rollback_children,
+                rollback_parents,
+            )
+        )
+        metadata.update({
+            "rollback_query_plan": rollback_query_plan,
+            "rollback_prefilter": {
+                "child_candidates": rollback_children,
+                "parent_candidates": rollback_parents,
+            },
+            "selected_supplements": {
+                "child_ids": [
+                    candidate.get("memory_id")
+                    for candidate in supplemental_children
+                ],
+                "parent_ids": [
+                    candidate.get("parent_id")
+                    for candidate in supplemental_parents
+                ],
+            },
+        })
+        if not supplemental_children and not supplemental_parents:
+            metadata["failure_reason"] = "invalid_or_empty_supplement_selection"
+            return child_candidates, parent_candidates, metadata
+
+        final_children, final_parents = self.rerank_eaes_rollback_final(
+            question,
+            query_plan,
+            rollback_query_plan,
+            child_candidates,
+            parent_candidates,
+            supplemental_children,
+            supplemental_parents,
+        )
+        metadata["final"] = {
+            "child_ids": [
+                candidate.get("memory_id") for candidate in final_children
+            ],
+            "parent_ids": [
+                candidate.get("parent_id") for candidate in final_parents
+            ],
+        }
+        return final_children, final_parents, metadata
 
     def _enrich_eaes_package(self, package):
         if not isinstance(package, dict):
@@ -762,6 +1116,20 @@ class EAESMixin:
         ) if embedding_candidates else []
         if not candidates and not parent_candidates:
             return "no information available", []
+        if getattr(config, "EAES_ROLLBACK_CHECK", False):
+            try:
+                candidates, parent_candidates, _ = self.apply_eaes_rollback_check(
+                    question,
+                    query_plan,
+                    candidates,
+                    parent_candidates,
+                    question_emb,
+                )
+            except Exception:
+                logger.warning(
+                    "EAES rollback check failed; retaining first-pass Top20.",
+                    exc_info=True,
+                )
         if config.DISABLE_EVIDENCE_SELECTOR:
             evidence_package = self._fallback_eaes_package(
                 candidates,

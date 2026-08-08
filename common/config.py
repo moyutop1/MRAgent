@@ -30,6 +30,15 @@ parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVA
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "16")), help="Child memories kept by the EAES attribute reranker for evidence selection.")
+parser.add_argument(
+    "--eaes_rollback_check",
+    action="store_true",
+    help=(
+        "After the first 16-child + 4-parent retrieval, build a complementary query plan, "
+        "select three candidates from 27 unseen children plus 3 unseen parents, and rerank "
+        "the merged pool back to the original 16 + 4 budget."
+    ),
+)
 parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")
 parser.add_argument(
     "--eaes_semantic_score",
@@ -185,6 +194,14 @@ if EAES_CANDIDATE_LIMIT <= 0:
 EAES_RERANK_LIMIT = args.eaes_rerank_limit
 if EAES_RERANK_LIMIT <= 0 or EAES_RERANK_LIMIT > EAES_CANDIDATE_LIMIT:
     raise ValueError("--eaes_rerank_limit must be positive and no larger than --eaes_prefilter_limit.")
+EAES_ROLLBACK_CHECK = args.eaes_rollback_check
+EAES_ROLLBACK_CHILD_PREFILTER_LIMIT = 27
+EAES_ROLLBACK_PARENT_PREFILTER_LIMIT = 3
+EAES_ROLLBACK_SUPPLEMENT_LIMIT = 3
+if EAES_ROLLBACK_CHECK and not EAES_MODE:
+    raise ValueError("--eaes_rollback_check requires --eaes.")
+if EAES_ROLLBACK_CHECK and not SEMANTIC_HIERARCHY:
+    raise ValueError("--eaes_rollback_check requires --semantic_hierarchy.")
 EAES_RAW_EXPANSION_LIMIT = 3
 sample_id = args.sample
 MAX_QUESTIONS = args.max_questions
@@ -218,6 +235,12 @@ PARENT_CONTEXT_TURNS = args.parent_context_turns
 CHILD_MAX_TURNS = args.child_max_turns
 CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
 PARENT_TOP_K = args.parent_top_k
+if EAES_ROLLBACK_CHECK and (
+        EAES_RERANK_LIMIT != 16 or PARENT_TOP_K != 4
+):
+    raise ValueError(
+        "--eaes_rollback_check requires --eaes_rerank_limit 16 and --parent_top_k 4."
+    )
 if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
     raise ValueError("parent turn limits must satisfy 0 < min <= max.")
 if SEMANTIC_HIERARCHY and PARENT_MAX_TURNS > 10:

@@ -21,6 +21,7 @@ sys.modules["common.utils"] = utils_module
 
 from agent.retrieval import RetrievalMixin
 from common import config
+from eval.retrieval_metrics import retrieval_metrics
 
 
 def _children(count=24):
@@ -68,6 +69,8 @@ class _RetrievalAgent(RetrievalMixin):
     def __init__(self):
         self.memory = _Memory()
         self.memory_controller = _Controller()
+        self.rollback_calls = 0
+        self.retained_rollback_child = None
 
     @staticmethod
     def parse_eaes_query(_question, _question_emb=None):
@@ -85,6 +88,15 @@ class _RetrievalAgent(RetrievalMixin):
     @staticmethod
     def rerank_eaes_candidates(_question, _query_plan, candidates):
         return list(candidates)[:config.EAES_RERANK_LIMIT]
+
+    def apply_eaes_rollback_check(
+            self, _question, _query_plan, candidates, parents, _question_emb
+    ):
+        self.rollback_calls += 1
+        if self.retained_rollback_child is not None:
+            candidates = list(candidates)
+            candidates[-1] = self.retained_rollback_child
+        return candidates, parents, {"enabled": True}
 
 
 class RetrievalTopTwentyTests(unittest.TestCase):
@@ -112,6 +124,60 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         )
         self.assertNotIn("keywords", agent.memory_controller.child_plans[0])
         self.assertIn("D2:1", result["parent_origins"])
+
+    def test_retrieval_only_runs_enabled_rollback_check(self):
+        agent = _RetrievalAgent()
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            result = agent.retrieve_question_evidence("What pet does Caroline own?")
+
+        self.assertEqual(agent.rollback_calls, 1)
+        self.assertTrue(result["rollback_check"]["enabled"])
+        self.assertNotIn("applied", result["rollback_check"])
+        self.assertEqual(
+            len(result["rollback_check"]["first_prefilter"]["child_ids"]), 24
+        )
+        self.assertEqual(
+            len(result["rollback_check"]["first_prefilter"]["parent_ids"]), 4
+        )
+
+    def test_retained_rollback_node_contributes_to_final_hit_and_mrr(self):
+        agent = _RetrievalAgent()
+        agent.retained_rollback_child = {
+            "memory_id": "M_ROLLBACK_HIT",
+            "event_id": "D9:99-1",
+            "origin": "D9:99",
+            "rewrite_content": "Rollback evidence retained in final Top20.",
+            "rank": 16,
+        }
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            result = agent.retrieve_question_evidence("What happened?")
+
+        metrics = retrieval_metrics(
+            ["D9:99"],
+            result["retrieved_origins"],
+            result["retrieved_origin_groups"],
+        )
+        self.assertEqual(result["retrieval_k"], 20)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
+        self.assertEqual(result["retrieved_origin_groups"][15], ["D9:99"])
+        self.assertEqual(metrics["hit"], 1)
+        self.assertEqual(metrics["mrr"], 1 / 16)
 
 
 if __name__ == "__main__":

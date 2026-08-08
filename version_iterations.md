@@ -1,5 +1,32 @@
 # Version Iterations
 
+## v120-20260808
+
+### Goal
+
+Add an opt-in retrieval rollback check that searches outside the first Top20 for complementary child and parent evidence while preserving the final 16-child plus 4-parent reader budget.
+
+### Changes
+
+- Add `--eaes_rollback_check`, requiring semantic hierarchy and the existing `16 child + 4 parent` limits.
+- After first-pass retrieval, give the question, original query plan, and only the 20 first-pass `rewrite_content` strings to an LLM to produce a complementary query plan using the existing schema.
+- Exclude only the exact first-pass node IDs, then independently prefilter 27 child nodes and 3 parent nodes with the complementary plan.
+- Ask one LLM to select three total supplemental nodes from the combined 30-node pool without numerically comparing child and parent scores.
+- Merge first-pass and supplemental nodes into one child pool and one parent pool, then rerank them to exactly 16 children and 4 parents before evidence selection and final reading.
+- Apply the same rollback flow to normal answering, selector-disabled answering, and retrieval-only evaluation; malformed rollback outputs retain the original Top20.
+- Compute retrieval-only Hit/MRR from this final 16-child plus 4-parent set, so a rollback supplement counts only when the final reranker retains it in the reader Top20.
+- Save both query plans, first/rollback prefilter information, supplemental Top3 IDs, and final Top20 IDs inside retrieval-only diagnostics; do not derive or save an `applied` indicator.
+
+### Expected Effect
+
+- Recover relevant memories missed by the first query formulation without increasing final reader context size.
+- Measure whether a complementary second query improves category-4 evidence coverage and downstream answer accuracy.
+- Keep rollback experiments directly comparable to the v118/v119 Top20 baseline.
+
+### Verification
+
+- Add tests for exact first-pass ID exclusion, the 27-child plus 3-parent second pool, total Top3 supplement selection, strict final 16+4 composition, failure fallback, and both answer/retrieval-only entry points.
+
 ## v119-20260808
 
 ### Goal

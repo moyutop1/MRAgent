@@ -1,5 +1,28 @@
 # Version Iterations
 
+## v119-20260808
+
+### Goal
+
+Measure answer error conditioned on complete final-context evidence coverage and align saved answer provenance with the 20 memory nodes actually exposed to the reader.
+
+### Changes
+
+- Save `prediction_context` as at most 20 memory-node provenance entries in reader order rather than flattening parent nodes into all linked child origins.
+- Keep all origins linked to one parent grouped inside one `prediction_context` entry, so a 16-child plus 4-parent reader input remains exactly 20 entries.
+- Report `P(wrong | Hit@20)` overall and by category directly from answer rows, defining Hit@20 as complete coverage of all normalized gold `evidence` origins by the first 20 `prediction_context` nodes.
+- Use all Hit@20 rows as the denominator and Hit@20 rows with LLM-judge score `0` as the numerator, so a larger value indicates a stronger reader-stage bottleneck.
+- Persist `evidence`, `prediction_context`, and `hit_at_20` in newly written judge rows for downstream diagnosis.
+
+### Expected Effect
+
+- Separate answer-stage failures from missing final-context evidence without requiring a separate retrieval-only result file.
+- Prevent expanded parent provenance from making a 20-node reader context appear to contain roughly 40 independently retrieved memories.
+
+### Verification
+
+- Add regression coverage for full-gold rather than any-gold Hit@20, wrong answers inside the Hit@20 denominator, the hard first-20 boundary, and the 16-child plus 4-parent saved context budget.
+
 ## v118-20260807
 
 ### Goal

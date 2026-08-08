@@ -228,6 +228,13 @@ The LLM judge (`eval/judge.py`) grades a prediction `CORRECT`/`WRONG` against th
 answer with `gpt-4o-mini`, using lenient matching (topic overlap; date equivalence for
 temporal questions).
 
+The same command also reports `P(wrong | Hit@20)` overall and by category. Here
+`Hit@20` means that the first 20 memory-node entries in `prediction_context` cover all
+gold `evidence` origins. A Hit@20 row with LLM-judge score `0` remains in the conditional
+denominator and contributes to the numerator. A higher value indicates that more
+questions remain wrong after complete evidence reaches the reader context. Rows without
+normalized gold evidence do not enter this metric.
+
 ---
 
 ## 7. Notes

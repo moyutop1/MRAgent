@@ -31,6 +31,10 @@ class _FakeLLM:
 class _FakeMemory:
     @staticmethod
     def get_eaes_support_origin(memory_ids):
+        if len(memory_ids) == 1 and str(memory_ids[0]).startswith("D1:t"):
+            parent_id = memory_ids[0]
+            index = int(parent_id.rsplit("t", 1)[1])
+            return [parent_id, f"D2:{index}", f"D2:{index + 10}"]
         return list(memory_ids)
 
 
@@ -109,10 +113,15 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", False),
             patch.object(config, "EAES_RERANK_LIMIT", 20),
         ):
-            answer, supports = agent.answer_question_eaes("question", category=1)
+            answer, prediction_context = agent.answer_question_eaes(
+                "question", category=1
+            )
 
         self.assertEqual(answer, "test answer")
-        self.assertEqual(supports, ["M_1"])
+        self.assertEqual(
+            prediction_context,
+            [f"D1:{i}" for i in range(1, 21)],
+        )
         self.assertEqual(agent.selector_calls, 0)
         package = agent.llm.inputs[0]["evidence_package"]
         self.assertNotIn("backup_candidates", agent.llm.inputs[0])
@@ -138,7 +147,9 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
-            agent.answer_question_eaes("question", category=4)
+            _, prediction_context = agent.answer_question_eaes(
+                "question", category=4
+            )
 
         reader_input = agent.llm.inputs[0]
         self.assertEqual(len(reader_input["evidence_package"]["answer_items"]), 16)
@@ -148,6 +159,12 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             + len(reader_input["parent_memories"]),
             20,
         )
+        self.assertEqual(len(prediction_context), 20)
+        self.assertEqual(
+            prediction_context[:16],
+            [f"D1:{i}" for i in range(1, 17)],
+        )
+        self.assertEqual(prediction_context[16], "D2:1,D2:11")
 
     def test_enabled_selector_keeps_existing_path(self):
         agent = _AblationAgent(_candidates())

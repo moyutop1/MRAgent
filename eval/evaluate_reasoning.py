@@ -7,6 +7,11 @@ from pathlib import Path
 from collections import defaultdict
 from eval.evaluation import f1_score
 from eval.judge import evaluate_llm_judge
+from eval.reasoning_metrics import (
+    compute_wrong_given_hit20,
+    format_wrong_given_hit20,
+    hit_at_20,
+)
 
 
 def parse_args():
@@ -70,6 +75,7 @@ def main():
 
     # ---- LLM-judge by category (skip adversarial: scored by string match above) ----
     judge_by_cat = defaultdict(list)
+    judged_rows = []
     out_path = f"result_judge_{args.data}_{args.model}_{args.file}.jsonl"
     with open(out_path, "a", encoding="utf-8") as of:
         for r in data:
@@ -78,9 +84,15 @@ def main():
                 continue
             score = evaluate_llm_judge(r["question"], r["answer"], r["prediction"])
             judge_by_cat[category].append(score)
+            judged_row = {**r, "llm_score": score}
+            judged_rows.append(judged_row)
             of.write(json.dumps({
                 "llm_score": score, "question": r["question"], "prediction": r["prediction"],
                 "reference": r["answer"], "category": category, "sample": r.get("sample"),
+                "question_index": r.get("question_index"),
+                "evidence": r.get("evidence"),
+                "prediction_context": r.get("prediction_context"),
+                "hit_at_20": hit_at_20(judged_row),
             }, ensure_ascii=False, default=list) + "\n")
 
     print("\n== LLM-judge accuracy by category ==")
@@ -91,6 +103,9 @@ def main():
         print(f"  {cat}: n={len(v)} acc={sum(v) / len(v):.4f}")
     if total:
         print(f"  OVERALL: {total_ok}/{total} = {total_ok / total:.4f}")
+
+    conditional = compute_wrong_given_hit20(judged_rows)
+    print("\n" + format_wrong_given_hit20(conditional))
 
 
 if __name__ == "__main__":

@@ -651,6 +651,68 @@ class EAESMixin:
             "rank": candidate.get("rank"),
         }
 
+    def _eaes_prediction_context(self, reader_input, candidates, limit=20):
+        """Return one provenance entry per unique memory node shown to the reader."""
+        visible_child_ids = []
+
+        def add_child(memory_id):
+            if memory_id and memory_id not in visible_child_ids:
+                visible_child_ids.append(memory_id)
+
+        package = (reader_input or {}).get("evidence_package") or {}
+        for item in self._as_list(package.get("answer_items")):
+            if not isinstance(item, dict):
+                continue
+            for evidence in self._as_list(item.get("evidence")):
+                if isinstance(evidence, dict):
+                    add_child(evidence.get("memory_id"))
+        for evidence in self._as_list(
+                (reader_input or {}).get("backup_candidates")):
+            if isinstance(evidence, dict):
+                add_child(evidence.get("memory_id"))
+
+        # Preserve reranker order even when the selector emitted answer items
+        # in a different grouping order.
+        visible_set = set(visible_child_ids)
+        ordered_child_ids = [
+            candidate.get("memory_id")
+            for candidate in candidates or []
+            if candidate.get("memory_id") in visible_set
+        ]
+        ordered_child_ids.extend(
+            memory_id for memory_id in visible_child_ids
+            if memory_id not in ordered_child_ids
+        )
+        parent_ids = [
+            parent.get("parent_id")
+            for parent in self._as_list(
+                (reader_input or {}).get("parent_memories"))
+            if isinstance(parent, dict) and parent.get("parent_id")
+        ]
+        memory_ids = (ordered_child_ids + parent_ids)[:limit]
+        candidate_by_id = {
+            candidate.get("memory_id"): candidate
+            for candidate in candidates or []
+            if candidate.get("memory_id")
+        }
+
+        context = []
+        for memory_id in memory_ids:
+            candidate = candidate_by_id.get(memory_id)
+            origin = candidate.get("origin") if candidate else None
+            if origin:
+                context.append(str(origin))
+                continue
+            expanded = self.memory.get_eaes_support_origin([memory_id])
+            # A parent can expand to many child origins. Keep them grouped in
+            # one string so prediction_context still has one entry per node.
+            origins = [
+                str(value) for value in self._as_list(expanded)
+                if value and value != memory_id
+            ]
+            context.append(",".join(origins) if origins else str(memory_id))
+        return context
+
     def select_eaes_evidence(self, question, query_plan, candidates):
         selection_input = {
             "question": question,
@@ -744,6 +806,7 @@ class EAESMixin:
             ],
             model=config.RE_MODEL
         )
+        reader_input = final_input
         if not isinstance(answer_obj, dict):
             evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
             fallback_input = {
@@ -752,6 +815,7 @@ class EAESMixin:
                     evidence_package
                 ),
             }
+            reader_input = fallback_input
             answer_obj = self.llm.chat_text(
                 messages=[
                     {"role": "system", "content": final_answer_prompt},
@@ -760,12 +824,9 @@ class EAESMixin:
                 model=config.RE_MODEL
             )
             if not isinstance(answer_obj, dict):
-                fallback_supports = [c.get("memory_id") for c in candidates[:3]]
-                fallback_supports.extend(
-                    parent.get("parent_id") for parent in parent_candidates
+                return "no information available", self._eaes_prediction_context(
+                    reader_input, candidates
                 )
-                return "no information available", self.memory.get_eaes_support_origin(
-                    fallback_supports)
         supports = self._as_list(answer_obj.get("supports"))
         if not supports:
             for item in self._as_list(evidence_package.get("answer_items")):
@@ -785,6 +846,6 @@ class EAESMixin:
         if use_anchored_temporal_style:
             answer = self._eaes_temporal_answer(
                 answer, supports, evidence_package, candidates)
-        return answer, self.memory.get_eaes_support_origin(supports)
+        return answer, self._eaes_prediction_context(reader_input, candidates)
 
 

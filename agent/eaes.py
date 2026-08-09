@@ -601,6 +601,47 @@ class EAESMixin:
             query_question, out, "rollback_gap"
         )
 
+    def assess_eaes_evidence_sufficiency(
+            self, question, query_plan, child_candidates, parent_candidates
+    ):
+        """Return a validated judgment of whether first-pass evidence is enough."""
+        payload = {
+            "question": self._eaes_query_question(question),
+            "query_plan": query_plan,
+            "current_top_rewrite_contents": [
+                candidate.get("rewrite_content")
+                for candidate in list(child_candidates or [])
+                + list(parent_candidates or [])
+                if candidate.get("rewrite_content")
+            ],
+        }
+        out = self.llm.chat_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": Prompts.EAES_EVIDENCE_SUFFICIENCY_PROMPT,
+                },
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            model=config.RE_MODEL,
+        )
+        if not isinstance(out, dict) or not isinstance(
+                out.get("evidence_sufficient"), bool
+        ):
+            return None
+        missing_information = out.get("missing_information")
+        if not isinstance(missing_information, list):
+            missing_information = []
+        return {
+            "evidence_sufficient": out["evidence_sufficient"],
+            "reason": str(out.get("reason") or "").strip(),
+            "missing_information": [
+                str(item).strip()
+                for item in missing_information
+                if str(item).strip()
+            ],
+        }
+
     def select_eaes_rollback_supplements(
             self,
             question,
@@ -833,6 +874,16 @@ class EAESMixin:
                 ],
             },
         }
+        sufficiency = self.assess_eaes_evidence_sufficiency(
+            question, query_plan, child_candidates, parent_candidates
+        )
+        if not isinstance(sufficiency, dict):
+            metadata["failure_reason"] = "invalid_evidence_sufficiency_assessment"
+            return child_candidates, parent_candidates, metadata
+        metadata["evidence_sufficiency"] = sufficiency
+        if sufficiency["evidence_sufficient"]:
+            return child_candidates, parent_candidates, metadata
+
         rollback_query_plan = self.build_eaes_rollback_query_plan(
             question, query_plan, child_candidates, parent_candidates
         )

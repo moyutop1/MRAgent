@@ -87,6 +87,14 @@ def _rollback_plan():
     }
 
 
+def _insufficient_assessment():
+    return {
+        "evidence_sufficient": False,
+        "reason": "The requested pet is not identified.",
+        "missing_information": ["Caroline's pet"],
+    }
+
+
 class EAESRollbackCheckTests(unittest.TestCase):
     def test_excludes_first_top20_and_preserves_sixteen_plus_four(self):
         initial_children = _children("C", 16)
@@ -96,6 +104,7 @@ class EAESRollbackCheckTests(unittest.TestCase):
         ]
         final_parent_ids = ["RP1", "P1", "P2", "P3"]
         agent = _RollbackAgent([
+            _insufficient_assessment(),
             _rollback_plan(),
             {
                 "ranked_nodes": [
@@ -135,6 +144,9 @@ class EAESRollbackCheckTests(unittest.TestCase):
         self.assertEqual(len(children), 16)
         self.assertEqual(len(parents), 4)
         self.assertNotIn("applied", metadata)
+        self.assertFalse(
+            metadata["evidence_sufficiency"]["evidence_sufficient"]
+        )
         self.assertEqual(metadata["first_query_plan"]["keywords"], ["pet"])
         self.assertEqual(
             metadata["rollback_query_plan"]["keywords"], ["animal companion"]
@@ -169,17 +181,27 @@ class EAESRollbackCheckTests(unittest.TestCase):
             {f"P{index}" for index in range(1, 5)},
         )
 
-        planner_input = agent.llm.inputs[0]
+        gate_input = agent.llm.inputs[0]
+        self.assertEqual(
+            set(gate_input),
+            {"question", "query_plan", "current_top_rewrite_contents"},
+        )
+        self.assertEqual(len(gate_input["current_top_rewrite_contents"]), 20)
+        self.assertTrue(all(
+            isinstance(value, str)
+            for value in gate_input["current_top_rewrite_contents"]
+        ))
+        planner_input = agent.llm.inputs[1]
         self.assertNotIn("current_top_memories", planner_input)
         self.assertEqual(len(planner_input["current_top_rewrite_contents"]), 20)
         self.assertTrue(all(
             isinstance(value, str)
             for value in planner_input["current_top_rewrite_contents"]
         ))
-        supplement_input = agent.llm.inputs[1]
+        supplement_input = agent.llm.inputs[2]
         self.assertEqual(len(supplement_input["child_candidates"]), 27)
         self.assertEqual(len(supplement_input["parent_candidates"]), 3)
-        final_input = agent.llm.inputs[2]
+        final_input = agent.llm.inputs[3]
         self.assertEqual(len(final_input["child_candidates"]), 18)
         self.assertEqual(len(final_input["parent_candidates"]), 5)
         self.assertNotIn("first_pass_child_candidates", final_input)
@@ -188,7 +210,7 @@ class EAESRollbackCheckTests(unittest.TestCase):
     def test_invalid_query_plan_keeps_first_pass_top20(self):
         initial_children = _children("C", 16)
         initial_parents = _parents("P", 4)
-        agent = _RollbackAgent(["invalid plan"])
+        agent = _RollbackAgent([_insufficient_assessment(), "invalid plan"])
 
         with patch.object(config, "EAES_SEMANTIC_SCORE", False):
             children, parents, metadata = agent.apply_eaes_rollback_check(
@@ -205,10 +227,59 @@ class EAESRollbackCheckTests(unittest.TestCase):
         self.assertEqual(agent.memory_controller.child_calls, [])
         self.assertEqual(agent.memory_controller.parent_calls, [])
 
+    def test_sufficient_evidence_skips_rollback_and_keeps_first_pass_top20(self):
+        initial_children = _children("C", 16)
+        initial_parents = _parents("P", 4)
+        agent = _RollbackAgent([{
+            "evidence_sufficient": True,
+            "reason": "The memories directly identify Caroline's pet.",
+            "missing_information": [],
+        }])
+
+        children, parents, metadata = agent.apply_eaes_rollback_check(
+            "What pet does Caroline own?",
+            {"query_attributes": ["profile.pet"], "keywords": ["pet"]},
+            initial_children,
+            initial_parents,
+        )
+
+        self.assertIs(children, initial_children)
+        self.assertIs(parents, initial_parents)
+        self.assertTrue(
+            metadata["evidence_sufficiency"]["evidence_sufficient"]
+        )
+        self.assertNotIn("rollback_query_plan", metadata)
+        self.assertNotIn("applied", metadata)
+        self.assertEqual(len(agent.llm.inputs), 1)
+        self.assertEqual(agent.memory_controller.child_calls, [])
+        self.assertEqual(agent.memory_controller.parent_calls, [])
+
+    def test_invalid_sufficiency_assessment_conservatively_skips_rollback(self):
+        initial_children = _children("C", 16)
+        initial_parents = _parents("P", 4)
+        agent = _RollbackAgent([{"evidence_sufficient": "yes"}])
+
+        children, parents, metadata = agent.apply_eaes_rollback_check(
+            "What pet does Caroline own?",
+            {"query_attributes": ["profile.pet"], "keywords": ["pet"]},
+            initial_children,
+            initial_parents,
+        )
+
+        self.assertIs(children, initial_children)
+        self.assertIs(parents, initial_parents)
+        self.assertEqual(
+            metadata["failure_reason"],
+            "invalid_evidence_sufficiency_assessment",
+        )
+        self.assertEqual(agent.memory_controller.child_calls, [])
+        self.assertEqual(agent.memory_controller.parent_calls, [])
+
     def test_incomplete_final_rerank_keeps_first_pass_top20(self):
         initial_children = _children("C", 16)
         initial_parents = _parents("P", 4)
         agent = _RollbackAgent([
+            _insufficient_assessment(),
             _rollback_plan(),
             {
                 "ranked_nodes": [

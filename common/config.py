@@ -34,9 +34,10 @@ parser.add_argument(
     "--eaes_rollback_check",
     action="store_true",
     help=(
-        "After the first 16-child + 4-parent retrieval, build a complementary query plan, "
-        "select three candidates from 27 unseen children plus 3 unseen parents, and rerank "
-        "the merged pool back to the original 16 + 4 budget."
+        "After the first 16-child + 4-parent retrieval, assess whether its evidence is "
+        "sufficient. Only when insufficient, build a complementary query plan, select "
+        "three candidates from 27 unseen children plus 3 unseen parents, and rerank the "
+        "merged pool back to the original 16 + 4 budget."
     ),
 )
 parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")

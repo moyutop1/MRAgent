@@ -368,21 +368,6 @@ Schema:
   "ranked_memory_ids": ["M_D1_2_1"]
 }"""
 
-    EAES_EVIDENCE_SUFFICIENCY_PROMPT = """You decide whether the first-pass Top20 memory rewrites contain sufficient evidence to answer the question. Only output valid JSON.
-Judge the memories as one evidence set. Do not classify the question, generate a final answer, propose a new query, or use outside knowledge.
-Evidence is sufficient only when the set covers the facts and relations required to support a complete answer:
-- A direct fact question needs evidence that fills the requested answer slot, not merely the same entity or topic.
-- A multi-step, comparison, or list question needs all necessary supporting facts; no single memory must answer it alone.
-- Temporal and state questions need evidence compatible with the requested time and lifecycle. A resolvable timeline is sufficient; an unresolved conflict or a missing time anchor is not.
-- Irrelevant or redundant memories do not make an otherwise complete evidence set insufficient.
-If evidence is insufficient, describe only what evidence is missing without guessing its value.
-Schema:
-{
-  "evidence_sufficient": true,
-  "reason": "short evidence-based reason",
-  "missing_information": []
-}"""
-
     EAES_ROLLBACK_QUERY_PROMPT = """The input also contains the current query plan and only the rewrite contents of the 20 memories retrieved in the first pass.
 Use those rewrite contents only to identify answer-relevant evidence that may still be missing. Produce one replacement query plan that searches for complementary evidence outside the current memories.
 Keep the same query-plan schema and constraints. Do not add fields, answer the question, assume that a retrieved memory is true, or put a guessed answer into a query attribute.

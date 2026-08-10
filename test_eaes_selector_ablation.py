@@ -15,14 +15,15 @@ from common import config
 
 
 class _FakeLLM:
-    def __init__(self):
+    def __init__(self, answer="test answer"):
         self.inputs = []
+        self.answer = answer
 
     def chat_text(self, messages, **_kwargs):
         self.inputs.append(json.loads(messages[-1]["content"]))
         return {
             "mode": "answer",
-            "answer": "test answer",
+            "answer": self.answer,
             "supports": ["M_1"],
             "confidence": 1.0,
         }
@@ -61,8 +62,8 @@ class _FakeController:
 
 
 class _AblationAgent(EAESMixin):
-    def __init__(self, candidates):
-        self.llm = _FakeLLM()
+    def __init__(self, candidates, reader_answer="test answer"):
+        self.llm = _FakeLLM(reader_answer)
         self.memory = _FakeMemory()
         self.memory_controller = _FakeController(candidates)
         self.selector_calls = 0
@@ -218,7 +219,9 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         )
 
     def test_answer_path_runs_enabled_rollback_check_with_selector_disabled(self):
-        agent = _AblationAgent(_candidates(30))
+        agent = _AblationAgent(
+            _candidates(30), reader_answer="no information available"
+        )
 
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),

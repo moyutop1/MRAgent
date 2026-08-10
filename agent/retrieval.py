@@ -255,15 +255,49 @@ class RetrievalMixin:
             if getattr(config, "EAES_ROLLBACK_CHECK", False):
                 first_parent_candidates = list(parent_candidates)
                 try:
-                    candidates, parent_candidates, rollback_metadata = (
-                        self.apply_eaes_rollback_check(
-                            question,
-                            query_plan,
-                            candidates,
-                            parent_candidates,
-                            question_emb,
+                    _, _, internal_raw_answer = self._read_eaes_candidates(
+                        question,
+                        child_query_plan,
+                        candidates,
+                        parent_candidates,
+                        category,
+                        lm_current_date,
+                    )
+                    returned_no_information = (
+                        self._eaes_is_no_information_answer(
+                            internal_raw_answer
                         )
                     )
+                    if returned_no_information:
+                        candidates, parent_candidates, rollback_metadata = (
+                            self.apply_eaes_rollback_check(
+                                question,
+                                query_plan,
+                                candidates,
+                                parent_candidates,
+                                question_emb,
+                            )
+                        )
+                    else:
+                        rollback_metadata = {
+                            "enabled": True,
+                            "first_query_plan": query_plan,
+                            "first_pass": {
+                                "child_ids": [
+                                    candidate.get("memory_id")
+                                    for candidate in candidates
+                                ],
+                                "parent_ids": [
+                                    candidate.get("parent_id")
+                                    for candidate in parent_candidates
+                                ],
+                            },
+                        }
+                    rollback_metadata["reader_gate"] = {
+                        "returned_no_information_available": (
+                            returned_no_information
+                        ),
+                    }
                     rollback_metadata["first_prefilter"] = {
                         "child_ids": [
                             candidate.get("memory_id")
@@ -276,7 +310,8 @@ class RetrievalMixin:
                     }
                 except Exception:
                     logger.warning(
-                        "EAES rollback check failed; retaining first-pass Top20.",
+                        "EAES rollback reader gate/check failed; retaining "
+                        "first-pass Top20.",
                         exc_info=True,
                     )
                     rollback_metadata = {
@@ -292,7 +327,7 @@ class RetrievalMixin:
                                 for candidate in first_parent_candidates
                             ],
                         },
-                        "failure_reason": "rollback_exception",
+                        "failure_reason": "reader_gate_or_rollback_exception",
                     }
             event_ids = self._unique_keep_order([c.get("event_id") for c in candidates])
             child_origins = self._unique_keep_order(

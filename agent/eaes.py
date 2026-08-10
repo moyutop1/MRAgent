@@ -601,47 +601,6 @@ class EAESMixin:
             query_question, out, "rollback_gap"
         )
 
-    def assess_eaes_evidence_sufficiency(
-            self, question, query_plan, child_candidates, parent_candidates
-    ):
-        """Return a validated judgment of whether first-pass evidence is enough."""
-        payload = {
-            "question": self._eaes_query_question(question),
-            "query_plan": query_plan,
-            "current_top_rewrite_contents": [
-                candidate.get("rewrite_content")
-                for candidate in list(child_candidates or [])
-                + list(parent_candidates or [])
-                if candidate.get("rewrite_content")
-            ],
-        }
-        out = self.llm.chat_text(
-            messages=[
-                {
-                    "role": "system",
-                    "content": Prompts.EAES_EVIDENCE_SUFFICIENCY_PROMPT,
-                },
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            model=config.RE_MODEL,
-        )
-        if not isinstance(out, dict) or not isinstance(
-                out.get("evidence_sufficient"), bool
-        ):
-            return None
-        missing_information = out.get("missing_information")
-        if not isinstance(missing_information, list):
-            missing_information = []
-        return {
-            "evidence_sufficient": out["evidence_sufficient"],
-            "reason": str(out.get("reason") or "").strip(),
-            "missing_information": [
-                str(item).strip()
-                for item in missing_information
-                if str(item).strip()
-            ],
-        }
-
     def select_eaes_rollback_supplements(
             self,
             question,
@@ -874,16 +833,6 @@ class EAESMixin:
                 ],
             },
         }
-        sufficiency = self.assess_eaes_evidence_sufficiency(
-            question, query_plan, child_candidates, parent_candidates
-        )
-        if not isinstance(sufficiency, dict):
-            metadata["failure_reason"] = "invalid_evidence_sufficiency_assessment"
-            return child_candidates, parent_candidates, metadata
-        metadata["evidence_sufficiency"] = sufficiency
-        if sufficiency["evidence_sufficient"]:
-            return child_candidates, parent_candidates, metadata
-
         rollback_query_plan = self.build_eaes_rollback_query_plan(
             question, query_plan, child_candidates, parent_candidates
         )
@@ -1150,37 +1099,16 @@ class EAESMixin:
             return self._fallback_eaes_package(candidates)
         return enriched
 
-    def answer_question_eaes(self, question, category=0, question_emb=None, lm_current_date=None):
-        query_plan = self.parse_eaes_query(question, question_emb)
-        child_query_plan = self._eaes_child_query_plan(query_plan)
-        parent_candidates = []
-        if getattr(config, "SEMANTIC_HIERARCHY", False):
-            parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
-                query_plan, question_emb, limit=config.PARENT_TOP_K
-            )
-        embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-            child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
-        if not embedding_candidates and not parent_candidates:
-            return "no information available", []
-        candidates = self.rerank_eaes_candidates(
-            question, child_query_plan, embedding_candidates
-        ) if embedding_candidates else []
-        if not candidates and not parent_candidates:
-            return "no information available", []
-        if getattr(config, "EAES_ROLLBACK_CHECK", False):
-            try:
-                candidates, parent_candidates, _ = self.apply_eaes_rollback_check(
-                    question,
-                    query_plan,
-                    candidates,
-                    parent_candidates,
-                    question_emb,
-                )
-            except Exception:
-                logger.warning(
-                    "EAES rollback check failed; retaining first-pass Top20.",
-                    exc_info=True,
-                )
+    def _read_eaes_candidates(
+            self,
+            question,
+            child_query_plan,
+            candidates,
+            parent_candidates,
+            category=0,
+            lm_current_date=None,
+    ):
+        """Generate one reader answer from an already selected child/parent set."""
         if config.DISABLE_EVIDENCE_SELECTOR:
             evidence_package = self._fallback_eaes_package(
                 candidates,
@@ -1243,9 +1171,10 @@ class EAESMixin:
                 model=config.RE_MODEL
             )
             if not isinstance(answer_obj, dict):
-                return "no information available", self._eaes_prediction_context(
+                context = self._eaes_prediction_context(
                     reader_input, candidates
                 )
+                return "no information available", context, None
         supports = self._as_list(answer_obj.get("supports"))
         if not supports:
             for item in self._as_list(evidence_package.get("answer_items")):
@@ -1261,10 +1190,111 @@ class EAESMixin:
             parent_id = parent.get("parent_id")
             if parent_id and parent_id not in supports:
                 supports.append(parent_id)
-        answer = answer_obj.get("answer", "no information available")
+        raw_answer = answer_obj.get("answer")
+        answer = (
+            raw_answer
+            if raw_answer is not None
+            else "no information available"
+        )
         if use_anchored_temporal_style:
             answer = self._eaes_temporal_answer(
                 answer, supports, evidence_package, candidates)
-        return answer, self._eaes_prediction_context(reader_input, candidates)
+        return (
+            answer,
+            self._eaes_prediction_context(reader_input, candidates),
+            raw_answer,
+        )
+
+    @staticmethod
+    def _eaes_is_no_information_answer(answer):
+        text = re.sub(r"\s+", " ", str(answer or "")).strip().lower()
+        text = text.strip("\"'`")
+        text = re.sub(r"[.!?]+$", "", text).strip()
+        return text == "no information available"
+
+    @staticmethod
+    def _eaes_reader_node_ids(child_candidates, parent_candidates):
+        return (
+            tuple(
+                candidate.get("memory_id")
+                for candidate in child_candidates or []
+            ),
+            tuple(
+                candidate.get("parent_id")
+                for candidate in parent_candidates or []
+            ),
+        )
+
+    def answer_question_eaes(
+            self, question, category=0, question_emb=None,
+            lm_current_date=None
+    ):
+        query_plan = self.parse_eaes_query(question, question_emb)
+        child_query_plan = self._eaes_child_query_plan(query_plan)
+        parent_candidates = []
+        if getattr(config, "SEMANTIC_HIERARCHY", False):
+            parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
+                query_plan, question_emb, limit=config.PARENT_TOP_K
+            )
+        embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
+            child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+        if not embedding_candidates and not parent_candidates:
+            return "no information available", []
+        candidates = self.rerank_eaes_candidates(
+            question, child_query_plan, embedding_candidates
+        ) if embedding_candidates else []
+        if not candidates and not parent_candidates:
+            return "no information available", []
+
+        first_answer, first_context, first_raw_answer = (
+            self._read_eaes_candidates(
+                question,
+                child_query_plan,
+                candidates,
+                parent_candidates,
+                category,
+                lm_current_date,
+            )
+        )
+        if (
+                not getattr(config, "EAES_ROLLBACK_CHECK", False)
+                or not self._eaes_is_no_information_answer(first_raw_answer)
+        ):
+            return first_answer, first_context
+
+        first_node_ids = self._eaes_reader_node_ids(
+            candidates, parent_candidates
+        )
+        try:
+            rollback_children, rollback_parents, _ = (
+                self.apply_eaes_rollback_check(
+                    question,
+                    query_plan,
+                    candidates,
+                    parent_candidates,
+                    question_emb,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "EAES rollback check failed after a no-information answer; "
+                "retaining the first-pass answer and Top20.",
+                exc_info=True,
+            )
+            return first_answer, first_context
+
+        if self._eaes_reader_node_ids(
+                rollback_children, rollback_parents
+        ) == first_node_ids:
+            return first_answer, first_context
+        second_answer, second_context, _ = self._read_eaes_candidates(
+            question,
+            child_query_plan,
+            rollback_children,
+            rollback_parents,
+            category,
+            lm_current_date,
+        )
+        return second_answer, second_context
 
 

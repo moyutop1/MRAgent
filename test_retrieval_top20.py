@@ -19,6 +19,7 @@ utils_module = types.ModuleType("common.utils")
 utils_module.topk_answers_by_similarity = lambda *_args, **_kwargs: ([], [], [], [])
 sys.modules["common.utils"] = utils_module
 
+from agent.eaes import EAESMixin
 from agent.retrieval import RetrievalMixin
 from common import config
 from eval.retrieval_metrics import retrieval_metrics
@@ -65,12 +66,14 @@ class _Controller:
         } for index in range(1, limit + 1)]
 
 
-class _RetrievalAgent(RetrievalMixin):
+class _RetrievalAgent(EAESMixin, RetrievalMixin):
     def __init__(self):
         self.memory = _Memory()
         self.memory_controller = _Controller()
         self.rollback_calls = 0
         self.retained_rollback_child = None
+        self.reader_answer = "no information available"
+        self.reader_calls = 0
 
     @staticmethod
     def parse_eaes_query(_question, _question_emb=None):
@@ -88,6 +91,13 @@ class _RetrievalAgent(RetrievalMixin):
     @staticmethod
     def rerank_eaes_candidates(_question, _query_plan, candidates):
         return list(candidates)[:config.EAES_RERANK_LIMIT]
+
+    def _read_eaes_candidates(
+            self, _question, _child_query_plan, _candidates, _parents,
+            _category=0, _lm_current_date=None
+    ):
+        self.reader_calls += 1
+        return self.reader_answer, [], self.reader_answer
 
     def apply_eaes_rollback_check(
             self, _question, _query_plan, candidates, parents, _question_emb
@@ -139,14 +149,46 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
 
         self.assertEqual(agent.rollback_calls, 1)
+        self.assertEqual(agent.reader_calls, 1)
         self.assertTrue(result["rollback_check"]["enabled"])
         self.assertNotIn("applied", result["rollback_check"])
+        self.assertTrue(
+            result["rollback_check"]["reader_gate"][
+                "returned_no_information_available"
+            ]
+        )
         self.assertEqual(
             len(result["rollback_check"]["first_prefilter"]["child_ids"]), 24
         )
         self.assertEqual(
             len(result["rollback_check"]["first_prefilter"]["parent_ids"]), 4
         )
+
+    def test_retrieval_only_discards_normal_internal_answer_and_skips_rollback(self):
+        agent = _RetrievalAgent()
+        agent.reader_answer = "Caroline owns a dog."
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            result = agent.retrieve_question_evidence(
+                "What pet does Caroline own?"
+            )
+
+        self.assertEqual(agent.reader_calls, 1)
+        self.assertEqual(agent.rollback_calls, 0)
+        self.assertFalse(
+            result["rollback_check"]["reader_gate"][
+                "returned_no_information_available"
+            ]
+        )
+        self.assertNotIn("answer", result)
+        self.assertNotIn("prediction", result)
 
     def test_retained_rollback_node_contributes_to_final_hit_and_mrr(self):
         agent = _RetrievalAgent()

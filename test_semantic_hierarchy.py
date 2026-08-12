@@ -68,6 +68,13 @@ def _dialogue(turn_count=5):
     )
 
 
+def _dialogue_with_prefix(prefix, turn_count):
+    return "time:2023-05-08\n" + "\n".join(
+        f"dia_id:{prefix}:{index} speaker:turn {index}"
+        for index in range(1, turn_count + 1)
+    )
+
+
 class SemanticHierarchyTests(unittest.TestCase):
     def test_parent_retry_explains_required_split_for_twenty_one_turns(self):
         turns = parse_session_turns(_dialogue(21))
@@ -92,6 +99,39 @@ class SemanticHierarchyTests(unittest.TestCase):
         repair_payload = llm.calls[1][1]["content"]
         self.assertIn("must return at least 3 parent segments", repair_payload)
         self.assertIn('"end_origin": "D1:21"', repair_payload)
+
+    def test_parent_retry_reports_exact_inclusive_invalid_range(self):
+        turns = parse_session_turns(_dialogue_with_prefix("D13", 37))
+        llm = SequenceLLM([
+            {"parent_segments": [
+                {"start_origin": "D13:1", "end_origin": "D13:7"},
+                {"start_origin": "D13:8", "end_origin": "D13:14"},
+                {"start_origin": "D13:15", "end_origin": "D13:20"},
+                {"start_origin": "D13:21", "end_origin": "D13:26"},
+                {"start_origin": "D13:27", "end_origin": "D13:37"},
+            ]},
+            {"parent_segments": [
+                {"start_origin": "D13:1", "end_origin": "D13:7"},
+                {"start_origin": "D13:8", "end_origin": "D13:14"},
+                {"start_origin": "D13:15", "end_origin": "D13:20"},
+                {"start_origin": "D13:21", "end_origin": "D13:26"},
+                {"start_origin": "D13:27", "end_origin": "D13:31"},
+                {"start_origin": "D13:32", "end_origin": "D13:37"},
+            ]},
+        ])
+
+        parents = plan_parent_segments(llm, turns, "2023-05-08")
+
+        self.assertEqual(len(parents), 6)
+        repair_system = llm.calls[1][0]["content"]
+        repair_payload = llm.calls[1][1]["content"]
+        for repair_text in (repair_system, repair_payload):
+            self.assertIn("D13:27 through D13:37", repair_text)
+            self.assertIn("37 - 27 + 1 = 11 turns", repair_text)
+            self.assertIn("hard maximum of 10", repair_text)
+            self.assertIn("split this exact range into at least 2", repair_text)
+        self.assertIn("Do not return that invalid boundary unchanged", repair_system)
+        self.assertIn("Do not repeat it unchanged", repair_payload)
 
     def test_independent_plans_and_first_origin_parent_ownership(self):
         turns = parse_session_turns(_dialogue(6))

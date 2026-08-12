@@ -56,14 +56,22 @@ def _request_complete_plan(llm, system_prompt, user_prompt, validate, label):
         request = user_prompt
         if attempt:
             prompt += (
-                "\nThe previous complete plan was invalid. Return the entire plan again. "
+                "\nThe previous complete plan was invalid. Return the entire plan "
+                "again. The validation error below identifies the exact invalid "
+                "segment or boundary. Do not return that invalid boundary unchanged. "
+                "Recalculate every segment length with the inclusive formula "
+                "end_position - start_position + 1 before responding. "
                 f"Validation error: {last_error}"
             )
             request += (
                 "\n\nREPAIR_REQUIRED:\n"
                 f"Validation error: {last_error}\n"
-                "The following was the invalid complete plan. Correct its boundaries "
-                "and return the entire plan, not only the changed segment:\n"
+                "Correct the exact segment or boundary identified above. Do not "
+                "repeat it unchanged. After repairing it, verify that every segment "
+                "satisfies all minimum/maximum limits and that the complete session "
+                "is still covered contiguously with no gaps or overlap. Return the "
+                "entire plan, not only the changed segment. The following was the "
+                "invalid complete plan:\n"
                 f"{json.dumps(last_output, ensure_ascii=False)}"
             )
         output = llm.chat_text(
@@ -118,22 +126,38 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
         start = origin_to_index[start_origin]
         end = origin_to_index[end_origin]
         if start != expected_start or end < start:
-            return False, "parent segments must cover the session contiguously in order", None
+            expected_origin = turns[expected_start].origin
+            return False, (
+                f"parent segment {number} has invalid boundaries: received "
+                f"{start_origin} (position {start + 1}) through {end_origin} "
+                f"(position {end + 1}), but this segment must start at "
+                f"{expected_origin} (position {expected_start + 1}) to preserve "
+                "contiguous ordered coverage; end position must not precede start "
+                "position"
+            ), None
         length = end - start + 1
         is_final = number == len(raw_segments)
         if length > config.PARENT_MAX_TURNS:
             required_parts = math.ceil(length / config.PARENT_MAX_TURNS)
             return False, (
-                f"parent segment {number} ({start_origin} through {end_origin}, "
-                f"positions {start + 1}-{end + 1}) contains {length} turns; "
-                f"the hard maximum is {config.PARENT_MAX_TURNS}, so this range must "
-                f"be split into at least {required_parts} segments"
+                f"parent segment {number} has the invalid range {start_origin} "
+                f"through {end_origin}. Its inclusive positions are {start + 1} "
+                f"through {end + 1}, so its actual length is "
+                f"{end + 1} - {start + 1} + 1 = {length} turns. This exceeds "
+                f"the hard maximum of {config.PARENT_MAX_TURNS}. Do not return "
+                f"{start_origin} through {end_origin} unchanged; split this exact "
+                f"range into at least {required_parts} contiguous segments, each "
+                f"containing at most {config.PARENT_MAX_TURNS} turns"
             ), None
         if length < config.PARENT_MIN_TURNS and not is_final:
             return False, (
-                f"non-final parent segment {number} ({start_origin} through "
-                f"{end_origin}) contains {length} turns; the hard minimum is "
-                f"{config.PARENT_MIN_TURNS}"
+                f"non-final parent segment {number} has the invalid range "
+                f"{start_origin} through {end_origin}. Its inclusive positions are "
+                f"{start + 1} through {end + 1}, so its actual length is "
+                f"{end + 1} - {start + 1} + 1 = {length} turns. The hard "
+                f"minimum is {config.PARENT_MIN_TURNS}; move this segment's end "
+                "boundary or an adjacent boundary so every non-final segment meets "
+                "the minimum"
             ), None
         context_start = max(0, start - config.PARENT_CONTEXT_TURNS)
         parents.append(ParentSegment(
@@ -145,7 +169,12 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
         ))
         expected_start = end + 1
     if expected_start != len(turns):
-        return False, "parent segments do not cover the end of the session", None
+        return False, (
+            f"the complete plan stops before {turns[expected_start].origin} "
+            f"(position {expected_start + 1}); it must continue through "
+            f"{turns[-1].origin} (position {len(turns)}) with contiguous legal "
+            "segments"
+        ), None
     return True, "", parents
 
 

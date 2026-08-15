@@ -124,35 +124,34 @@ Schema:
     def extract_parent_segment_prompt(cls, payload: str) -> str:
         return cls.PARENT_SEGMENT_PROMPT.format(PAYLOAD=payload)
 
-    CHILD_SEGMENT_SYSTEM_PROMPT = """You plan atomic, answer-bearing child semantic segments for one dialogue session. Only output valid JSON.
+    CHILD_WINDOW_SYSTEM_PROMPT = """You divide one complete dialogue session into semantically closed child windows. Only output valid JSON.
 Rules:
-- Return the complete child plan for the entire session in one response.
+- Return the complete window plan for the entire session in one response.
 - Parent planning is independent and is not provided here.
-- Each child segment describes exactly one fact, event, plan, state, preference, relationship, decision, task result, or image/caption fact.
-- source_origins must contain the real dia_ids whose text supplies that semantic unit, in dialogue order.
-- The raw turn span from the first through last source origin must not exceed maximum_turns.
-- Several turns may form one semantic unit. One turn containing several independent facts may appear in several child segments with different focus values.
-- Keep child segments ordered by their first source origin. Do not duplicate an identical source_origins plus focus pair.
-- Omit greetings, acknowledgements, boilerplate, generic advice, repeated confirmations, and other low-value turns rather than creating child segments for them.
-- Copy source origins exactly. Do not rewrite the memories and do not invent IDs.
+- Child windows must cover every input turn exactly once, in dialogue order, with no gaps or core overlap.
+- A window may contain one or more consecutive turns. Choose its end boundary from semantic closure, topic continuity, completed question/answer structure, resolved references, temporal qualifiers, and completed causal explanations.
+- Avoid cutting an unresolved question/answer pair, pronoun reference, temporal qualifier, or causal explanation when a legal alternative exists.
+- Every window must contain at most maximum_turns turns. Hard length limits override semantic closure.
+- Return at least minimum_segment_count windows. Returning the complete session as one window is invalid when total_turns exceeds maximum_turns.
+- Copy start_origin and end_origin exactly from the input. Do not generate window IDs, summaries, focuses, source lists, or memories.
 Schema:
 {
   "child_segments": [
     {
-      "source_origins": ["D1:3", "D1:5"],
-      "focus": "Caroline was inspired by transgender stories at the support group"
+      "start_origin": "D1:1",
+      "end_origin": "D1:5"
     }
   ]
 }"""
 
-    CHILD_SEGMENT_PROMPT = """SESSION_AND_LIMITS:
+    CHILD_WINDOW_PROMPT = """SESSION_AND_LIMITS:
 <<<
 {PAYLOAD}
 >>>"""
 
     @classmethod
-    def extract_child_segment_prompt(cls, payload: str) -> str:
-        return cls.CHILD_SEGMENT_PROMPT.format(PAYLOAD=payload)
+    def extract_child_window_prompt(cls, payload: str) -> str:
+        return cls.CHILD_WINDOW_PROMPT.format(PAYLOAD=payload)
 
     PARENT_REWRITE_SYSTEM_PROMPT = """You create one person-centric profile memory from one dialogue segment. Only output valid JSON.
 Rules:
@@ -186,19 +185,21 @@ Schema:
     def extract_parent_rewrite_prompt(cls, payload: str) -> str:
         return cls.PARENT_REWRITE_PROMPT.format(PAYLOAD=payload)
 
-    CHILD_BATCH_REWRITE_SYSTEM_PROMPT = """You create atomic child memories from pre-segmented dialogue windows. Only output valid JSON.
+    CHILD_WINDOW_REWRITE_SYSTEM_PROMPT = """You create exhaustive atomic child memories for one semantically closed dialogue window. Only output valid JSON.
 Rules:
-- Produce exactly one sentence object for every input child, preserve input order, and echo each child_id exactly.
-- Never omit, duplicate, merge, split, reorder, or add a child.
-- Each rewrite must express only its child's focus as one self-contained answer-bearing memory.
-- Resolve pronouns into concrete entities and preserve source-supported people, relationships, time, place, state, causality, and task outcomes.
-- Copy origin exactly from that child's source_origins, joined as a comma-separated string. Do not omit, add, reorder, or independently choose source IDs during rewriting.
-- The child planner has already fixed the source boundary and deterministic child_id. Previous context may resolve a reference but cannot be cited as independent support.
+- CURRENT_WINDOW_TURNS is the only evidence section. Rewrite every turn and every piece of information in that section; nothing may be omitted, even greetings, questions, acknowledgements, generic advice, repeated confirmations, repeated facts, or image/caption information.
+- A single turn containing several independent pieces of information must produce several sentence objects. A window may therefore produce one or many sentence objects.
+- Preserve every repeated occurrence as a separate memory. Never deduplicate against another sentence or against REFERENCE_PREVIOUS_CHILD_REWRITES. If the current window repeats a referenced fact, write a new memory using only the current occurrence's origin.
+- REFERENCE_PREVIOUS_CHILD_REWRITES contains only the two most recently generated child rewrite texts. Use it only to resolve people, objects, topics, pronouns, and ellipsis in the current window. It is not evidence, must not independently produce a memory, and must never supply an origin.
+- Every sentence must be self-contained. Resolve pronouns into concrete entities and preserve all source-supported people, relationships, time, place, state, causality, task outcomes, questions, responses, and image facts.
+- Every origin must come from CURRENT_WINDOW_TURNS, must list all current-window turns contributing to that memory in dialogue order, and must never cite a reference-only rewrite.
+- Across the complete sentence list, every turn in CURRENT_WINDOW_TURNS must appear in at least one origin.
+- The id may be any placeholder whose prefix matches the first origin; code assigns deterministic final IDs after generation.
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
 - Use a short concrete tag of at most three words and set topic to [].
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
-- personal_sentences may duplicate stable person facts, but it does not change the required one-to-one sentence output.
+- Do not output raw_text, raw_content, source_text, current_turns, dialogue text, or any other raw-text storage field.
 Schema:
 {
   "conversation_time": "YYYY-MM-DD",
@@ -216,23 +217,23 @@ Schema:
   "personal_sentences": []
 }"""
 
-    CHILD_BATCH_REWRITE_PROMPT = """PREVIOUS_REWRITE_MEMORIES:
+    CHILD_WINDOW_REWRITE_PROMPT = """REFERENCE_PREVIOUS_CHILD_REWRITES (reference only; never use as origin):
 <<<
-{PREVIOUS_MEMORIES}
+{PREVIOUS_REWRITES}
 >>>
 
-CHILD_BATCH (at most 15 children):
+CURRENT_CHILD_WINDOW:
 <<<
 {PAYLOAD}
 >>>"""
 
     @classmethod
-    def extract_child_batch_rewrite_prompt(
-            cls, payload: str, previous_memories: str = "[]"
+    def extract_child_window_rewrite_prompt(
+            cls, payload: str, previous_rewrites: str = "[]"
     ) -> str:
-        return cls.CHILD_BATCH_REWRITE_PROMPT.format(
+        return cls.CHILD_WINDOW_REWRITE_PROMPT.format(
             PAYLOAD=payload,
-            PREVIOUS_MEMORIES=previous_memories,
+            PREVIOUS_REWRITES=previous_rewrites,
         )
 
 

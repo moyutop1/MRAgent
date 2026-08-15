@@ -182,42 +182,89 @@ def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
   return True, ""
 
 
-def check_child_batch_rewrite_json(text, child_segments, dialogue_text):
-  """Validate the strict one-child-segment to one-rewrite-sentence contract."""
+def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
+  """Validate exhaustive memories generated from one contiguous child window."""
   flag, err = check_rewrite_json(text, dialogue_text, allow_origin_id=True)
   if not flag:
     return flag, err
-  if not isinstance(child_segments, list) or len(child_segments) > 15:
-    return False, "child batch must be a list containing at most 15 segments"
   sentences = text.get("sentence") or []
-  if len(sentences) != len(child_segments):
-    return False, (
-      f"child batch cardinality mismatch: expected {len(child_segments)} "
-      f"sentences, got {len(sentences)}"
-    )
+  if not sentences:
+    return False, "a child window must produce at least one memory sentence"
   if text.get("topics") not in ({}, None):
     return False, "hierarchical child rewrite topics must be empty"
-  for index, (sentence, child) in enumerate(zip(sentences, child_segments)):
-    child_id = getattr(child, "child_id", None)
-    current_turns = getattr(child, "current_turns", [])
-    if sentence.get("id") != child_id:
+  forbidden_fields = {
+    "raw", "raw_text", "raw_content", "source_text", "turns",
+    "current_turns", "current_window_turns", "current_dialogue_window",
+    "dialogue", "dialogue_text", "previous_dialogue_context",
+    "reference_previous_child_rewrites",
+  }
+  top_forbidden = forbidden_fields.intersection(text)
+  if top_forbidden:
+    return False, f"child rewrite stores forbidden raw fields: {sorted(top_forbidden)!r}"
+
+  origin_to_position = {
+    getattr(turn, "origin", None): position
+    for position, turn in enumerate(turns)
+  }
+  start_origin = getattr(child_window, "start_origin", None)
+  end_origin = getattr(child_window, "end_origin", None)
+  if start_origin not in origin_to_position or end_origin not in origin_to_position:
+    return False, "child window contains an unknown start or end origin"
+  start = origin_to_position[start_origin]
+  end = origin_to_position[end_origin]
+  if end < start:
+    return False, "child window end precedes its start"
+  ordered_window_origins = [
+    getattr(turn, "origin", None)
+    for turn in turns[start:end + 1]
+  ]
+  allowed_ids = set(ordered_window_origins)
+  covered_ids = set()
+  seen_sentence_ids = set()
+
+  for index, sentence in enumerate(sentences):
+    if not isinstance(sentence, dict):
+      return False, f"sentence[{index}] must be an object"
+    sentence_forbidden = forbidden_fields.intersection(sentence)
+    if sentence_forbidden:
       return False, (
-        f"sentence[{index}].id must echo {child_id!r}, "
-        f"got {sentence.get('id')!r}"
+        f"sentence[{index}] stores forbidden raw fields: "
+        f"{sorted(sentence_forbidden)!r}"
       )
+    sentence_id = sentence.get("id")
+    if sentence_id in seen_sentence_ids:
+      return False, f"duplicate child memory id: {sentence_id!r}"
+    seen_sentence_ids.add(sentence_id)
     if sentence.get("topic") != []:
       return False, f"sentence[{index}].topic must be []"
-    current_ids = {getattr(turn, "origin", None) for turn in current_turns}
     used_order = re.findall(r"D\d+:\d+", sentence.get("origin") or "")
-    used_ids = set(used_order)
-    if not used_ids or not used_ids.issubset(current_ids):
-      return False, f"sentence[{index}] uses origins outside its child window"
-    source_origins = list(getattr(child, "source_origins", []))
-    if not source_origins or used_order != source_origins:
+    if len(used_order) != len(set(used_order)):
+      return False, f"sentence[{index}] repeats an origin"
+    if not used_order or not set(used_order).issubset(allowed_ids):
       return False, (
-        f"sentence[{index}].origin must exactly equal the child planner's "
-        f"source_origins {source_origins!r}"
+        f"sentence[{index}] uses a reference-only or outside-window origin"
       )
+    used_positions = [origin_to_position[origin] for origin in used_order]
+    if used_positions != sorted(used_positions):
+      return False, f"sentence[{index}] origins must follow dialogue order"
+    covered_ids.update(used_order)
+
+  for index, personal in enumerate(text.get("personal_sentences") or []):
+    if not isinstance(personal, dict):
+      continue
+    personal_forbidden = forbidden_fields.intersection(personal)
+    if personal_forbidden:
+      return False, (
+        f"personal_sentences[{index}] stores forbidden raw fields: "
+        f"{sorted(personal_forbidden)!r}"
+      )
+
+  missing = [origin for origin in ordered_window_origins if origin not in covered_ids]
+  if missing:
+    return False, (
+      "child rewrite must cover every current-window turn; "
+      f"missing origins: {missing!r}"
+    )
   return True, ""
 
 def check_key_json(text, ref_obj=None, replace=False):

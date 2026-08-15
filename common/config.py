@@ -23,7 +23,7 @@ parser.add_argument("--parent_min_turns", type=int, default=int(os.getenv("PAREN
 parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PARENT_MAX_TURNS", "10")), help="Hard maximum core turns per semantic parent segment; semantic hierarchy caps this at 10.")
 parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
-parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Maximum child segments rewritten in one LLM call.")
+parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Compatibility option retained for existing commands; semantic child windows are rewritten sequentially so each window can reference the preceding two child rewrites.")
 parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "4")), help="Semantic parent memories passed directly to the EAES final reader.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")

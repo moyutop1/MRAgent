@@ -1,9 +1,8 @@
 import json
 import math
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable, List, Sequence
+from typing import List, Sequence
 
 from common import config
 from prompts.prompts import Prompts
@@ -30,13 +29,10 @@ class ParentSegment:
     rewrite_content: str = ""
 
 
-@dataclass
-class ChildSegment:
-    child_id: str
-    source_origins: List[str]
-    focus: str
-    current_turns: List[TurnRecord]
-    previous_context: List[TurnRecord]
+@dataclass(frozen=True)
+class ChildWindow:
+    start_origin: str
+    end_origin: str
 
 
 def parse_session_turns(text: str) -> List[TurnRecord]:
@@ -202,103 +198,124 @@ def plan_parent_segments(llm, turns: Sequence[TurnRecord], conversation_time=Non
     )
 
 
-def _validate_child_plan(output, turns: Sequence[TurnRecord]):
+def _validate_child_window_plan(output, turns: Sequence[TurnRecord]):
     if not isinstance(output, dict):
-        return False, "child plan must be a JSON object", None
+        return False, "child window plan must be a JSON object", None
     raw_segments = output.get("child_segments")
-    if not isinstance(raw_segments, list):
-        return False, "child_segments must be a list", None
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return False, "child_segments must be a non-empty list", None
     origin_to_index = {turn.origin: turn.index for turn in turns}
-    seen_specs = set()
-    prepared = []
-    previous_first = -1
-    for position, raw in enumerate(raw_segments):
+    minimum_segment_count = math.ceil(len(turns) / config.CHILD_MAX_TURNS)
+    if len(raw_segments) < minimum_segment_count:
+        return False, (
+            f"this {len(turns)}-turn session must return at least "
+            f"{minimum_segment_count} child windows because the hard maximum is "
+            f"{config.CHILD_MAX_TURNS}; received {len(raw_segments)}"
+        ), None
+    expected_start = 0
+    windows = []
+    for number, raw in enumerate(raw_segments, start=1):
         if not isinstance(raw, dict):
-            return False, f"child_segments[{position}] must be an object", None
-        source_origins = raw.get("source_origins")
-        focus = str(raw.get("focus") or "").strip()
-        if not isinstance(source_origins, list) or not source_origins or not focus:
-            return False, f"child_segments[{position}] needs source_origins and focus", None
-        source_origins = [str(origin) for origin in source_origins]
-        if len(set(source_origins)) != len(source_origins):
-            return False, f"child_segments[{position}] repeats an origin", None
-        if any(origin not in origin_to_index for origin in source_origins):
-            return False, f"child_segments[{position}] contains an unknown origin", None
-        indices = [origin_to_index[origin] for origin in source_origins]
-        if indices != sorted(indices):
-            return False, f"child_segments[{position}] origins must follow dialogue order", None
-        first_index, last_index = indices[0], indices[-1]
-        if first_index < previous_first:
-            return False, "child segments must follow dialogue order", None
-        if last_index - first_index + 1 > config.CHILD_MAX_TURNS:
-            return False, f"child_segments[{position}] exceeds the child window maximum", None
-        spec_key = (tuple(source_origins), focus.casefold())
-        if spec_key in seen_specs:
-            return False, f"child_segments[{position}] duplicates an earlier semantic unit", None
-        seen_specs.add(spec_key)
-        prepared.append((source_origins, focus, first_index, last_index))
-        previous_first = first_index
-
-    total_by_first_origin = defaultdict(int)
-    for source_origins, _, _, _ in prepared:
-        total_by_first_origin[source_origins[0]] += 1
-    counters = defaultdict(int)
-    children = []
-    for source_origins, focus, first_index, last_index in prepared:
-        first_origin = source_origins[0]
-        counters[first_origin] += 1
-        child_id = first_origin
-        if total_by_first_origin[first_origin] > 1:
-            child_id = f"{first_origin}-{counters[first_origin]}"
-        context_start = max(0, first_index - config.PARENT_CONTEXT_TURNS)
-        children.append(ChildSegment(
-            child_id=child_id,
-            source_origins=source_origins,
-            focus=focus,
-            current_turns=list(turns[first_index:last_index + 1]),
-            previous_context=list(turns[context_start:first_index]),
+            return False, f"child_segments[{number - 1}] must be an object", None
+        start_origin = str(raw.get("start_origin") or "")
+        end_origin = str(raw.get("end_origin") or "")
+        if start_origin not in origin_to_index or end_origin not in origin_to_index:
+            return False, (
+                f"child window has unknown boundary: {start_origin}, {end_origin}"
+            ), None
+        start = origin_to_index[start_origin]
+        end = origin_to_index[end_origin]
+        if expected_start >= len(turns):
+            return False, (
+                f"child window {number} starts after the session was already "
+                f"fully covered through {turns[-1].origin}"
+            ), None
+        if start != expected_start or end < start:
+            expected_origin = turns[expected_start].origin
+            return False, (
+                f"child window {number} has invalid boundaries: received "
+                f"{start_origin} through {end_origin}, but it must start at "
+                f"{expected_origin} to preserve contiguous ordered coverage"
+            ), None
+        length = end - start + 1
+        if length > config.CHILD_MAX_TURNS:
+            required_parts = math.ceil(length / config.CHILD_MAX_TURNS)
+            return False, (
+                f"child window {number} has the invalid range {start_origin} "
+                f"through {end_origin}. Its inclusive length is {length} turns, "
+                f"which exceeds the hard maximum of {config.CHILD_MAX_TURNS}; "
+                f"split this range into at least {required_parts} contiguous windows"
+            ), None
+        windows.append(ChildWindow(
+            start_origin=start_origin,
+            end_origin=end_origin,
         ))
-    return True, "", children
+        expected_start = end + 1
+    if expected_start != len(turns):
+        return False, (
+            f"the child window plan stops before {turns[expected_start].origin}; "
+            f"it must continue through {turns[-1].origin}"
+        ), None
+    return True, "", windows
 
 
-def plan_child_segments(llm, turns: Sequence[TurnRecord], conversation_time=None):
+def plan_child_windows(llm, turns: Sequence[TurnRecord], conversation_time=None):
     if not turns:
         return []
-    user_prompt = Prompts.extract_child_segment_prompt(
+    user_prompt = Prompts.extract_child_window_prompt(
         json.dumps({
             "conversation_time": conversation_time,
             "maximum_turns": config.CHILD_MAX_TURNS,
+            "minimum_segment_count": math.ceil(
+                len(turns) / config.CHILD_MAX_TURNS
+            ),
+            "total_turns": len(turns),
             "turns": _turn_payload(turns),
         }, ensure_ascii=False)
     )
     return _request_complete_plan(
         llm,
-        Prompts.CHILD_SEGMENT_SYSTEM_PROMPT,
+        Prompts.CHILD_WINDOW_SYSTEM_PROMPT,
         user_prompt,
-        lambda output: _validate_child_plan(output, turns),
-        "child semantic plan",
+        lambda output: _validate_child_window_plan(output, turns),
+        "child window plan",
     )
 
 
-def attach_child_ids_to_parents(
+def child_window_turns(
+        window: ChildWindow,
+        turns: Sequence[TurnRecord],
+) -> List[TurnRecord]:
+    origin_to_index = {turn.origin: turn.index for turn in turns}
+    try:
+        start = origin_to_index[window.start_origin]
+        end = origin_to_index[window.end_origin]
+    except KeyError as exc:
+        raise ValueError(f"child window contains unknown origin {exc.args[0]}") from exc
+    if end < start:
+        raise ValueError(
+            f"child window ends before it starts: "
+            f"{window.start_origin}, {window.end_origin}"
+        )
+    return list(turns[start:end + 1])
+
+
+def attach_child_memory_ids_to_parents(
         parent_segments: Sequence[ParentSegment],
-        child_segments: Sequence[ChildSegment],
+        child_memories: Sequence[dict],
 ):
     parent_by_turn = {}
     for parent in parent_segments:
         for turn in parent.current_turns:
             parent_by_turn[turn.origin] = parent
-    for child in child_segments:
-        owner = parent_by_turn.get(child.source_origins[0])
+    for memory in child_memories:
+        origins = re.findall(r"D\d+:\d+", str(memory.get("origin") or ""))
+        if not origins or not memory.get("id"):
+            raise ValueError("child memory needs a valid id and origin")
+        owner = parent_by_turn.get(origins[0])
         if owner is None:
             raise ValueError(
-                f"no parent core contains child first origin {child.source_origins[0]}"
+                f"no parent core contains child first origin {origins[0]}"
             )
-        owner.child_ids.append(child.child_id)
+        owner.child_ids.append(memory["id"])
     return list(parent_segments)
-
-
-def iter_child_batches(children: Sequence[ChildSegment]) -> Iterable[List[ChildSegment]]:
-    size = config.CHILD_REWRITE_BATCH_SIZE
-    for start in range(0, len(children), size):
-        yield list(children[start:start + size])

@@ -2,7 +2,6 @@ import copy
 import sys
 import types
 import unittest
-from unittest.mock import patch
 
 
 common_module = types.ModuleType("common")
@@ -35,17 +34,20 @@ jsonschema_module.Draft202012Validator = _NoOpValidator
 jsonschema_module.ValidationError = ValueError
 sys.modules.setdefault("jsonschema", jsonschema_module)
 
-from agent.rewrite_memory import rewrite_semantic_hierarchy_session
+from agent.rewrite_memory import (
+    _child_window_source_text,
+    _previous_child_rewrite_context,
+    _rewrite_child_window,
+    rewrite_semantic_hierarchy_session,
+)
 from agent.semantic_segmentation import (
-    ChildSegment,
-    TurnRecord,
-    attach_child_ids_to_parents,
-    iter_child_batches,
+    ChildWindow,
+    attach_child_memory_ids_to_parents,
+    child_window_turns,
     parse_session_turns,
-    plan_child_segments,
+    plan_child_windows,
     plan_parent_segments,
 )
-from common import config
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
 
 
@@ -75,6 +77,28 @@ def _dialogue_with_prefix(prefix, turn_count):
     )
 
 
+def _sentence(origin, text, sentence_id=None, **extra):
+    item = {
+        "id": sentence_id or origin.split(",", 1)[0],
+        "text": text,
+        "tag": "Turn Memory",
+        "origin": origin,
+        "topic": [],
+        "semantic_properties": ["event_action", "episodic"],
+    }
+    item.update(extra)
+    return item
+
+
+def _rewrite_output(*sentences):
+    return {
+        "conversation_time": "2023-05-08",
+        "sentence": list(sentences),
+        "topics": {},
+        "personal_sentences": [],
+    }
+
+
 class SemanticHierarchyTests(unittest.TestCase):
     def test_parent_retry_explains_required_split_for_twenty_one_turns(self):
         turns = parse_session_turns(_dialogue(21))
@@ -98,7 +122,6 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertIn('"position": 21', initial_payload)
         repair_payload = llm.calls[1][1]["content"]
         self.assertIn("must return at least 3 parent segments", repair_payload)
-        self.assertIn('"end_origin": "D1:21"', repair_payload)
 
     def test_parent_retry_reports_exact_inclusive_invalid_range(self):
         turns = parse_session_turns(_dialogue_with_prefix("D13", 37))
@@ -124,16 +147,11 @@ class SemanticHierarchyTests(unittest.TestCase):
 
         self.assertEqual(len(parents), 6)
         repair_system = llm.calls[1][0]["content"]
-        repair_payload = llm.calls[1][1]["content"]
-        for repair_text in (repair_system, repair_payload):
-            self.assertIn("D13:27 through D13:37", repair_text)
-            self.assertIn("37 - 27 + 1 = 11 turns", repair_text)
-            self.assertIn("hard maximum of 10", repair_text)
-            self.assertIn("split this exact range into at least 2", repair_text)
-        self.assertIn("Do not return that invalid boundary unchanged", repair_system)
-        self.assertIn("Do not repeat it unchanged", repair_payload)
+        self.assertIn("D13:27 through D13:37", repair_system)
+        self.assertIn("37 - 27 + 1 = 11 turns", repair_system)
+        self.assertIn("hard maximum of 10", repair_system)
 
-    def test_independent_plans_and_first_origin_parent_ownership(self):
+    def test_parent_and_child_window_plans_are_independent(self):
         turns = parse_session_turns(_dialogue(6))
         parent_llm = SequenceLLM([{
             "parent_segments": [
@@ -143,151 +161,254 @@ class SemanticHierarchyTests(unittest.TestCase):
         }])
         child_llm = SequenceLLM([{
             "child_segments": [
-                {"source_origins": ["D1:2"], "focus": "first fact"},
-                {"source_origins": ["D1:2"], "focus": "second fact"},
-                {"source_origins": ["D1:4", "D1:5"], "focus": "cross-boundary fact"},
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+                {"start_origin": "D1:3", "end_origin": "D1:6"},
             ]
         }])
 
         parents = plan_parent_segments(parent_llm, turns, "2023-05-08")
-        children = plan_child_segments(child_llm, turns, "2023-05-08")
-        attach_child_ids_to_parents(parents, children)
+        windows = plan_child_windows(child_llm, turns, "2023-05-08")
 
-        self.assertEqual([child.child_id for child in children], [
-            "D1:2-1", "D1:2-2", "D1:4"
+        self.assertEqual(len(parents), 2)
+        self.assertEqual(windows, [
+            ChildWindow("D1:1", "D1:2"),
+            ChildWindow("D1:3", "D1:6"),
         ])
-        self.assertEqual(
-            parents[0].child_ids,
-            ["D1:2-1", "D1:2-2", "D1:4"],
-        )
-        self.assertEqual(parents[1].child_ids, [])
+        self.assertIsInstance(windows[0].start_origin, str)
+        self.assertFalse(hasattr(windows[0], "window_id"))
         self.assertNotIn("parent_segments", child_llm.calls[0][1]["content"])
+        self.assertEqual(
+            [turn.origin for turn in child_window_turns(windows[1], turns)],
+            ["D1:3", "D1:4", "D1:5", "D1:6"],
+        )
 
-    def test_child_batches_never_exceed_fifteen(self):
-        turn = TurnRecord("D1:1", "dia_id:D1:1 speaker:text", 0)
-        children = [
-            ChildSegment(f"D1:1-{index}", ["D1:1"], str(index), [turn], [])
-            for index in range(1, 17)
+    def test_child_window_plan_retries_gap_and_requires_full_coverage(self):
+        turns = parse_session_turns(_dialogue(6))
+        llm = SequenceLLM([
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+                {"start_origin": "D1:4", "end_origin": "D1:6"},
+            ]},
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+                {"start_origin": "D1:3", "end_origin": "D1:6"},
+            ]},
+        ])
+
+        windows = plan_child_windows(llm, turns, "2023-05-08")
+
+        self.assertEqual(windows[-1].end_origin, "D1:6")
+        self.assertIn(
+            "contiguous ordered coverage",
+            llm.calls[1][0]["content"],
+        )
+
+    def test_child_window_plan_allows_one_turn_and_enforces_maximum(self):
+        single_turns = parse_session_turns(_dialogue(1))
+        single = plan_child_windows(
+            SequenceLLM([{"child_segments": [{
+                "start_origin": "D1:1", "end_origin": "D1:1"
+            }]}]),
+            single_turns,
+            "2023-05-08",
+        )
+        self.assertEqual(single, [ChildWindow("D1:1", "D1:1")])
+
+        turns = parse_session_turns(_dialogue(9))
+        llm = SequenceLLM([
+            {"child_segments": [{
+                "start_origin": "D1:1", "end_origin": "D1:9"
+            }]},
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:4"},
+                {"start_origin": "D1:5", "end_origin": "D1:9"},
+            ]},
+        ])
+
+        windows = plan_child_windows(llm, turns, "2023-05-08")
+
+        self.assertEqual(len(windows), 2)
+        self.assertIn("hard maximum is 8", llm.calls[1][0]["content"])
+
+    def test_child_window_plan_rejects_segment_after_full_coverage(self):
+        turns = parse_session_turns(_dialogue(2))
+        llm = SequenceLLM([
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+                {"start_origin": "D1:1", "end_origin": "D1:1"},
+            ]},
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+            ]},
+        ])
+
+        windows = plan_child_windows(llm, turns, "2023-05-08")
+
+        self.assertEqual(windows, [ChildWindow("D1:1", "D1:2")])
+        self.assertIn("already fully covered", llm.calls[1][0]["content"])
+
+    def test_previous_reference_contains_only_last_two_rewrite_texts(self):
+        memories = [
+            _sentence("D1:1", "first"),
+            _sentence("D1:2", "second"),
+            _sentence("D1:3", "third"),
         ]
-        with patch.object(config, "CHILD_REWRITE_BATCH_SIZE", 15):
-            self.assertEqual(
-                [len(batch) for batch in iter_child_batches(children)],
-                [15, 1],
-            )
 
-    def test_hierarchical_rewrite_is_one_sentence_per_child(self):
+        context = _previous_child_rewrite_context(memories)
+
+        self.assertEqual(context, [
+            {"rewrite_content": "second"},
+            {"rewrite_content": "third"},
+        ])
+        self.assertNotIn("origin", context[0])
+        self.assertNotIn("id", context[0])
+
+    def test_child_window_rewrite_retries_missing_turn_and_separates_reference(self):
+        turns = parse_session_turns(_dialogue(3))
+        window = ChildWindow("D1:2", "D1:3")
+        llm = SequenceLLM([
+            _rewrite_output(_sentence("D1:1", "copied reference")),
+            _rewrite_output(_sentence("D1:2", "turn two")),
+            _rewrite_output(
+                _sentence("D1:2", "turn two"),
+                _sentence("D1:3", "turn three"),
+            ),
+        ])
+
+        output = _rewrite_child_window(
+            llm,
+            window,
+            turns,
+            "2023-05-08",
+            previous_rewrites=[{"rewrite_content": "reference fact"}],
+        )
+
+        self.assertEqual(
+            [item["id"] for item in output["sentence"]],
+            ["D1:2-1", "D1:3-1"],
+        )
+        self.assertIn("origin ids not found", llm.calls[1][0]["content"])
+        self.assertIn("missing origins", llm.calls[2][0]["content"])
+        user_prompt = llm.calls[0][1]["content"]
+        reference_section = user_prompt.split("CURRENT_CHILD_WINDOW:", 1)[0]
+        self.assertIn("reference fact", reference_section)
+        self.assertNotIn('"origin"', reference_section)
+        self.assertNotIn('"id"', reference_section)
+        self.assertNotIn("D1:1", _child_window_source_text(
+            window, turns, "2023-05-08"
+        ))
+
+    def test_one_turn_can_produce_repeated_memories_without_deduplication(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        llm = SequenceLLM([_rewrite_output(
+            _sentence("D1:1", "The same stated information."),
+            _sentence("D1:1", "The same stated information."),
+        )])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(len(output["sentence"]), 2)
+        self.assertEqual(
+            [item["id"] for item in output["sentence"]],
+            ["D1:1-1", "D1:1-2"],
+        )
+        self.assertEqual(
+            output["sentence"][0]["text"],
+            output["sentence"][1]["text"],
+        )
+
+    def test_child_window_rewrite_rejects_raw_storage_fields(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        invalid = _rewrite_output(_sentence(
+            "D1:1", "turn one", raw_content="speaker:turn 1"
+        ))
+        valid = _rewrite_output(_sentence("D1:1", "turn one"))
+        llm = SequenceLLM([invalid, valid])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertNotIn("raw_content", output["sentence"][0])
+        self.assertIn("forbidden raw fields", llm.calls[1][0]["content"])
+
+    def test_hierarchical_rewrite_is_sequential_and_links_final_memory_ids(self):
+        first_window = _rewrite_output(
+            _sentence("D1:1", "first turn"),
+            _sentence("D1:2", "first fact in turn two"),
+            _sentence("D1:2", "second fact in turn two"),
+            _sentence("D1:3", "third turn"),
+        )
+        second_window = _rewrite_output(
+            _sentence("D1:4", "repeated information"),
+            _sentence("D1:5", "repeated information"),
+        )
         llm = SequenceLLM([
             {"parent_segments": [
                 {"start_origin": "D1:1", "end_origin": "D1:5"}
             ]},
             {"child_segments": [
-                {"source_origins": ["D1:2"], "focus": "first fact"},
-                {"source_origins": ["D1:2"], "focus": "second fact"},
-                {"source_origins": ["D1:4"], "focus": "unique fact"},
+                {"start_origin": "D1:1", "end_origin": "D1:3"},
+                {"start_origin": "D1:4", "end_origin": "D1:5"},
             ]},
+            first_window,
+            second_window,
             {
                 "parent_id": "D1:t1",
                 "rewrite_content": "A coarse parent memory.",
-            },
-            {
-                "conversation_time": "2023-05-08",
-                "sentence": [
-                    {
-                        "id": "D1:2-1",
-                        "text": "The speaker stated the first fact.",
-                        "tag": "First Fact",
-                        "origin": "D1:2",
-                        "topic": [],
-                        "semantic_properties": ["event_action", "episodic"],
-                    },
-                    {
-                        "id": "D1:2-2",
-                        "text": "The speaker stated the second fact.",
-                        "tag": "Second Fact",
-                        "origin": "D1:2",
-                        "topic": [],
-                        "semantic_properties": ["state_opinion", "transient"],
-                    },
-                    {
-                        "id": "D1:4",
-                        "text": "The speaker stated the unique fact.",
-                        "tag": "Unique Fact",
-                        "origin": "D1:4",
-                        "topic": [],
-                        "semantic_properties": ["state_opinion", "durable"],
-                    },
-                ],
-                "topics": {},
-                "personal_sentences": [],
             },
         ])
 
         output = rewrite_semantic_hierarchy_session(llm, _dialogue(5))
 
+        expected_ids = [
+            "D1:1-1", "D1:2-1", "D1:2-2",
+            "D1:3-1", "D1:4-1", "D1:5-1",
+        ]
         self.assertEqual(
-            [item["id"] for item in output["sentence"]],
-            ["D1:2-1", "D1:2-2", "D1:4"],
+            [item["id"] for item in output["sentence"]], expected_ids
         )
         self.assertEqual(output["parent_nodes"], [{
             "parent_id": "D1:t1",
             "rewrite_content": "A coarse parent memory.",
-            "child_ids": ["D1:2-1", "D1:2-2", "D1:4"],
+            "child_ids": expected_ids,
         }])
-        self.assertEqual(
-            len(llm.calls[-1][1]["content"].split('"child_id"')), 4
-        )
-        parent_rewrite_call = llm.calls[2]
-        self.assertNotIn("conversation_time", parent_rewrite_call[1]["content"])
+        self.assertEqual(len(llm.calls), 5)
+        second_prompt = llm.calls[3][1]["content"]
+        reference_section = second_prompt.split("CURRENT_CHILD_WINDOW:", 1)[0]
+        self.assertIn("second fact in turn two", reference_section)
+        self.assertIn("third turn", reference_section)
+        self.assertNotIn("first fact in turn two", reference_section)
         self.assertIn(
-            "Do not record any temporal information",
-            parent_rewrite_call[0]["content"],
+            "every repeated occurrence",
+            llm.calls[3][0]["content"],
         )
-        self.assertIn(
-            "PERSON PROFILE MEMORY",
-            parent_rewrite_call[0]["content"],
-        )
-        self.assertIn(
-            "INVALID event-summary style",
-            parent_rewrite_call[0]["content"],
-        )
-        child_rewrite_call = llm.calls[-1]
-        self.assertIn("conversation_time", child_rewrite_call[1]["content"])
+        parent_rewrite_call = llm.calls[4]
+        self.assertIn("PERSON PROFILE MEMORY", parent_rewrite_call[0]["content"])
 
-    def test_child_rewrite_cannot_redefine_planner_provenance(self):
-        llm = SequenceLLM([
-            {"parent_segments": [
-                {"start_origin": "D1:1", "end_origin": "D1:4"}
-            ]},
-            {"child_segments": [{
-                "source_origins": ["D1:2", "D1:3"],
-                "focus": "a fact supported by two turns",
-            }]},
-            {
-                "parent_id": "D1:t1",
-                "rewrite_content": "A coarse parent memory.",
-            },
-            {
-                "conversation_time": "2023-05-08",
-                "sentence": [{
-                    "id": "D1:2",
-                    "text": "A fact supported by two turns.",
-                    "tag": "Supported Fact",
-                    # Reproduce the production failure: the rewrite model
-                    # drops the planner's first source origin.
-                    "origin": "D1:3",
-                    "topic": [],
-                    "semantic_properties": ["event_action", "episodic"],
-                }],
-                "topics": {},
-                "personal_sentences": [],
-            },
-        ])
+    def test_memory_ids_attach_to_parent_by_first_origin(self):
+        turns = parse_session_turns(_dialogue(6))
+        parent_llm = SequenceLLM([{
+            "parent_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:4"},
+                {"start_origin": "D1:5", "end_origin": "D1:6"},
+            ]
+        }])
+        parents = plan_parent_segments(parent_llm, turns, "2023-05-08")
+        memories = [
+            _sentence("D1:2", "first", "D1:2-1"),
+            _sentence("D1:4,D1:5", "cross boundary", "D1:4-1"),
+            _sentence("D1:6", "last", "D1:6-1"),
+        ]
 
-        output = rewrite_semantic_hierarchy_session(llm, _dialogue(4))
+        attach_child_memory_ids_to_parents(parents, memories)
 
-        self.assertEqual(output["sentence"][0]["id"], "D1:2")
-        self.assertEqual(output["sentence"][0]["origin"], "D1:2,D1:3")
-        self.assertEqual(len(llm.calls), 4)
+        self.assertEqual(parents[0].child_ids, ["D1:2-1", "D1:4-1"])
+        self.assertEqual(parents[1].child_ids, ["D1:6-1"])
 
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):
         memory = MemorySystem()

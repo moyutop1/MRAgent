@@ -13,13 +13,14 @@ The pipeline has two phases:
 **Phase 1 — Build memory** (once per conversation sample):
 
 - **rewrite** — compress dialogue into self-contained memories: resolve pronouns, render relative times at their source granularity, store normalized `YYYY-MM-DD` start dates for indexing, attach topic tags, and extract topics and person-level facts.
-- **extract_keyword** — extract memory-side hints used only to build the EAES entity/attribute index.
+- **extract_keyword** — extract memory-side hints used to build the EAES entity/attribute index and the child prefilter keyword gate. The first origin's speaker is added when absent.
 - **store** — build child EAES notes and, with semantic hierarchy enabled, their parent memories.
 
 **Phase 2 — Answer questions** (per question):
 
 - **answer** — parse an EAES query plan, retrieve/rerank child evidence and independent parent memories, then call the final reader.
-- Query-side `keywords` are embedded only for parent retrieval. They do not score, filter, or rerank child memories and are not sent to the evidence selector or final reader.
+- Each query keyword carries three synonym/tense alternatives, except likely person names, which carry none. Original and alternative forms are normalized and matched to memory keywords with exact, token-subset, or Jaccard-at-least-0.6 rules. A child memory must match at least two distinct original query-keyword groups to enter the existing EAES prefilter; if no memory reaches that threshold, retrieval falls back to the full child-memory prefilter.
+- Semantic-parent retrieval remains independent and embeds only the original query-side `keywords`, never their alternatives. Query keywords and alternatives are removed before child scoring, reranking, evidence selection, and final reading.
 
 ---
 

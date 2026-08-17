@@ -192,7 +192,10 @@ def _query_output():
         "answer_type": "fact",
         "temporal_intent": "none",
         "required_lifecycle": "unknown",
-        "keywords": ["dog"],
+        "keywords": [{
+            "keyword": "dog",
+            "alternatives": ["dogs", "canine", "canines"],
+        }],
         "required_semantic_properties": [
             "personal_profile", "durable", "unknown", "personal_profile",
             "profile_preference", "fact_background",
@@ -211,7 +214,24 @@ class SemanticQueryTests(unittest.TestCase):
             Prompts.EAES_QUERY_SYSTEM_PROMPT,
         )
         self.assertEqual(plan["keywords"], ["dog"])
+        self.assertEqual(plan["keyword_groups"], [{
+            "keyword": "dog",
+            "alternatives": ["dogs", "canine", "canines"],
+        }])
         self.assertNotIn("required_semantic_properties", plan)
+
+    def test_likely_person_keyword_can_keep_an_empty_alternative_list(self):
+        output = _query_output()
+        output["keywords"] = [{
+            "keyword": "Caroline",
+            "alternatives": [],
+        }]
+        agent = _QueryAgent(output)
+        with patch.object(config, "EAES_SEMANTIC_SCORE", False):
+            plan = agent.parse_eaes_query("What pet does Caroline own?")
+
+        self.assertEqual(plan["keywords"], ["Caroline"])
+        self.assertEqual(plan["keyword_groups"][0]["alternatives"], [])
 
     def test_enabled_flag_filters_and_deduplicates_query_properties(self):
         agent = _QueryAgent(_query_output())
@@ -342,7 +362,14 @@ class SemanticScoringTests(unittest.TestCase):
             ) as get_embedding,
         ):
             rows = controller.retrieve_eaes_parent_candidates(
-                {"keywords": ["dog"]}, limit=1
+                {
+                    "keywords": ["dog"],
+                    "keyword_groups": [{
+                        "keyword": "dog",
+                        "alternatives": ["dogs", "canine", "canines"],
+                    }],
+                },
+                limit=1,
             )
 
         get_embedding.assert_called_once_with(["dog"])

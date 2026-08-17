@@ -12,6 +12,7 @@ from common import config
 from llm.controller import LLM
 from memory.controller import MemoryController
 from memory.system import MemorySystem, EpisodeEvent
+from memory.keyword_matching import append_keyword_if_missing
 from agent.rewrite_memory import first_origin, normalize_sentence_ids, origin_ids, rewrite_windowed_session
 from agent.eaes import EAESMixin
 from agent.retrieval import RetrievalMixin
@@ -501,20 +502,29 @@ class Agent(EAESMixin, RetrievalMixin):
         keyword_by_sentence = {}
 
         for s in (keywords or []):
+            if not isinstance(s, dict):
+                continue
             sentence_id = s.get("sentence_id")
             raw_keywords = s.get("keyword")
             ks = list(raw_keywords) if isinstance(raw_keywords, list) else []
-            if sentence_id not in self.memory.episode_events.keys():
-                keyword_by_sentence[sentence_id] = ks
+            keyword_by_sentence[sentence_id] = ks
+
+        # Ensure every stored memory in this session has its first origin's
+        # speaker as a keyword. Compare normalized exact values so casing and
+        # punctuation variants do not create duplicate speaker entries.
+        for ee in self._as_list(events.get("sentence")):
+            if not isinstance(ee, dict):
                 continue
+            sentence_id = ee.get("id")
+            if sentence_id not in self.memory.episode_events:
+                continue
+            ks = keyword_by_sentence.setdefault(sentence_id, [])
             origin_add = self.memory.episode_events[sentence_id].origin
             first_origin = self._first_origin(origin_add)
             _prefix = first_origin.split(":")[0]
             raw_speaker_text = self.memory.raw_text.get(_prefix, {}).get(first_origin, "")
             speaker = raw_speaker_text.split(":", 1)[0].strip()
-            if speaker not in ks:
-                ks.append(speaker)
-            keyword_by_sentence[sentence_id] = ks
+            append_keyword_if_missing(ks, speaker)
 
         self._eaes_build_notes_for_session(
             events, keyword_by_sentence, conversation_time

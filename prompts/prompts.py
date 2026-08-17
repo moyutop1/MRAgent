@@ -297,7 +297,12 @@ Schema:
   "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
   "required_lifecycle": "planned | current | historical | unknown",
   "no_time_limit": true,
-  "keywords": ["important lexical constraints"]
+  "keywords": [
+    {
+      "keyword": "important lexical constraint",
+      "alternatives": ["synonym", "tense-aware synonym", "alternate wording"]
+    }
+  ]
 }
 Rules:
 - Use "historical" when the question asks what happened, what someone did, or what events someone attended.
@@ -307,6 +312,8 @@ Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
+- For each keyword that is not a likely person name, generate exactly three distinct alternatives. Alternatives may use synonyms or synonymous verb forms in different tenses, but must preserve the original keyword's meaning and must not guess the answer.
+- If a keyword is likely a person's name, keep it as the keyword and return an empty alternatives list for it. Do not generate aliases, nicknames, or other alternatives for likely person names.
 - Do not answer the question."""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """

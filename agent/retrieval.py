@@ -247,7 +247,11 @@ class RetrievalMixin:
                     query_plan, question_emb, limit=config.PARENT_TOP_K
                 )
             embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-                child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+                child_query_plan,
+                question_emb,
+                limit=config.EAES_CANDIDATE_LIMIT,
+                keyword_query_plan=query_plan,
+            )
             candidates = self.rerank_eaes_candidates(
                 question, child_query_plan, embedding_candidates
             )

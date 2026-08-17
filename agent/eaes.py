@@ -355,6 +355,7 @@ class EAESMixin:
                 event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
+                keywords=keywords,
             )
             self.memory.add_eaes_memory_note(note)
 
@@ -443,12 +444,38 @@ class EAESMixin:
 
     @staticmethod
     def _eaes_child_query_plan(query_plan):
-        """Hide parent-only query keywords from every child/reader stage."""
+        """Hide keyword-gate fields from child scoring and downstream readers."""
         if not isinstance(query_plan, dict):
             return {}
         plan = dict(query_plan)
         plan.pop("keywords", None)
+        plan.pop("keyword_groups", None)
         return plan
+
+    def _eaes_query_keyword_fields(self, query_out):
+        keywords = []
+        keyword_groups = []
+        for item in self._as_list(query_out.get("keywords")):
+            if isinstance(item, dict):
+                keyword = str(item.get("keyword") or "").strip()
+                alternatives = [
+                    str(value).strip()
+                    for value in self._as_list(item.get("alternatives"))
+                    if str(value or "").strip()
+                ][:3]
+            else:
+                # Backward compatibility for cached tests/providers that still
+                # return the former list-of-strings query schema.
+                keyword = str(item or "").strip()
+                alternatives = []
+            if not keyword:
+                continue
+            keywords.append(keyword)
+            keyword_groups.append({
+                "keyword": keyword,
+                "alternatives": alternatives,
+            })
+        return keywords, keyword_groups
 
     def _eaes_query_plan_from_output(self, query_question, query_out, query_mode):
         if not isinstance(query_out, dict):
@@ -458,13 +485,17 @@ class EAESMixin:
             value = str(value or "").strip()
             if value and value not in query_attributes:
                 query_attributes.append(value)
+        keywords, keyword_groups = self._eaes_query_keyword_fields(query_out)
         plan = {
             "entities": self._as_list(query_out.get("entities")),
             "query_attributes": query_attributes[:3] or [query_question],
             "answer_type": query_out.get("answer_type", "unknown"),
             "temporal_intent": query_out.get("temporal_intent", "none"),
             "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
-            "keywords": self._as_list(query_out.get("keywords")),
+            # Parent retrieval intentionally embeds originals only. Alternatives
+            # are kept in aligned groups solely for the child memory-keyword gate.
+            "keywords": keywords,
+            "keyword_groups": keyword_groups,
             "query_mode": query_mode,
         }
         if config.EAES_SEMANTIC_SCORE:
@@ -510,6 +541,7 @@ class EAESMixin:
             "temporal_intent": "none",
             "required_lifecycle": "unknown",
             "keywords": [],
+            "keyword_groups": [],
             "query_mode": "question_text_fallback",
         }
         if config.EAES_SEMANTIC_SCORE:
@@ -855,6 +887,7 @@ class EAESMixin:
             question_emb,
             limit=config.EAES_ROLLBACK_CHILD_PREFILTER_LIMIT,
             exclude_memory_ids=excluded_child_ids,
+            keyword_query_plan=rollback_query_plan,
         )
         rollback_parents = self.memory_controller.retrieve_eaes_parent_candidates(
             rollback_query_plan,
@@ -1237,7 +1270,11 @@ class EAESMixin:
                 query_plan, question_emb, limit=config.PARENT_TOP_K
             )
         embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-            child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
+            child_query_plan,
+            question_emb,
+            limit=config.EAES_CANDIDATE_LIMIT,
+            keyword_query_plan=query_plan,
+        )
         if not embedding_candidates and not parent_candidates:
             return "no information available", []
         candidates = self.rerank_eaes_candidates(

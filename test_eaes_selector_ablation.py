@@ -43,14 +43,10 @@ class _FakeController:
     def __init__(self, candidates):
         self.candidates = candidates
         self.child_query_plans = []
-        self.child_keyword_query_plans = []
         self.parent_query_plans = []
 
     def retrieve_eaes_candidates(self, query_plan, *_args, **_kwargs):
         self.child_query_plans.append(dict(query_plan))
-        self.child_keyword_query_plans.append(
-            dict(_kwargs.get("keyword_query_plan") or {})
-        )
         return list(self.candidates)
 
     def retrieve_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
@@ -200,7 +196,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             for item in reader_input["backup_candidates"]
         ))
 
-    def test_query_keywords_gate_children_but_stay_out_of_child_scoring(self):
+    def test_query_keywords_are_parent_only(self):
         agent = _AblationAgent(_candidates())
 
         with (
@@ -215,13 +211,6 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         )
         self.assertNotIn(
             "keywords", agent.memory_controller.child_query_plans[0]
-        )
-        self.assertNotIn(
-            "keyword_groups", agent.memory_controller.child_query_plans[0]
-        )
-        self.assertEqual(
-            agent.memory_controller.child_keyword_query_plans[0]["keywords"],
-            ["dog"],
         )
         self.assertNotIn("keywords", agent.selector_query_plans[0])
         self.assertNotIn("keywords", agent.llm.inputs[0]["query_plan"])

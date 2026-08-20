@@ -11,7 +11,6 @@ from common import config
 from llm.controller import LLM
 from llm.embeddings import get_embedding
 from memory.system import MemorySystem
-from memory.keyword_matching import keyword_gate_allowed_ids
 import logging
 logger = logging.getLogger(__name__)
 
@@ -162,8 +161,7 @@ class MemoryController:
         return [value]
 
     def score_eaes_candidates(self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
-                              include_rank: bool = False, exclude_memory_ids=None,
-                              allowed_memory_ids=None):
+                              include_rank: bool = False, exclude_memory_ids=None):
         if not isinstance(query_plan, dict):
             query_plan = {}
         self.prepare_eaes_retrieval_embeddings()
@@ -179,12 +177,9 @@ class MemoryController:
 
         entity_words = [self._eaes_words(entity) for entity in query_entities]
         excluded = set(exclude_memory_ids or [])
-        allowed = None if allowed_memory_ids is None else set(allowed_memory_ids)
         scored = []
         for note in self.memory.eaes_notes.values():
             if note.memory_id in excluded:
-                continue
-            if allowed is not None and note.memory_id not in allowed:
                 continue
             if note.retrieval_embedding is None or query_vectors.size == 0:
                 continue
@@ -275,24 +270,15 @@ class MemoryController:
 
     def retrieve_eaes_candidates(
             self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
-            exclude_memory_ids=None, keyword_query_plan=None,
+            exclude_memory_ids=None
     ):
         limit = limit or config.EAES_CANDIDATE_LIMIT
-        allowed_memory_ids = None
-        if keyword_query_plan is not None:
-            allowed_memory_ids = keyword_gate_allowed_ids(
-                getattr(self.memory, "eaes_keyword_index", {}),
-                keyword_query_plan,
-                excluded_memory_ids=exclude_memory_ids,
-                minimum_matches=2,
-            )
         return self.score_eaes_candidates(
             query_plan,
             question_emb,
             limit=limit,
             include_rank=True,
             exclude_memory_ids=exclude_memory_ids,
-            allowed_memory_ids=allowed_memory_ids,
         )
 
     def retrieve_eaes_parent_candidates(

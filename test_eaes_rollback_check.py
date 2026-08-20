@@ -298,10 +298,6 @@ class EAESRollbackCheckTests(unittest.TestCase):
         parent_plan, parent_kwargs = agent.memory_controller.parent_calls[0]
         self.assertNotIn("keywords", child_plan)
         self.assertEqual(parent_plan["keywords"], ["animal companion"])
-        self.assertEqual(
-            child_kwargs["keyword_query_plan"]["keywords"],
-            ["animal companion"],
-        )
         self.assertEqual(child_kwargs["limit"], 27)
         self.assertEqual(parent_kwargs["limit"], 3)
         self.assertEqual(

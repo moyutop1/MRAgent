@@ -5,7 +5,6 @@ import re
 from datetime import datetime, date
 from typing import List, Dict, Set, Any
 from collections import defaultdict
-from memory.keyword_matching import normalize_keyword_entries
 
 class Topic:
     def __init__(self, topic_id: str, text: str):
@@ -75,7 +74,6 @@ class EAESMemoryNote:
             origin: str,
             embedding=None,
             retrieval_embedding=None,
-            keywords=None,
     ):
         self.memory_id = memory_id
         self.event_id = event_id
@@ -88,9 +86,6 @@ class EAESMemoryNote:
         self.origin = origin
         self.embedding = embedding
         self.retrieval_embedding = retrieval_embedding
-        # Kept internal for the query-keyword gate. Reader/reranker payloads
-        # intentionally continue to omit build-side memory keywords.
-        self.keywords = list(keywords or [])
 
     def to_dict(self, include_raw: bool = False):
         data = {
@@ -150,7 +145,6 @@ class MemorySystem:
         self.eaes_event_to_memory: Dict[str, str] = {}
         self.eaes_by_entity: Dict[str, Set[str]] = defaultdict(set)
         self.eaes_by_attribute: Dict[str, Set[str]] = defaultdict(set)
-        self.eaes_keyword_index = {}
 
     # ----- Node ops -----
 
@@ -304,9 +298,6 @@ class MemorySystem:
     def add_eaes_memory_note(self, note: EAESMemoryNote):
         self.eaes_notes[note.memory_id] = note
         self.eaes_event_to_memory[note.event_id] = note.memory_id
-        self.eaes_keyword_index[note.memory_id] = normalize_keyword_entries(
-            note.keywords
-        )
         for entity in note.entities or []:
             norm_entity = self._eaes_norm(entity)
             if norm_entity:

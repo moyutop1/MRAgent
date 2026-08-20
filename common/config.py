@@ -24,6 +24,12 @@ parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PAREN
 parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
 parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Compatibility option retained for existing commands; semantic child windows are rewritten sequentially so each window can reference the preceding two child rewrites.")
+parser.add_argument(
+    "--child_duplicate_similarity_threshold",
+    type=float,
+    default=float(os.getenv("CHILD_DUPLICATE_SIMILARITY_THRESHOLD", "0.55")),
+    help="Fuse adjacent semantic-hierarchy child memories when cosine similarity is strictly above this threshold.",
+)
 parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "4")), help="Semantic parent memories passed directly to the EAES final reader.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
@@ -235,6 +241,7 @@ PARENT_MAX_TURNS = args.parent_max_turns
 PARENT_CONTEXT_TURNS = args.parent_context_turns
 CHILD_MAX_TURNS = args.child_max_turns
 CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
+CHILD_DUPLICATE_SIMILARITY_THRESHOLD = args.child_duplicate_similarity_threshold
 PARENT_TOP_K = args.parent_top_k
 if EAES_ROLLBACK_CHECK and (
         EAES_RERANK_LIMIT != 16 or PARENT_TOP_K != 4
@@ -254,6 +261,10 @@ if CHILD_MAX_TURNS <= 0:
     raise ValueError("--child_max_turns must be positive.")
 if CHILD_REWRITE_BATCH_SIZE <= 0 or CHILD_REWRITE_BATCH_SIZE > 15:
     raise ValueError("--child_rewrite_batch_size must be between 1 and 15.")
+if not 0.0 <= CHILD_DUPLICATE_SIMILARITY_THRESHOLD <= 1.0:
+    raise ValueError(
+        "--child_duplicate_similarity_threshold must be between 0 and 1."
+    )
 if PARENT_TOP_K <= 0:
     raise ValueError("--parent_top_k must be positive.")
 

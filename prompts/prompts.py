@@ -189,8 +189,8 @@ Schema:
 Rules:
 - CURRENT_WINDOW_TURNS is the only evidence section. Rewrite every turn and every piece of information in that section; nothing may be omitted, even greetings, questions, acknowledgements, generic advice, repeated confirmations, repeated facts, or image/caption information.
 - A single turn containing several independent pieces of information must produce several sentence objects. A window may therefore produce one or many sentence objects.
-- Preserve every repeated occurrence as a separate memory. Never deduplicate against another sentence or against REFERENCE_PREVIOUS_CHILD_REWRITES. If the current window repeats a referenced fact, write a new memory using only the current occurrence's origin.
-- REFERENCE_PREVIOUS_CHILD_REWRITES contains only the two most recently generated child rewrite texts. Use it only to resolve people, objects, topics, pronouns, and ellipsis in the current window. It is not evidence, must not independently produce a memory, and must never supply an origin.
+- If adjacent current-window turns express the same fact or event, represent that information once and include every contributing current-window origin in dialogue order. Do not create multiple sentence objects that merely restate the same content.
+- REFERENCE_PREVIOUS_CHILD_REWRITES contains only the two most recently retained child rewrite texts. Use it to recognize repeated content and to resolve people, objects, topics, pronouns, and ellipsis in the current window. It is not evidence, must not independently produce a memory, and must never supply an origin. When a current turn repeats a referenced fact, express the current evidence at most once using only current-window origins; a downstream similarity check decides whether to fuse it with the previous child.
 - Every sentence must be self-contained. Resolve pronouns into concrete entities and preserve all source-supported people, relationships, time, place, state, causality, task outcomes, questions, responses, and image facts.
 - Every origin must come from CURRENT_WINDOW_TURNS, must list all current-window turns contributing to that memory in dialogue order, and must never cite a reference-only rewrite.
 - Across the complete sentence list, every turn in CURRENT_WINDOW_TURNS must appear in at least one origin.
@@ -235,6 +235,26 @@ CURRENT_CHILD_WINDOW:
             PAYLOAD=payload,
             PREVIOUS_REWRITES=previous_rewrites,
         )
+
+    CHILD_MEMORY_FUSION_SYSTEM_PROMPT = """You fuse two highly similar adjacent child memories. Only output valid JSON.
+Rules:
+- Return exactly one concise, self-contained rewrite_content string.
+- Preserve every distinct source-supported fact, entity, relationship, time, place, state, cause, and outcome from both inputs.
+- Remove duplicated wording while retaining complementary details.
+- Do not invent information, weaken temporal precision, mention the fusion process, or output IDs, origins, tags, topics, or semantic properties.
+Schema:
+{
+  "rewrite_content": "One fused self-contained child memory."
+}"""
+
+    CHILD_MEMORY_FUSION_PROMPT = """ADJACENT_CHILD_MEMORIES:
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_child_memory_fusion_prompt(cls, payload: str) -> str:
+        return cls.CHILD_MEMORY_FUSION_PROMPT.format(PAYLOAD=payload)
 
 
     KEYWORD_SYSTEM_PROMPT = """You are an information extraction system. Only output valid JSON.

@@ -2,6 +2,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
+from math import sqrt
 from typing import List, NamedTuple
 
 from common import config
@@ -545,6 +546,167 @@ def _previous_child_rewrite_context(generated_memories, limit=2):
     ]
 
 
+def _embed_child_memory_texts(texts):
+    import numpy as np
+    from llm.embeddings import get_embedding
+
+    clean_texts = [str(text or "").strip() for text in texts]
+    if not clean_texts or any(not text for text in clean_texts):
+        raise ValueError("child memory similarity requires non-empty text")
+    embeddings = np.asarray(get_embedding(clean_texts), dtype=np.float32)
+    if embeddings.ndim == 1:
+        embeddings = embeddings.reshape(1, -1)
+    if embeddings.ndim != 2 or embeddings.shape[0] != len(clean_texts):
+        raise ValueError(
+            "child memory embedding count does not match the input text count"
+        )
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    if np.any(norms <= 0):
+        raise ValueError("child memory embedding contains a zero-length vector")
+    return embeddings / norms
+
+
+def _child_memory_cosine_similarity(left_embedding, right_embedding):
+    left = [float(value) for value in left_embedding]
+    right = [float(value) for value in right_embedding]
+    if len(left) != len(right) or not left:
+        raise ValueError("child memory embeddings must have the same non-zero shape")
+    denominator = sqrt(sum(value * value for value in left)) * sqrt(
+        sum(value * value for value in right)
+    )
+    if denominator <= 0:
+        raise ValueError("child memory cosine similarity received a zero vector")
+    similarity = sum(a * b for a, b in zip(left, right)) / denominator
+    return max(-1.0, min(1.0, similarity))
+
+
+def _merged_child_origins(previous_origin, current_origin):
+    return ",".join(dict.fromkeys(
+        origin_ids(previous_origin) + origin_ids(current_origin)
+    ))
+
+
+def _fuse_child_memory_text(llm, previous_text, current_text, logger=None):
+    payload = json.dumps({
+        "previous_rewrite_content": previous_text,
+        "current_rewrite_content": current_text,
+    }, ensure_ascii=False)
+    user_prompt = Prompts.extract_child_memory_fusion_prompt(payload)
+    last_error = ""
+    for attempt in range(4):
+        system_prompt = Prompts.CHILD_MEMORY_FUSION_SYSTEM_PROMPT
+        if attempt:
+            system_prompt += (
+                "\nThe previous fusion output was invalid. Return the complete "
+                "JSON object again. "
+                f"Validation error: {last_error}"
+            )
+        output = llm.chat_text(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0 if attempt == 0 else 0.7,
+        )
+        if not isinstance(output, dict):
+            last_error = "fusion output must be a JSON object"
+            continue
+        raw_rewrite_content = output.get("rewrite_content")
+        if not isinstance(raw_rewrite_content, str):
+            last_error = "rewrite_content must be a string"
+            continue
+        rewrite_content = raw_rewrite_content.strip()
+        if not rewrite_content:
+            last_error = "rewrite_content must be a non-empty string"
+            continue
+        return rewrite_content
+    if logger:
+        logger.error(
+            "child memory fusion failed after retries: %s", last_error
+        )
+    raise ValueError(
+        f"child memory fusion failed after retries: {last_error}"
+    )
+
+
+def _fuse_adjacent_duplicate_child_memories(
+        llm,
+        retained_memories,
+        candidate_memories,
+        previous_embedding=None,
+        threshold=None,
+        logger=None,
+):
+    if threshold is None:
+        threshold = getattr(
+            config, "CHILD_DUPLICATE_SIMILARITY_THRESHOLD", 0.55
+        )
+    threshold = float(threshold)
+    kept_candidates = []
+    last_embedding = previous_embedding
+    candidates = list(candidate_memories or [])
+    current_texts = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("child memory candidate must be an object")
+        current_text = str(candidate.get("text") or "").strip()
+        if not current_text:
+            raise ValueError("child memory candidate text must be non-empty")
+        current_texts.append(current_text)
+
+    if not candidates:
+        return kept_candidates, last_embedding
+
+    embedding_inputs = list(current_texts)
+    includes_previous = bool(retained_memories and last_embedding is None)
+    if includes_previous:
+        previous_text = str(retained_memories[-1].get("text") or "").strip()
+        embedding_inputs.insert(0, previous_text)
+    embeddings = _embed_child_memory_texts(embedding_inputs)
+    if includes_previous:
+        last_embedding = embeddings[0]
+        current_embeddings = embeddings[1:]
+    else:
+        current_embeddings = embeddings
+
+    for candidate, current_text, current_vector in zip(
+            candidates, current_texts, current_embeddings):
+        if not retained_memories:
+            retained_memories.append(candidate)
+            kept_candidates.append(candidate)
+            last_embedding = current_vector
+            continue
+
+        previous = retained_memories[-1]
+        previous_text = str(previous.get("text") or "").strip()
+        similarity = _child_memory_cosine_similarity(
+            last_embedding, current_vector
+        )
+
+        if similarity > threshold:
+            fused_text = _fuse_child_memory_text(
+                llm, previous_text, current_text, logger=logger
+            )
+            previous["text"] = fused_text
+            previous["origin"] = _merged_child_origins(
+                previous.get("origin"), candidate.get("origin")
+            )
+            last_embedding = _embed_child_memory_texts([fused_text])[0]
+            if logger:
+                logger.info(
+                    "fused adjacent child %s into %s at cosine %.4f (> %.4f)",
+                    candidate.get("id"), previous.get("id"), similarity,
+                    threshold,
+                )
+            continue
+
+        retained_memories.append(candidate)
+        kept_candidates.append(candidate)
+        last_embedding = current_vector
+
+    return kept_candidates, last_embedding
+
+
 def _rewrite_child_window(
         llm,
         window,
@@ -618,6 +780,7 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
 
     window_outputs = []
     generated_memories = []
+    last_child_embedding = None
     for window in child_windows:
         previous_rewrites = _previous_child_rewrite_context(
             generated_memories, limit=2
@@ -630,8 +793,17 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             previous_rewrites=previous_rewrites,
             logger=logger,
         )
+        kept_sentences, last_child_embedding = (
+            _fuse_adjacent_duplicate_child_memories(
+                llm,
+                generated_memories,
+                _as_list(output.get("sentence")),
+                previous_embedding=last_child_embedding,
+                logger=logger,
+            )
+        )
+        output["sentence"] = kept_sentences
         window_outputs.append(output)
-        generated_memories.extend(_as_list(output.get("sentence")))
 
     parents = attach_child_memory_ids_to_parents(
         parents, generated_memories

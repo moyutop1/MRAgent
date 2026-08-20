@@ -155,6 +155,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--rewrite_window_size` | Current raw turns per rewrite window, excluding overlap context | `40` |
 | `--rewrite_overlap_size` | Tail turns from the preceding window supplied as raw context | `2` |
 | `--rewrite_previous_limit` | Previous compressed memories supplied for deduplication | `3` |
+| `--child_duplicate_similarity_threshold` | fuse adjacent semantic-hierarchy children when cosine similarity is strictly above this value | `0.55` |
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |

@@ -2,6 +2,7 @@ import copy
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 common_module = types.ModuleType("common")
@@ -15,6 +16,7 @@ common_module.config = types.SimpleNamespace(
     PARENT_CONTEXT_TURNS=2,
     CHILD_MAX_TURNS=8,
     CHILD_REWRITE_BATCH_SIZE=15,
+    CHILD_DUPLICATE_SIMILARITY_THRESHOLD=0.55,
 )
 sys.modules.setdefault("common", common_module)
 sys.modules.setdefault("common.config", common_module.config)
@@ -36,6 +38,7 @@ sys.modules.setdefault("jsonschema", jsonschema_module)
 
 from agent.rewrite_memory import (
     _child_window_source_text,
+    _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
     rewrite_semantic_hierarchy_session,
@@ -49,6 +52,7 @@ from agent.semantic_segmentation import (
     plan_parent_segments,
 )
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
+from prompts.prompts import Prompts
 
 
 class SequenceLLM:
@@ -298,26 +302,71 @@ class SemanticHierarchyTests(unittest.TestCase):
             window, turns, "2023-05-08"
         ))
 
-    def test_one_turn_can_produce_repeated_memories_without_deduplication(self):
+    def test_duplicate_model_outputs_are_fused_after_window_validation(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
-        llm = SequenceLLM([_rewrite_output(
-            _sentence("D1:1", "The same stated information."),
-            _sentence("D1:1", "The same stated information."),
-        )])
+        llm = SequenceLLM([
+            _rewrite_output(
+                _sentence("D1:1", "The same stated information."),
+                _sentence("D1:1", "The same stated information."),
+            ),
+            {"rewrite_content": "The same stated information."},
+        ])
 
         output = _rewrite_child_window(
             llm, window, turns, "2023-05-08"
         )
+        retained = []
+        with patch(
+                "agent.rewrite_memory._embed_child_memory_texts",
+                side_effect=lambda texts: [[1.0, 0.0] for _ in texts],
+        ):
+            kept, _ = _fuse_adjacent_duplicate_child_memories(
+                llm, retained, output["sentence"], threshold=0.55
+            )
 
-        self.assertEqual(len(output["sentence"]), 2)
-        self.assertEqual(
-            [item["id"] for item in output["sentence"]],
-            ["D1:1-1", "D1:1-2"],
+        self.assertEqual(kept, [retained[0]])
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0]["id"], "D1:1-1")
+        self.assertEqual(retained[0]["origin"], "D1:1")
+        self.assertIn(
+            "highly similar adjacent child memories",
+            llm.calls[1][0]["content"],
         )
-        self.assertEqual(
-            output["sentence"][0]["text"],
-            output["sentence"][1]["text"],
+
+    def test_similarity_must_be_strictly_above_threshold(self):
+        previous = _sentence("D1:1", "previous", "D1:1-1")
+        current = _sentence("D1:2", "current", "D1:2-1")
+        retained = [previous]
+        llm = SequenceLLM([])
+
+        with patch(
+                "agent.rewrite_memory._embed_child_memory_texts",
+                return_value=[[1.0, 0.0]],
+        ), patch(
+                "agent.rewrite_memory._child_memory_cosine_similarity",
+                return_value=0.55,
+        ):
+            kept, _ = _fuse_adjacent_duplicate_child_memories(
+                llm,
+                retained,
+                [current],
+                previous_embedding=[1.0, 0.0],
+                threshold=0.55,
+            )
+
+        self.assertEqual(kept, [current])
+        self.assertEqual(retained, [previous, current])
+        self.assertEqual(llm.calls, [])
+
+    def test_child_prompt_no_longer_requires_independent_duplicates(self):
+        prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
+
+        self.assertNotIn("Preserve every repeated occurrence", prompt)
+        self.assertNotIn("every repeated occurrence", prompt)
+        self.assertIn(
+            "Do not create multiple sentence objects that merely restate",
+            prompt,
         )
 
     def test_child_window_rewrite_rejects_raw_storage_fields(self):
@@ -345,7 +394,12 @@ class SemanticHierarchyTests(unittest.TestCase):
         )
         second_window = _rewrite_output(
             _sentence("D1:4", "repeated information"),
-            _sentence("D1:5", "repeated information"),
+            _sentence(
+                "D1:5",
+                "repeated information",
+                tag="Different Tag",
+                semantic_properties=["state_opinion", "transient"],
+            ),
         )
         llm = SequenceLLM([
             {"parent_segments": [
@@ -358,16 +412,33 @@ class SemanticHierarchyTests(unittest.TestCase):
             first_window,
             second_window,
             {
+                "rewrite_content": "The repeated information was stated once."
+            },
+            {
                 "parent_id": "D1:t1",
                 "rewrite_content": "A coarse parent memory.",
             },
         ])
 
-        output = rewrite_semantic_hierarchy_session(llm, _dialogue(5))
+        embedding_by_text = {
+            "first turn": [1.0, 0.0],
+            "first fact in turn two": [0.0, 1.0],
+            "second fact in turn two": [-1.0, 0.0],
+            "third turn": [0.0, -1.0],
+            "repeated information": [1.0, 0.0],
+            "The repeated information was stated once.": [1.0, 0.0],
+        }
+        with patch(
+                "agent.rewrite_memory._embed_child_memory_texts",
+                side_effect=lambda texts: [
+                    embedding_by_text[text] for text in texts
+                ],
+        ):
+            output = rewrite_semantic_hierarchy_session(llm, _dialogue(5))
 
         expected_ids = [
             "D1:1-1", "D1:2-1", "D1:2-2",
-            "D1:3-1", "D1:4-1", "D1:5-1",
+            "D1:3-1", "D1:4-1",
         ]
         self.assertEqual(
             [item["id"] for item in output["sentence"]], expected_ids
@@ -377,17 +448,28 @@ class SemanticHierarchyTests(unittest.TestCase):
             "rewrite_content": "A coarse parent memory.",
             "child_ids": expected_ids,
         }])
-        self.assertEqual(len(llm.calls), 5)
+        fused = output["sentence"][-1]
+        self.assertEqual(fused["text"], "The repeated information was stated once.")
+        self.assertEqual(fused["origin"], "D1:4,D1:5")
+        self.assertEqual(fused["tag"], "Turn Memory")
+        self.assertEqual(
+            fused["semantic_properties"], ["event_action", "episodic"]
+        )
+        self.assertEqual(len(llm.calls), 6)
         second_prompt = llm.calls[3][1]["content"]
         reference_section = second_prompt.split("CURRENT_CHILD_WINDOW:", 1)[0]
         self.assertIn("second fact in turn two", reference_section)
         self.assertIn("third turn", reference_section)
         self.assertNotIn("first fact in turn two", reference_section)
-        self.assertIn(
-            "every repeated occurrence",
-            llm.calls[3][0]["content"],
+        self.assertNotIn(
+            "every repeated occurrence", llm.calls[3][0]["content"]
         )
-        parent_rewrite_call = llm.calls[4]
+        fusion_call = llm.calls[4]
+        self.assertIn(
+            "highly similar adjacent child memories",
+            fusion_call[0]["content"],
+        )
+        parent_rewrite_call = llm.calls[5]
         self.assertIn("PERSON PROFILE MEMORY", parent_rewrite_call[0]["content"])
 
     def test_memory_ids_attach_to_parent_by_first_origin(self):

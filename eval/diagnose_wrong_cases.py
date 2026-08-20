@@ -50,6 +50,11 @@ def parse_args():
     )
     p.add_argument("--judge_file", type=str, default=None, help="Existing result_judge_*.jsonl file.")
     p.add_argument(
+        "--hit20_only",
+        action="store_true",
+        help="Only include wrong rows whose answer-run judge record has hit_at_20=true.",
+    )
+    p.add_argument(
         "--retrieval_tag",
         type=str,
         default=None,
@@ -125,6 +130,14 @@ def norm_text(text):
     return " ".join(str(text or "").split())
 
 
+def norm_case_question(text):
+    question = norm_text(text)
+    for suffix in ("No extra explanations.", "Give reasons with original text."):
+        if question.endswith(suffix):
+            return question[:-len(suffix)].rstrip()
+    return question
+
+
 def filter_categories(rows, categories):
     selected = {
         item.strip()
@@ -136,8 +149,33 @@ def filter_categories(rows, categories):
     return [row for row in rows if str(row.get("category")) in selected]
 
 
+def case_keys(row):
+    sample = str(row.get("sample") or "")
+    keys = []
+    question_index = row.get("question_index")
+    if question_index is not None and str(question_index).strip():
+        keys.append(("index", sample, str(question_index).strip()))
+    question = norm_case_question(row.get("question"))
+    if question:
+        keys.append(("question", sample, question))
+    return keys
+
+
 def case_key(row):
-    return (str(row.get("sample") or ""), norm_text(row.get("question")))
+    keys = case_keys(row)
+    return keys[0] if keys else ("question", str(row.get("sample") or ""), "")
+
+
+def add_case(by_key, row):
+    for key in case_keys(row):
+        by_key[key] = row
+
+
+def find_case(by_key, row):
+    for key in case_keys(row):
+        if key in by_key:
+            return by_key[key]
+    return None
 
 
 def load_judge(args):
@@ -145,7 +183,7 @@ def load_judge(args):
     rows = read_jsonl(judge_path)
     by_key = {}
     for row in rows:
-        by_key[case_key(row)] = row
+        add_case(by_key, row)
     return by_key, judge_path, rows
 
 
@@ -173,7 +211,7 @@ def load_retrieval(args):
                     continue
                 row = json.loads(line)
                 row["_file"] = str(fp)
-                by_key[case_key(row)] = row
+                add_case(by_key, row)
     return by_key, files
 
 
@@ -193,6 +231,15 @@ def is_wrong(row, judge_row, f1_threshold):
     if judge_row is not None and "llm_score" in judge_row:
         return int(judge_row.get("llm_score") or 0) == 0
     return row_f1(row) < f1_threshold
+
+
+def is_hit20(judge_row):
+    if judge_row is None or "hit_at_20" not in judge_row:
+        return False
+    value = judge_row.get("hit_at_20")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return value is True or value == 1
 
 
 def compact_candidate(cand, rank):
@@ -257,10 +304,12 @@ def build_case(row, judge_row, retrieval_row, topk):
         "category": row.get("category"),
         "question": row.get("question"),
         "gold_answer": row.get("answer"),
+        "gold_evidence": row.get("evidence"),
         "prediction": row.get("prediction"),
         "prediction_context": row.get("prediction_context"),
         "f1": round(f1, 4),
         "judge_score": None if judge_row is None else judge_row.get("llm_score"),
+        "hit_at_20": None if judge_row is None else judge_row.get("hit_at_20"),
         "answer_file": row.get("_file"),
     }
     if retrieval_row:
@@ -315,7 +364,9 @@ def write_md(path, cases):
             )
             f.write(f"**Question:** {case.get('question')}\n\n")
             f.write(f"**Gold:** {case.get('gold_answer')}\n\n")
+            f.write(f"**Gold Evidence:** `{case.get('gold_evidence')}`\n\n")
             f.write(f"**Prediction:** {case.get('prediction')}\n\n")
+            f.write(f"**Answer-run Hit@20:** `{case.get('hit_at_20')}`\n\n")
             f.write(f"**Prediction Context:** `{case.get('prediction_context')}`\n\n")
             if "retrieval_metrics" in case:
                 f.write(f"**Retrieval Metrics:** `{case.get('retrieval_metrics')}`\n\n")
@@ -340,17 +391,28 @@ def main():
     judge_by_key, judge_path, judge_rows = load_judge(args)
     retrieval_by_key, retrieval_paths = load_retrieval(args)
 
+    if args.hit20_only and not any("hit_at_20" in row for row in judge_rows):
+        raise ValueError(
+            "--hit20_only requires a judge file containing hit_at_20. "
+            "Run eval/evaluate_reasoning.py first or pass the correct --judge_file."
+        )
+
     wrong_cases = []
     for row in answers:
-        judge_row = judge_by_key.get(case_key(row))
+        judge_row = find_case(judge_by_key, row)
         if not is_wrong(row, judge_row, args.f1_threshold):
             continue
-        retrieval_row = retrieval_by_key.get(case_key(row))
+        if args.hit20_only and not is_hit20(judge_row):
+            continue
+        retrieval_row = find_case(retrieval_by_key, row)
         wrong_cases.append(build_case(row, judge_row, retrieval_row, args.topk))
 
     out_dir = Path("result") / args.data
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_base = f"wrong_cases_{args.model}_{args.file}"
+    out_base = (
+        f"wrong_cases_{args.model}_{args.file}"
+        f"{'_hit20' if args.hit20_only else ''}"
+    )
     out_jsonl = args.out_jsonl or str(out_dir / f"{out_base}.jsonl")
     out_md = args.out_md or str(out_dir / f"{out_base}.md")
     write_jsonl(out_jsonl, wrong_cases)

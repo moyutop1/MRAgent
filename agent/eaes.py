@@ -448,7 +448,42 @@ class EAESMixin:
             return {}
         plan = dict(query_plan)
         plan.pop("keywords", None)
+        plan.pop("retrieval_phrases", None)
+        plan.pop("retrieval_phrase_source", None)
         return plan
+
+    @staticmethod
+    def _normalize_eaes_retrieval_phrases(values, expected_count=4):
+        if not isinstance(values, list):
+            return None
+        phrases = [
+            value.strip()
+            for value in values
+            if isinstance(value, str) and value.strip()
+        ]
+        if len(phrases) < expected_count:
+            return None
+        return phrases[:expected_count]
+
+    def _regenerate_eaes_retrieval_phrases(
+            self, query_question, invalid_phrases
+    ):
+        return self.llm.chat_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps({
+                        "question": query_question,
+                        "previous_invalid_output": invalid_phrases,
+                    }, ensure_ascii=False),
+                },
+            ],
+            model=config.RE_MODEL,
+        )
 
     def _eaes_query_plan_from_output(self, query_question, query_out, query_mode):
         if not isinstance(query_out, dict):
@@ -466,6 +501,13 @@ class EAESMixin:
             "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
             "keywords": self._as_list(query_out.get("keywords")),
             "query_mode": query_mode,
+            "retrieval_phrases": (
+                self._normalize_eaes_retrieval_phrases(
+                    query_out.get("retrieval_phrases"),
+                    expected_count=getattr(config, "EAES_PHRASE_COUNT", 4),
+                )
+                or []
+            ),
         }
         if config.EAES_SEMANTIC_SCORE:
             # Query requirements use exact labels only. Unknown persistence
@@ -501,21 +543,45 @@ class EAESMixin:
         parsed_plan = self._eaes_query_plan_from_output(
             query_question, query_out, "question_only"
         )
-        if parsed_plan is not None:
-            return parsed_plan
-        fallback_query = {
-            "entities": [],
-            "query_attributes": [query_question],
-            "answer_type": "unknown",
-            "temporal_intent": "none",
-            "required_lifecycle": "unknown",
-            "keywords": [],
-            "query_mode": "question_text_fallback",
-        }
-        if config.EAES_SEMANTIC_SCORE:
-            # A failed semantic query parse is neutral: no match and no penalty.
-            fallback_query["required_semantic_properties"] = []
-        return self._postprocess_eaes_query_plan(query_question, fallback_query)
+        if parsed_plan is None:
+            parsed_plan = {
+                "entities": [],
+                "query_attributes": [query_question],
+                "answer_type": "unknown",
+                "temporal_intent": "none",
+                "required_lifecycle": "unknown",
+                "keywords": [],
+                "query_mode": "question_text_fallback",
+                "retrieval_phrases": [],
+            }
+            if config.EAES_SEMANTIC_SCORE:
+                # A failed semantic query parse is neutral: no match and no penalty.
+                parsed_plan["required_semantic_properties"] = []
+
+        phrase_count = getattr(config, "EAES_PHRASE_COUNT", 4)
+        phrases = self._normalize_eaes_retrieval_phrases(
+            parsed_plan.get("retrieval_phrases"),
+            expected_count=phrase_count,
+        )
+        phrase_source = "initial"
+        if phrases is None:
+            repair_out = self._regenerate_eaes_retrieval_phrases(
+                query_question,
+                query_out.get("retrieval_phrases")
+                if isinstance(query_out, dict) else None,
+            )
+            phrases = self._normalize_eaes_retrieval_phrases(
+                repair_out.get("retrieval_phrases")
+                if isinstance(repair_out, dict) else None,
+                expected_count=phrase_count,
+            )
+            phrase_source = "regenerated"
+        if phrases is None:
+            phrases = [query_question] * phrase_count
+            phrase_source = "question_fallback"
+        parsed_plan["retrieval_phrases"] = phrases
+        parsed_plan["retrieval_phrase_source"] = phrase_source
+        return self._postprocess_eaes_query_plan(query_question, parsed_plan)
 
     def rerank_eaes_candidates(self, question, query_plan, candidates):
         if not candidates:
@@ -564,6 +630,85 @@ class EAESMixin:
             item["prefilter_rank"] = item.get("rank")
             item["rerank_rank"] = rerank_rank
             item["rerank_source"] = "llm" if memory_id in llm_selected_ids else "embedding_fill"
+            item["rank"] = rerank_rank
+            reranked.append(item)
+        return reranked
+
+    def rerank_eaes_phrase_candidates(self, question, candidates, top_k=None):
+        if not candidates:
+            return []
+        requested_limit = top_k or getattr(
+            config, "EAES_PHRASE_RERANK_LIMIT", 15
+        )
+        limit = min(requested_limit, len(candidates))
+        fallback_candidates = sorted(
+            candidates,
+            key=lambda candidate: (
+                -float(candidate.get("_rrf_score") or 0.0),
+                int(candidate.get("_rrf_rank") or 10**9),
+                str(candidate.get("memory_id") or ""),
+            ),
+        )
+        prompt_candidates = sorted(
+            candidates,
+            key=lambda candidate: str(candidate.get("memory_id") or ""),
+        )
+        rerank_input = {
+            "question": self._eaes_query_question(question),
+            "limit": limit,
+            "candidates": [
+                {
+                    "memory_id": candidate.get("memory_id"),
+                    "origin": candidate.get("origin"),
+                    "tag": candidate.get("tag"),
+                    "rewrite_content": candidate.get("rewrite_content"),
+                }
+                for candidate in prompt_candidates
+            ],
+        }
+        out = self.llm.chat_text(
+            messages=[
+                {
+                    "role": "system",
+                    "content": Prompts.EAES_PHRASE_CANDIDATE_RERANK_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(rerank_input, ensure_ascii=False),
+                },
+            ],
+            model=config.RE_MODEL,
+        )
+        by_id = {
+            candidate.get("memory_id"): candidate
+            for candidate in candidates
+            if candidate.get("memory_id")
+        }
+        ordered_ids = []
+        if isinstance(out, dict):
+            for memory_id in self._as_list(out.get("ranked_memory_ids")):
+                if memory_id in by_id and memory_id not in ordered_ids:
+                    ordered_ids.append(memory_id)
+                if len(ordered_ids) >= limit:
+                    break
+        llm_selected_ids = set(ordered_ids)
+        for candidate in fallback_candidates:
+            memory_id = candidate.get("memory_id")
+            if memory_id and memory_id not in ordered_ids:
+                ordered_ids.append(memory_id)
+            if len(ordered_ids) >= limit:
+                break
+
+        reranked = []
+        for rerank_rank, memory_id in enumerate(ordered_ids[:limit], start=1):
+            item = {
+                key: value for key, value in by_id[memory_id].items()
+                if key not in {"_rrf_score", "_rrf_rank"}
+            }
+            item["rerank_rank"] = rerank_rank
+            item["rerank_source"] = (
+                "llm" if memory_id in llm_selected_ids else "rrf_fill"
+            )
             item["rank"] = rerank_rank
             reranked.append(item)
         return reranked
@@ -673,7 +818,7 @@ class EAESMixin:
                 break
 
         # An incomplete or malformed 30-to-3 result is treated as a failed
-        # rollback check. This keeps the first-pass Top20 unchanged.
+        # rollback check. This keeps the first-pass reader set unchanged.
         if len(selected_keys) != limit:
             return [], []
         selected_children = [
@@ -785,8 +930,8 @@ class EAESMixin:
             if node_id in parent_pool_ids and node_id not in parent_ids:
                 parent_ids.append(node_id)
 
-        # The final call defines the actual reader Top20. Partial, duplicate,
-        # or invented-ID outputs must not silently alter the first-pass set.
+        # A successful final call defines the rollback reader Top20. Partial,
+        # duplicate, or invented-ID outputs must not alter the first-pass set.
         if len(child_ids) != child_limit or len(parent_ids) != parent_limit:
             return list(initial_children or []), list(initial_parents or [])
 
@@ -1236,13 +1381,16 @@ class EAESMixin:
             parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
                 query_plan, question_emb, limit=config.PARENT_TOP_K
             )
-        embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-            child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
-        if not embedding_candidates and not parent_candidates:
+        phrase_candidates = self.memory_controller.retrieve_eaes_phrase_candidates(
+            query_plan["retrieval_phrases"]
+        )
+        if not phrase_candidates and not parent_candidates:
             return "no information available", []
-        candidates = self.rerank_eaes_candidates(
-            question, child_query_plan, embedding_candidates
-        ) if embedding_candidates else []
+        candidates = self.rerank_eaes_phrase_candidates(
+            question,
+            phrase_candidates,
+            top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+        ) if phrase_candidates else []
         if not candidates and not parent_candidates:
             return "no information available", []
 
@@ -1278,7 +1426,7 @@ class EAESMixin:
         except Exception:
             logger.warning(
                 "EAES rollback check failed after a no-information answer; "
-                "retaining the first-pass answer and Top20.",
+                "retaining the first-pass answer and reader set.",
                 exc_info=True,
             )
             return first_answer, first_context

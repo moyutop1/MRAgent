@@ -65,12 +65,31 @@ class RetrievalMixin:
     def diagnose_eaes_gold_memories(self, gold_evidence, retrieval, question_emb=None, window=2):
         if not isinstance(retrieval, dict) or retrieval.get("mode") != "eaes":
             return None
-        query_plan = retrieval.get("query_plan") or {}
-        ranked = self.memory_controller.score_eaes_candidates(
-            query_plan, question_emb, limit=None, include_rank=True)
+        phrase_retrieval = retrieval.get("phrase_retrieval") or {}
+        prefilter_candidates = self._as_list(retrieval.get("prefilter_candidates"))
+        ranked = sorted(
+            (
+                item for item in prefilter_candidates
+                if isinstance(item, dict) and item.get("memory_id")
+            ),
+            key=lambda item: (
+                int(item.get("_rrf_rank") or 10**9),
+                str(item.get("memory_id") or ""),
+            ),
+        )
         by_memory_id = {item.get("memory_id"): item for item in ranked if item.get("memory_id")}
         by_event_id = {item.get("event_id"): item for item in ranked if item.get("event_id")}
-        prefilter_candidates = self._as_list(retrieval.get("prefilter_candidates"))
+        phrase_hits = {}
+        for phrase_index, phrase_ranking in enumerate(
+                self._as_list(phrase_retrieval.get("phrase_top15"))):
+            for item in self._as_list(phrase_ranking):
+                if not isinstance(item, dict) or not item.get("memory_id"):
+                    continue
+                phrase_hits.setdefault(item["memory_id"], []).append({
+                    "phrase_index": phrase_index,
+                    "rank": item.get("rank"),
+                    "similarity": item.get("similarity"),
+                })
         prefilter_memory_ids = {
             item.get("memory_id") for item in prefilter_candidates if isinstance(item, dict)
         }
@@ -91,9 +110,9 @@ class RetrievalMixin:
         )
 
         diagnostics = {
-            "prefilter_limit": config.EAES_CANDIDATE_LIMIT,
-            "rerank_limit": config.EAES_RERANK_LIMIT,
-            "total_scored_memories": len(ranked),
+            "prefilter_limit": getattr(config, "EAES_PHRASE_UNION_LIMIT", 40),
+            "rerank_limit": getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            "total_scored_memories": len(self.memory.eaes_notes),
             "gold_origins": [],
         }
         for origin in self._normalize_evidence_ids(gold_evidence):
@@ -127,7 +146,7 @@ class RetrievalMixin:
                 memory_id = self.memory.eaes_event_to_memory.get(event_id)
                 note = self.memory.get_eaes_note(memory_id) if memory_id else None
                 scored = by_memory_id.get(memory_id) or by_event_id.get(event_id)
-                rank = scored.get("rank") if scored else None
+                rank = scored.get("_rrf_rank") if scored else None
                 reranked = reranked_by_memory_id.get(memory_id)
                 rerank_rank = reranked.get("rerank_rank") if reranked else None
                 neighbor_window = []
@@ -140,8 +159,10 @@ class RetrievalMixin:
                             "memory_id": neighbor.get("memory_id"),
                             "event_id": neighbor.get("event_id"),
                             "origin": neighbor.get("origin"),
-                            "score": neighbor.get("score"),
-                            "score_parts": neighbor.get("score_parts"),
+                            "score": neighbor.get("_rrf_score"),
+                            "phrase_hits": phrase_hits.get(
+                                neighbor.get("memory_id"), []
+                            ),
                         })
                 memory_entries.append({
                     "event_id": event_id,
@@ -153,16 +174,18 @@ class RetrievalMixin:
                     "candidate_rank": rank,
                     "prefilter_rank": rank,
                     "rerank_rank": rerank_rank,
-                    "candidate_score": scored.get("score") if scored else None,
-                    "score_parts": scored.get("score_parts") if scored else None,
+                    "candidate_score": scored.get("_rrf_score") if scored else None,
+                    "score_parts": {
+                        "phrase_hits": phrase_hits.get(memory_id, []),
+                    },
                     "entities": note.entities if note is not None else [],
                     "attribute_paths": note.attribute_paths if note is not None else [],
                     "rewrite_content": note.rewrite_content if note is not None else None,
                     "nearby_ranked_candidates": neighbor_window,
                     "drop_reason": (
                         "not_built_in_eaes_memory" if note is None else
-                        "not_scored_by_query_attributes" if scored is None else
-                        "rank_beyond_prefilter_topk" if rank and rank > config.EAES_CANDIDATE_LIMIT else
+                        "not_in_any_phrase_top15" if memory_id not in phrase_hits else
+                        "dropped_by_per_phrase_rrf" if scored is None else
                         "dropped_by_llm_reranker" if memory_id not in reranked_by_memory_id else
                         "inside_llm_topk"
                     ),
@@ -195,12 +218,12 @@ class RetrievalMixin:
                 origin_drop_reason = "inside_llm_topk"
             elif covered_by_parent:
                 origin_drop_reason = "inside_parent_topk"
-            elif rank_values and min(rank_values) > config.EAES_CANDIDATE_LIMIT:
-                origin_drop_reason = "rank_beyond_prefilter_topk"
             elif rank_values:
                 origin_drop_reason = "dropped_by_llm_reranker"
+            elif any(memory_id in phrase_hits for memory_id in memory_ids):
+                origin_drop_reason = "dropped_by_per_phrase_rrf"
             else:
-                origin_drop_reason = "not_scored_by_query_attributes"
+                origin_drop_reason = "not_in_any_phrase_top15"
 
             diagnostics["gold_origins"].append({
                 "origin": origin,
@@ -246,10 +269,16 @@ class RetrievalMixin:
                 parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
                     query_plan, question_emb, limit=config.PARENT_TOP_K
                 )
-            embedding_candidates = self.memory_controller.retrieve_eaes_candidates(
-                child_query_plan, question_emb, limit=config.EAES_CANDIDATE_LIMIT)
-            candidates = self.rerank_eaes_candidates(
-                question, child_query_plan, embedding_candidates
+            embedding_candidates, phrase_retrieval = (
+                self.memory_controller.retrieve_eaes_phrase_candidates(
+                    query_plan["retrieval_phrases"],
+                    include_diagnostics=True,
+                )
+            )
+            candidates = self.rerank_eaes_phrase_candidates(
+                question,
+                embedding_candidates,
+                top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             )
             rollback_metadata = {"enabled": False}
             if getattr(config, "EAES_ROLLBACK_CHECK", False):
@@ -311,7 +340,7 @@ class RetrievalMixin:
                 except Exception:
                     logger.warning(
                         "EAES rollback reader gate/check failed; retaining "
-                        "first-pass Top20.",
+                        "the first-pass reader set.",
                         exc_info=True,
                     )
                     rollback_metadata = {
@@ -368,10 +397,8 @@ class RetrievalMixin:
                 self._origins_for_event_ids([candidate.get("event_id")])
                 for candidate in embedding_candidates
             ]
-            child_k = config.EAES_RERANK_LIMIT
-            parent_k = config.PARENT_TOP_K if getattr(
-                config, "SEMANTIC_HIERARCHY", False
-            ) else 0
+            child_k = len(candidates)
+            parent_k = len(parent_candidates)
             return {
                 "mode": "eaes",
                 "query_plan": query_plan,
@@ -395,8 +422,12 @@ class RetrievalMixin:
                 "prefilter_event_ids": prefilter_event_ids,
                 "prefilter_origins": prefilter_origins,
                 "prefilter_origin_groups": prefilter_origin_groups,
-                "prefilter_k": config.EAES_CANDIDATE_LIMIT,
+                "prefilter_k": getattr(config, "EAES_PHRASE_UNION_LIMIT", 40),
                 "prefilter_candidates": embedding_candidates,
+                "phrase_retrieval": {
+                    "retrieval_phrases": query_plan["retrieval_phrases"],
+                    **phrase_retrieval,
+                },
                 "rollback_check": rollback_metadata,
             }
 

@@ -36,11 +36,17 @@ parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVA
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "16")), help="Child memories kept by the EAES attribute reranker for evidence selection.")
+parser.add_argument("--eaes_phrase_count", type=int, default=int(os.getenv("EAES_PHRASE_COUNT", "4")), help="Number of child-tag retrieval phrases generated per question.")
+parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "15")), help="Child-tag candidates retrieved independently for each phrase before fusion.")
+parser.add_argument("--eaes_phrase_protected_top_k", type=int, default=int(os.getenv("EAES_PHRASE_PROTECTED_TOP_K", "5")), help="Highest-similarity candidates protected in each phrase ranking.")
+parser.add_argument("--eaes_phrase_final_top_k", type=int, default=int(os.getenv("EAES_PHRASE_FINAL_TOP_K", "10")), help="Candidates retained per phrase after protected-plus-RRF selection.")
+parser.add_argument("--eaes_phrase_rrf_k", type=float, default=float(os.getenv("EAES_PHRASE_RRF_K", "10")), help="Reciprocal-rank-fusion denominator constant for child-tag retrieval.")
+parser.add_argument("--eaes_phrase_rerank_limit", type=int, default=int(os.getenv("EAES_PHRASE_RERANK_LIMIT", "15")), help="Final child memories retained by the query-only phrase-candidate reranker.")
 parser.add_argument(
     "--eaes_rollback_check",
     action="store_true",
     help=(
-        "Run the reader on the first 16-child + 4-parent retrieval. Only when its answer "
+        "Run the reader on the first phrase-reranked child + parent retrieval. Only when its answer "
         "is 'no information available', build a complementary query plan, select three "
         "candidates from 27 unseen children plus 3 unseen parents, and rerank the merged "
         "pool back to the original 16 + 4 budget."
@@ -201,6 +207,32 @@ if EAES_CANDIDATE_LIMIT <= 0:
 EAES_RERANK_LIMIT = args.eaes_rerank_limit
 if EAES_RERANK_LIMIT <= 0 or EAES_RERANK_LIMIT > EAES_CANDIDATE_LIMIT:
     raise ValueError("--eaes_rerank_limit must be positive and no larger than --eaes_prefilter_limit.")
+EAES_PHRASE_COUNT = args.eaes_phrase_count
+EAES_PHRASE_INITIAL_TOP_K = args.eaes_phrase_initial_top_k
+EAES_PHRASE_PROTECTED_TOP_K = args.eaes_phrase_protected_top_k
+EAES_PHRASE_FINAL_TOP_K = args.eaes_phrase_final_top_k
+EAES_PHRASE_RRF_K = args.eaes_phrase_rrf_k
+EAES_PHRASE_RERANK_LIMIT = args.eaes_phrase_rerank_limit
+if EAES_PHRASE_COUNT != 4:
+    raise ValueError("--eaes_phrase_count must equal 4 for the four-phrase retrieval policy.")
+if not (
+        0 < EAES_PHRASE_PROTECTED_TOP_K
+        <= EAES_PHRASE_FINAL_TOP_K
+        <= EAES_PHRASE_INITIAL_TOP_K
+):
+    raise ValueError(
+        "phrase retrieval limits must satisfy "
+        "0 < protected_top_k <= final_top_k <= initial_top_k."
+    )
+if EAES_PHRASE_RRF_K <= 0:
+    raise ValueError("--eaes_phrase_rrf_k must be positive.")
+if EAES_PHRASE_RERANK_LIMIT <= 0:
+    raise ValueError("--eaes_phrase_rerank_limit must be positive.")
+EAES_PHRASE_UNION_LIMIT = EAES_PHRASE_COUNT * EAES_PHRASE_FINAL_TOP_K
+if EAES_PHRASE_RERANK_LIMIT > EAES_PHRASE_UNION_LIMIT:
+    raise ValueError(
+        "--eaes_phrase_rerank_limit cannot exceed the maximum fused phrase pool."
+    )
 EAES_ROLLBACK_CHECK = args.eaes_rollback_check
 EAES_ROLLBACK_CHILD_PREFILTER_LIMIT = 27
 EAES_ROLLBACK_PARENT_PREFILTER_LIMIT = 3

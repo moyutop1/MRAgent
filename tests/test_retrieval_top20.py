@@ -51,8 +51,20 @@ class _Controller:
         self.parent_plans = []
 
     def retrieve_eaes_candidates(self, query_plan, *_args, **_kwargs):
-        self.child_plans.append(dict(query_plan))
         return _children()
+
+    def retrieve_eaes_phrase_candidates(
+            self, retrieval_phrases, include_diagnostics=False, **_kwargs
+    ):
+        self.child_plans.append(list(retrieval_phrases))
+        candidates = _children()
+        diagnostics = {
+            "phrase_top15": [],
+            "phrase_final_top10": [],
+            "fused_candidate_ids": [item["memory_id"] for item in candidates],
+            "rrf_scores": {},
+        }
+        return (candidates, diagnostics) if include_diagnostics else candidates
 
     def retrieve_eaes_parent_candidates(self, query_plan, *_args, **kwargs):
         self.parent_plans.append(dict(query_plan))
@@ -80,17 +92,22 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
         return {
             "query_attributes": ["profile.pet: pet owned by Caroline"],
             "keywords": ["dog"],
+            "retrieval_phrases": [
+                "Caroline pet", "pet owned by Caroline",
+                "Caroline animal", "Caroline companion",
+            ],
         }
 
     @staticmethod
     def _eaes_child_query_plan(query_plan):
         child_plan = dict(query_plan)
         child_plan.pop("keywords", None)
+        child_plan.pop("retrieval_phrases", None)
         return child_plan
 
     @staticmethod
-    def rerank_eaes_candidates(_question, _query_plan, candidates):
-        return list(candidates)[:config.EAES_RERANK_LIMIT]
+    def rerank_eaes_phrase_candidates(_question, candidates, top_k=15):
+        return list(candidates)[:top_k]
 
     def _read_eaes_candidates(
             self, _question, _child_query_plan, _candidates, _parents,
@@ -110,29 +127,29 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
 
 
 class RetrievalTopTwentyTests(unittest.TestCase):
-    def test_retrieval_only_matches_sixteen_child_four_parent_budget(self):
+    def test_retrieval_only_matches_fifteen_child_four_parent_budget(self):
         agent = _RetrievalAgent()
 
         with (
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
 
-        self.assertEqual(result["retrieval_k"], 20)
-        self.assertEqual(result["child_k"], 16)
+        self.assertEqual(result["retrieval_k"], 19)
+        self.assertEqual(result["child_k"], 15)
         self.assertEqual(result["parent_k"], 4)
-        self.assertEqual(len(result["candidates"]), 16)
+        self.assertEqual(len(result["candidates"]), 15)
         self.assertEqual(len(result["parent_candidates"]), 4)
-        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
-        self.assertEqual(len(result["retrieved_memory_ids"]), 20)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 19)
+        self.assertEqual(len(result["retrieved_memory_ids"]), 19)
         self.assertEqual(
             agent.memory_controller.parent_plans[0]["keywords"], ["dog"]
         )
-        self.assertNotIn("keywords", agent.memory_controller.child_plans[0])
+        self.assertEqual(len(agent.memory_controller.child_plans[0]), 4)
         self.assertIn("D2:1", result["parent_origins"])
 
     def test_retrieval_only_runs_enabled_rollback_check(self):
@@ -143,7 +160,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
@@ -173,7 +190,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence(
@@ -197,7 +214,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             "event_id": "D9:99-1",
             "origin": "D9:99",
             "rewrite_content": "Rollback evidence retained in final Top20.",
-            "rank": 16,
+            "rank": 15,
         }
 
         with (
@@ -205,7 +222,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What happened?")
@@ -215,11 +232,11 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             result["retrieved_origins"],
             result["retrieved_origin_groups"],
         )
-        self.assertEqual(result["retrieval_k"], 20)
-        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
-        self.assertEqual(result["retrieved_origin_groups"][15], ["D9:99"])
+        self.assertEqual(result["retrieval_k"], 19)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 19)
+        self.assertEqual(result["retrieved_origin_groups"][14], ["D9:99"])
         self.assertEqual(metrics["hit"], 1)
-        self.assertEqual(metrics["mrr"], 1 / 16)
+        self.assertEqual(metrics["mrr"], 1 / 15)
 
 
 if __name__ == "__main__":

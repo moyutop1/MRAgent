@@ -239,7 +239,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         exact = sum(r["exact_cover"] for r in scored) / len(scored)
         mrr = sum(r["mrr"] for r in scored) / len(scored)
         retrieval_k = (
-            config.EAES_RERANK_LIMIT
+            config.EAES_PHRASE_RERANK_LIMIT
             + (config.PARENT_TOP_K if config.SEMANTIC_HIERARCHY else 0)
         )
         logger.info(
@@ -248,7 +248,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             f"ExactCover@{retrieval_k}={exact:.4f} MRR@{retrieval_k}={mrr:.4f}"
         )
         for label, metric_key, k in (
-            ("child-rerank", "child_metrics", config.EAES_RERANK_LIMIT),
+            ("child-rerank", "child_metrics", config.EAES_PHRASE_RERANK_LIMIT),
             ("parent", "parent_metrics", config.PARENT_TOP_K),
         ):
             stage_rows = [
@@ -271,10 +271,10 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         if prefilter_scored:
             logger.info(
                 f"[combined-prefilter] {sample_id}: n={len(prefilter_scored)} "
-                f"Hit@{config.EAES_CANDIDATE_LIMIT}={sum(r['hit'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"Recall@{config.EAES_CANDIDATE_LIMIT}={sum(r['recall'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"ExactCover@{config.EAES_CANDIDATE_LIMIT}={sum(r['exact_cover'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"MRR@{config.EAES_CANDIDATE_LIMIT}={sum(r['mrr'] for r in prefilter_scored) / len(prefilter_scored):.4f}"
+                f"Hit@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['hit'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"Recall@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['recall'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"ExactCover@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['exact_cover'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
+                f"MRR@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['mrr'] for r in prefilter_scored) / len(prefilter_scored):.4f}"
             )
 
 

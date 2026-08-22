@@ -4,7 +4,7 @@ import unittest
 
 
 def _load_accuracy_prompt():
-    source_path = Path(__file__).parent / "eval" / "judge.py"
+    source_path = Path(__file__).parent.parent / "eval" / "judge.py"
     module = ast.parse(source_path.read_text(encoding="utf-8"))
     for node in module.body:
         if (

@@ -27,6 +27,8 @@ class MemoryController:
         self.queried_event = []
         self._eaes_query_embedding_cache = {}
         self._eaes_parent_query_embedding_cache = {}
+        self._eaes_tag_embedding_cache = {}
+        self._eaes_phrase_embedding_cache = {}
 
 
     def query_conversation_time(self, event_id):
@@ -111,6 +113,210 @@ class MemoryController:
                 )
             for parent, vector in zip(pending, vectors):
                 parent.retrieval_embedding = vector
+
+    def _eaes_child_tag(self, note):
+        return self.memory.episode_events[note.event_id].tag_t.strip()
+
+    def _prepare_eaes_tag_embeddings(self):
+        pending = []
+        for note in self.memory.eaes_notes.values():
+            tag = self._eaes_child_tag(note)
+            cached = self._eaes_tag_embedding_cache.get(note.memory_id)
+            if cached is None or cached[0] != tag:
+                pending.append((note, tag))
+        if not pending:
+            return
+
+        with _EAES_EMBEDDING_LOCK:
+            pending = []
+            for note in self.memory.eaes_notes.values():
+                tag = self._eaes_child_tag(note)
+                cached = self._eaes_tag_embedding_cache.get(note.memory_id)
+                if cached is None or cached[0] != tag:
+                    pending.append((note, tag))
+            if not pending:
+                return
+
+            vectors = self._normalize_embedding_rows(
+                get_embedding([tag for _, tag in pending])
+            )
+            if len(vectors) != len(pending):
+                raise RuntimeError(
+                    "EAES tag embedding count mismatch: "
+                    f"{len(vectors)} != {len(pending)}"
+                )
+            for (note, tag), vector in zip(pending, vectors):
+                self._eaes_tag_embedding_cache[note.memory_id] = (tag, vector)
+
+    def _eaes_phrase_embeddings(self, retrieval_phrases):
+        cache_key = tuple(retrieval_phrases)
+        vectors = self._eaes_phrase_embedding_cache.get(cache_key)
+        if vectors is not None:
+            return vectors
+        with _EAES_EMBEDDING_LOCK:
+            vectors = self._eaes_phrase_embedding_cache.get(cache_key)
+            if vectors is None:
+                vectors = self._normalize_embedding_rows(
+                    get_embedding(list(retrieval_phrases))
+                )
+                self._eaes_phrase_embedding_cache[cache_key] = vectors
+        return vectors
+
+    def rank_eaes_children_per_phrase(
+            self,
+            retrieval_phrases,
+            top_k=None,
+            exclude_memory_ids=None,
+    ):
+        phrases = [str(value).strip() for value in retrieval_phrases or []]
+        if len(phrases) != config.EAES_PHRASE_COUNT or any(not value for value in phrases):
+            raise ValueError(
+                f"Expected exactly {config.EAES_PHRASE_COUNT} non-empty retrieval phrases"
+            )
+        top_k = top_k or config.EAES_PHRASE_INITIAL_TOP_K
+        excluded = set(exclude_memory_ids or [])
+
+        self._prepare_eaes_tag_embeddings()
+        phrase_vectors = self._eaes_phrase_embeddings(phrases)
+        notes = sorted(
+            (
+                note for note in self.memory.eaes_notes.values()
+                if note.memory_id not in excluded
+            ),
+            key=lambda note: note.memory_id,
+        )
+        if not notes:
+            return [[] for _ in phrases]
+
+        tag_matrix = np.vstack([
+            self._eaes_tag_embedding_cache[note.memory_id][1]
+            for note in notes
+        ])
+        phrase_rankings = []
+        for phrase_index, (phrase, phrase_vector) in enumerate(
+                zip(phrases, phrase_vectors)):
+            similarities = np.dot(tag_matrix, phrase_vector)
+            scored = sorted(
+                zip(notes, similarities),
+                key=lambda pair: (-float(pair[1]), pair[0].memory_id),
+            )[:top_k]
+            ranking = []
+            for phrase_rank, (note, similarity) in enumerate(scored, start=1):
+                ranking.append({
+                    **note.to_dict(include_raw=False),
+                    "tag": self._eaes_child_tag(note),
+                    "phrase_index": phrase_index,
+                    "phrase": phrase,
+                    "phrase_rank": phrase_rank,
+                    "phrase_similarity": float(similarity),
+                })
+            phrase_rankings.append(ranking)
+        return phrase_rankings
+
+    @staticmethod
+    def fuse_eaes_phrase_rankings(
+            phrase_rankings,
+            rrf_k=10.0,
+            protected_top_k=5,
+            final_per_phrase=10,
+    ):
+        rrf_scores = {}
+        for ranking in phrase_rankings:
+            for item in ranking:
+                memory_id = item.get("memory_id")
+                rank = int(item.get("phrase_rank") or 0)
+                if not memory_id or rank <= 0:
+                    continue
+                rrf_scores[memory_id] = (
+                    rrf_scores.get(memory_id, 0.0)
+                    + 1.0 / (float(rrf_k) + rank)
+                )
+
+        final_phrase_lists = []
+        for ranking in phrase_rankings:
+            protected = list(ranking[:protected_top_k])
+            remaining = sorted(
+                ranking[protected_top_k:],
+                key=lambda item: (
+                    -rrf_scores.get(item.get("memory_id"), 0.0),
+                    -float(item.get("phrase_similarity") or 0.0),
+                    int(item.get("phrase_rank") or 0),
+                    str(item.get("memory_id") or ""),
+                ),
+            )
+            supplement_count = max(0, final_per_phrase - len(protected))
+            final_phrase_lists.append(protected + remaining[:supplement_count])
+
+        fused_by_id = {}
+        for ranking in final_phrase_lists:
+            for item in ranking:
+                memory_id = item.get("memory_id")
+                if not memory_id or memory_id in fused_by_id:
+                    continue
+                public_item = {
+                    key: value for key, value in item.items()
+                    if key not in {
+                        "phrase_index", "phrase", "phrase_rank",
+                        "phrase_similarity",
+                    }
+                }
+                public_item["_rrf_score"] = rrf_scores.get(memory_id, 0.0)
+                fused_by_id[memory_id] = public_item
+
+        fused = sorted(
+            fused_by_id.values(),
+            key=lambda item: (
+                -float(item.get("_rrf_score") or 0.0),
+                str(item.get("memory_id") or ""),
+            ),
+        )
+        for rrf_rank, item in enumerate(fused, start=1):
+            item["_rrf_rank"] = rrf_rank
+
+        diagnostics = {
+            "phrase_top15": [
+                [
+                    {
+                        "memory_id": item.get("memory_id"),
+                        "rank": item.get("phrase_rank"),
+                        "similarity": item.get("phrase_similarity"),
+                    }
+                    for item in ranking
+                ]
+                for ranking in phrase_rankings
+            ],
+            "phrase_final_top10": [
+                [item.get("memory_id") for item in ranking]
+                for ranking in final_phrase_lists
+            ],
+            "fused_candidate_ids": [item.get("memory_id") for item in fused],
+            "rrf_scores": {
+                memory_id: score
+                for memory_id, score in sorted(rrf_scores.items())
+            },
+        }
+        return fused, diagnostics
+
+    def retrieve_eaes_phrase_candidates(
+            self,
+            retrieval_phrases,
+            exclude_memory_ids=None,
+            include_diagnostics=False,
+    ):
+        rankings = self.rank_eaes_children_per_phrase(
+            retrieval_phrases,
+            top_k=config.EAES_PHRASE_INITIAL_TOP_K,
+            exclude_memory_ids=exclude_memory_ids,
+        )
+        candidates, diagnostics = self.fuse_eaes_phrase_rankings(
+            rankings,
+            rrf_k=config.EAES_PHRASE_RRF_K,
+            protected_top_k=config.EAES_PHRASE_PROTECTED_TOP_K,
+            final_per_phrase=config.EAES_PHRASE_FINAL_TOP_K,
+        )
+        if include_diagnostics:
+            return candidates, diagnostics
+        return candidates
 
     def _eaes_parent_keyword_embeddings(self, query_plan, question_emb=None):
         keywords = [

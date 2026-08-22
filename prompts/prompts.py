@@ -317,7 +317,8 @@ Schema:
   "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
   "required_lifecycle": "planned | current | historical | unknown",
   "no_time_limit": true,
-  "keywords": ["important lexical constraints"]
+  "keywords": ["important lexical constraints"],
+  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4"]
 }
 Rules:
 - Use "historical" when the question asks what happened, what someone did, or what events someone attended.
@@ -327,7 +328,20 @@ Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
+- Generate exactly four non-empty short retrieval_phrases suitable for matching short memory tags.
+- The four retrieval phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
+- Do not force different evidence aspects, invent implicit subquestions, or add entities, facts, times, constraints, or answer values not present in the question.
 - Do not answer the question."""
+
+    EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT = """You repair an invalid list of retrieval phrases for long-term conversational memory. Only output valid JSON.
+Generate exactly four non-empty short retrieval phrases for the supplied question.
+The previous output contained fewer than four valid phrases.
+The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
+Do not force different evidence aspects. Do not invent entities, facts, times, constraints, implicit subquestions, or answer values. Do not answer the question.
+Schema:
+{
+  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4"]
+}"""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """
 
@@ -383,6 +397,18 @@ Use only the question, query_attributes, memory attribute_paths, and prefilter r
 Do not answer the question. Do not invent memory IDs.
 Prefer memories whose attributes directly contain the relation needed to fill the question's answer slot.
 Keep complementary attribute evidence for multi-hop and list questions.
+Return memory IDs in descending relevance order, with at most the requested limit.
+Schema:
+{
+  "ranked_memory_ids": ["M_D1_2_1"]
+}"""
+
+    EAES_PHRASE_CANDIDATE_RERANK_PROMPT = """You rerank child memory candidates for a long-term conversational-memory question. Only output valid JSON.
+Use only the original question and each candidate's tag and rewrite_content.
+Rank candidates solely by how useful their stored content is for answering the question.
+The retrieval phrases and retrieval scores are intentionally hidden and must not be inferred as required evidence categories.
+Do not enforce diversity or phrase coverage. Select complementary memories only when the original question itself requires multiple facts.
+Do not answer the question and do not invent memory IDs.
 Return memory IDs in descending relevance order, with at most the requested limit.
 Schema:
 {

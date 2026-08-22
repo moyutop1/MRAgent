@@ -193,6 +193,10 @@ def _query_output():
         "temporal_intent": "none",
         "required_lifecycle": "unknown",
         "keywords": ["dog"],
+        "retrieval_phrases": [
+            "Caroline pet", "pet owned by Caroline",
+            "Caroline animal", "Caroline companion",
+        ],
         "required_semantic_properties": [
             "personal_profile", "durable", "unknown", "personal_profile",
             "profile_preference", "fact_background",

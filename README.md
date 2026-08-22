@@ -159,10 +159,16 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
-| `--eaes_prefilter_limit` | combined-score candidates retained before LLM reranking | `120` |
-| `--eaes_rerank_limit` | child memories retained by the attribute LLM reranker | `16` |
+| `--eaes_phrase_count` | retrieval phrases generated for each question (fixed policy) | `4` |
+| `--eaes_phrase_initial_top_k` | tag-similarity candidates independently retrieved per phrase | `15` |
+| `--eaes_phrase_protected_top_k` | original similarity-ranked candidates protected per phrase | `5` |
+| `--eaes_phrase_final_top_k` | candidates retained per phrase after RRF selection | `10` |
+| `--eaes_phrase_rrf_k` | RRF denominator constant | `10` |
+| `--eaes_phrase_rerank_limit` | children retained by the query-only LLM reranker | `15` |
+| `--eaes_prefilter_limit` | legacy combined-score pool used by rollback/compatibility paths | `120` |
+| `--eaes_rerank_limit` | rollback final child budget | `16` |
 | `--parent_top_k` | independently retrieved parent memories sent to the final reader | `4` |
-| `--eaes_rollback_check` | run the first-pass Top20 reader; only if it answers `no information available`, retrieve 27 unseen children plus 3 unseen parents, select 3 supplements, then rerank back to 16 children plus 4 parents | off |
+| `--eaes_rollback_check` | if the normal 15-child + 4-parent reader answers `no information available`, retrieve 27 unseen children plus 3 unseen parents, select 3 supplements, then rerank back to 16 children plus 4 parents | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | pass all reranked candidates directly to answer readers, including the retrieval-only rollback trigger reader | off |
 
@@ -185,8 +191,8 @@ python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_qu
 python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26 --eaes
 
-# entity-attribute-memory retrieval diagnostics with the default 16-child + 4-parent budget
-python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+# entity-attribute-memory retrieval diagnostics with the default 15-child + 4-parent budget
+python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm --parent_top_k 4
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50 --sample conv-26 --eaes --semantic_hierarchy
 
 # semantic-property scoring ablation (rewrite memories must first be regenerated with semantic_properties)
@@ -251,4 +257,5 @@ normalized gold evidence do not enter this metric.
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
-- With semantic hierarchy enabled, retrieval-only reports the same 20-node budget used by the no-selector reader: `Hit@20` for 16 ranked children plus 4 independently ranked parents. It also reports child `Hit@16`, parent `Hit@4`, and prefilter `Hit@120` separately.
+- Normal EAES child retrieval generates four phrases, retrieves tag-similarity Top15 independently, protects each phrase's original Top5, uses RRF (`k=10`) to retain Top10 per phrase, deduplicates the at-most-40 union, and applies a query-only reranker to keep Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
+- With semantic hierarchy enabled, retrieval-only normally reports `Hit@19` for 15 ranked children plus 4 independently ranked parents. It also reports child `Hit@15`, parent `Hit@4`, and fused-prefilter `Hit@40` separately.

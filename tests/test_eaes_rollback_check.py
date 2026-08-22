@@ -82,6 +82,10 @@ class _ReaderGateController:
         return _children("C", 20)
 
     @staticmethod
+    def retrieve_eaes_phrase_candidates(_retrieval_phrases, **_kwargs):
+        return _children("C", 20)
+
+    @staticmethod
     def retrieve_eaes_parent_candidates(_query_plan, _question_emb, **_kwargs):
         return _parents("P", 4)
 
@@ -98,15 +102,18 @@ class _ReaderGateAgent(EAESMixin):
         return {
             "query_attributes": ["profile.pet"],
             "keywords": ["pet"],
+            "retrieval_phrases": ["pet", "owned pet", "animal", "companion"],
         }
 
     @staticmethod
     def _eaes_child_query_plan(query_plan):
-        return dict(query_plan)
+        plan = dict(query_plan)
+        plan.pop("retrieval_phrases", None)
+        return plan
 
     @staticmethod
-    def rerank_eaes_candidates(_question, _query_plan, candidates):
-        return list(candidates)[:16]
+    def rerank_eaes_phrase_candidates(_question, candidates, top_k=15):
+        return list(candidates)[:top_k]
 
     def _read_eaes_candidates(
             self, _question, _child_query_plan, candidates, parents,
@@ -160,7 +167,7 @@ class EAESRollbackCheckTests(unittest.TestCase):
         self.assertEqual(answer, "A dog")
         self.assertEqual(agent.rollback_calls, 0)
         self.assertEqual(len(agent.reader_inputs), 1)
-        self.assertEqual(len(context), 20)
+        self.assertEqual(len(context), 19)
 
     def test_answer_mode_rolls_back_only_after_no_information_answer(self):
         agent = _ReaderGateAgent([

@@ -314,33 +314,31 @@ Schema:
   "entities": ["person or entity names"],
   "query_attributes": ["semantic.path: question-side relation clause"],
   "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
-  "temporal_intent": "historical_event | planned_event | current_state | relative_time | time_answer | none",
-  "required_lifecycle": "planned | current | historical | unknown",
-  "no_time_limit": true,
   "keywords": ["important lexical constraints"],
-  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4"]
+  "retrieval_phrases": ["noun phrase 1", "noun phrase 2", "noun phrase 3", "noun phrase 4"]
 }
 Rules:
-- Use "historical" when the question asks what happened, what someone did, or what events someone attended.
-- Use "planned" when the question asks about intentions, plans, scheduled future events, or going to do something.
-- Use "current" when the question asks about now, currently, still, preferences, roles, residence, or ongoing state.
-- Use "unknown" with no_time_limit=true for stable fact/profile questions without an explicit temporal or event constraint, such as identity, relationship status, preferences, interests, activities, membership, allyship, career fields, or kinds/types of art.
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
-- Generate exactly four non-empty short retrieval_phrases suitable for matching short memory tags.
+- Generate exactly four non-empty retrieval_phrases in exactly the same surface style as memory tags.
+- Every retrieval phrase must be a short concrete noun phrase of no more than three words.
+- Never output a sentence, question, clause, or question word as a retrieval phrase.
+- Valid phrase forms include "support group", "career interest", "pottery class", and "camping location"; do not copy an example unless the question supports it.
 - The four retrieval phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 - Do not force different evidence aspects, invent implicit subquestions, or add entities, facts, times, constraints, or answer values not present in the question.
 - Do not answer the question."""
 
     EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT = """You repair an invalid list of retrieval phrases for long-term conversational memory. Only output valid JSON.
-Generate exactly four non-empty short retrieval phrases for the supplied question.
-The previous output contained fewer than four valid phrases.
+Generate exactly four non-empty retrieval phrases for the supplied question.
+The previous output had the wrong count or contained an invalid phrase.
+Every phrase must use exactly the same surface style as a memory tag: a short concrete noun phrase of no more than three words.
+Never output a sentence, question, clause, or question word as a retrieval phrase.
 The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 Do not force different evidence aspects. Do not invent entities, facts, times, constraints, implicit subquestions, or answer values. Do not answer the question.
 Schema:
 {
-  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4"]
+  "retrieval_phrases": ["noun phrase 1", "noun phrase 2", "noun phrase 3", "noun phrase 4"]
 }"""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """

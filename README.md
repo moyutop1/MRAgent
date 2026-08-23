@@ -257,5 +257,5 @@ normalized gold evidence do not enter this metric.
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
-- Normal EAES child retrieval generates four phrases, retrieves tag-similarity Top15 independently, protects each phrase's original Top5, uses RRF (`k=10`) to retain Top10 per phrase, deduplicates the at-most-40 union, and applies a query-only reranker to keep Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
+- Normal EAES child retrieval generates four tag-style short concrete noun phrases of at most three words, retrieves tag-similarity Top15 independently, protects each phrase's original Top5, uses RRF (`k=10`) to retain Top10 per phrase, deduplicates the at-most-40 union, and applies a query-only reranker to keep Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
 - With semantic hierarchy enabled, retrieval-only normally reports `Hit@19` for 15 ranked children plus 4 independently ranked parents. It also reports child `Hit@15`, parent `Hit@4`, and fused-prefilter `Hit@40` separately.

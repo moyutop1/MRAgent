@@ -144,8 +144,6 @@ def _rollback_plan():
         "entities": ["Caroline"],
         "query_attributes": ["profile.pet: animal owned by Caroline"],
         "answer_type": "fact",
-        "temporal_intent": "none",
-        "required_lifecycle": "unknown",
         "keywords": ["animal companion"],
     }
 

@@ -190,11 +190,9 @@ def _query_output():
         "entities": ["Caroline"],
         "query_attributes": ["profile.pet: pets Caroline owns"],
         "answer_type": "fact",
-        "temporal_intent": "none",
-        "required_lifecycle": "unknown",
         "keywords": ["dog"],
         "retrieval_phrases": [
-            "Caroline pet", "pet owned by Caroline",
+            "Caroline pet", "pet ownership",
             "Caroline animal", "Caroline companion",
         ],
         "required_semantic_properties": [
@@ -267,7 +265,6 @@ class SemanticScoringTests(unittest.TestCase):
         query_plan = {
             "entities": [],
             "keywords": list(keywords or []),
-            "required_lifecycle": "unknown",
             "required_semantic_properties": required_properties,
         }
 

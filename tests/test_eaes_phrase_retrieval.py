@@ -10,6 +10,7 @@ dotenv_module.load_dotenv = lambda: None
 sys.modules.setdefault("dotenv", dotenv_module)
 
 from agent.eaes import EAESMixin
+from prompts.prompts import Prompts
 
 HAS_RETRIEVAL_RUNTIME = all(
     importlib.util.find_spec(name) is not None
@@ -41,8 +42,6 @@ def _query_output(phrases):
         "entities": ["Caroline"],
         "query_attributes": ["event.attendance: event Caroline attended"],
         "answer_type": "event_list",
-        "temporal_intent": "historical_event",
-        "required_lifecycle": "historical",
         "keywords": ["Caroline"],
         "retrieval_phrases": phrases,
     }
@@ -71,23 +70,45 @@ class PhrasePlanTests(unittest.TestCase):
                 ["a", "b", None, "d"]
             )
         )
+        self.assertIsNone(
+            EAESMixin._normalize_eaes_retrieval_phrases(
+                ["one", "two", "three", "four word phrase invalid"]
+            )
+        )
         self.assertEqual(
             EAESMixin._normalize_eaes_retrieval_phrases(
-                ["same", "same", "another", "fourth", "ignored"]
+                [
+                    "support group", "support group", "career interest",
+                    "pottery class", "ignored phrase",
+                ]
             ),
-            ["same", "same", "another", "fourth"],
+            ["support group", "support group", "career interest", "pottery class"],
         )
 
-    def test_parse_repairs_short_phrase_list_once(self):
+    def test_parse_repairs_wrong_count_or_overlong_phrase_once(self):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([
-            _query_output(["one", "two"]),
-            {"retrieval_phrases": ["one", "two", "three", "four"]},
+            _query_output([
+                "support group", "career interest", "pottery class",
+                "four word phrase invalid",
+            ]),
+            {
+                "retrieval_phrases": [
+                    "support group", "career interest",
+                    "pottery class", "camping location",
+                ]
+            },
         ])
 
         plan = mixin.parse_eaes_query("What event did Caroline attend?")
 
-        self.assertEqual(plan["retrieval_phrases"], ["one", "two", "three", "four"])
+        self.assertEqual(
+            plan["retrieval_phrases"],
+            [
+                "support group", "career interest",
+                "pottery class", "camping location",
+            ],
+        )
         self.assertEqual(plan["retrieval_phrase_source"], "regenerated")
         self.assertEqual(len(mixin.llm.inputs), 2)
 
@@ -101,9 +122,37 @@ class PhrasePlanTests(unittest.TestCase):
 
         plan = mixin.parse_eaes_query(question)
 
-        self.assertEqual(plan["retrieval_phrases"], [question] * 4)
+        self.assertEqual(
+            plan["retrieval_phrases"], ["event Caroline attend"] * 4
+        )
         self.assertEqual(plan["retrieval_phrase_source"], "question_fallback")
         self.assertEqual(len(mixin.llm.inputs), 2)
+
+    def test_deprecated_temporal_fields_are_never_kept_in_query_plan(self):
+        output = _query_output([
+            "support group", "career interest",
+            "pottery class", "camping location",
+        ])
+        output.update({
+            "temporal_intent": "historical_event",
+            "required_lifecycle": "historical",
+            "no_time_limit": False,
+        })
+        mixin = _TestEAES()
+        mixin.llm = _QueuedLLM([output])
+
+        plan = mixin.parse_eaes_query("What event did Caroline attend?")
+
+        self.assertNotIn("temporal_intent", plan)
+        self.assertNotIn("required_lifecycle", plan)
+        self.assertNotIn("no_time_limit", plan)
+
+    def test_query_prompts_require_tag_style_three_word_noun_phrases(self):
+        for prompt in (
+                Prompts.EAES_QUERY_SYSTEM_PROMPT,
+                Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT):
+            self.assertIn("short concrete noun phrase", prompt)
+            self.assertIn("no more than three words", prompt)
 
 
 def _ranking(phrase_index):

@@ -169,10 +169,6 @@ class MemoryController:
             exclude_memory_ids=None,
     ):
         phrases = [str(value).strip() for value in retrieval_phrases or []]
-        if len(phrases) != config.EAES_PHRASE_COUNT or any(not value for value in phrases):
-            raise ValueError(
-                f"Expected exactly {config.EAES_PHRASE_COUNT} non-empty retrieval phrases"
-            )
         top_k = top_k or config.EAES_PHRASE_INITIAL_TOP_K
         excluded = set(exclude_memory_ids or [])
 
@@ -373,7 +369,6 @@ class MemoryController:
         self.prepare_eaes_retrieval_embeddings()
         query_vectors, query_attributes = self._eaes_query_embeddings(query_plan, question_emb)
         query_entities = self._as_list(query_plan.get("entities"))
-        required_lifecycle = str(query_plan.get("required_lifecycle") or "").lower().strip()
         required_semantic_properties = []
         if config.EAES_SEMANTIC_SCORE:
             for value in self._as_list(query_plan.get("required_semantic_properties")):
@@ -407,9 +402,6 @@ class MemoryController:
                 )
             else:
                 entity_score = 0.2
-            lifecycle_score = 0.0
-            if required_lifecycle in {"planned", "current", "historical"}:
-                lifecycle_score = 1.0 if note.event_lifecycle == required_lifecycle else 0.0
             original_embedding_score = 0.0
             if question_emb is not None and note.embedding is not None:
                 try:
@@ -443,7 +435,6 @@ class MemoryController:
             score = (
                 2.0 * entity_score
                 + 1.4 * attribute_score
-                + 0.1 * lifecycle_score
                 + 0.2 * original_embedding_score
                 + semantic_bonus
             )
@@ -454,7 +445,6 @@ class MemoryController:
                     "entity": round(entity_score, 3),
                     "attribute": round(attribute_score, 4),
                     "attribute_embedding_raw": round(raw_attribute_score, 4),
-                    "lifecycle": round(lifecycle_score, 3),
                     "embedding": round(original_embedding_score, 3),
                     "semantic_match_count": semantic_match_count,
                     "matched_semantic_properties": matched_semantic_properties,

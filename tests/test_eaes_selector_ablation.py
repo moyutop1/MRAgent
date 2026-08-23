@@ -80,7 +80,7 @@ class _AblationAgent(EAESMixin):
             "query_attributes": ["profile.pet: pet owned by Caroline"],
             "keywords": ["dog"],
             "retrieval_phrases": [
-                "Caroline pet", "pet owned by Caroline",
+                "Caroline pet", "pet ownership",
                 "Caroline animal", "Caroline companion",
             ],
         }
@@ -219,7 +219,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         self.assertEqual(
             agent.memory_controller.child_retrieval_phrases[0],
             [
-                "Caroline pet", "pet owned by Caroline",
+                "Caroline pet", "pet ownership",
                 "Caroline animal", "Caroline companion",
             ],
         )

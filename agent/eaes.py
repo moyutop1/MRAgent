@@ -390,58 +390,6 @@ class EAESMixin:
             ))
 
     @staticmethod
-    def _eaes_should_use_unknown_lifecycle(question, query_plan):
-        if not isinstance(query_plan, dict):
-            return False
-        required = str(query_plan.get("required_lifecycle") or "").lower().strip()
-        if required not in {"current", "historical"}:
-            return False
-        answer_type = str(query_plan.get("answer_type") or "").lower().strip()
-        temporal_intent = str(query_plan.get("temporal_intent") or "").lower().strip()
-        if answer_type == "time" or temporal_intent in {"time_answer", "relative_time", "planned_event"}:
-            return False
-        q = re.sub(r"\s+", " ", str(question or "").lower()).strip()
-        if not q:
-            return False
-        explicit_event = re.search(
-            r"\b(when|what date|which date|where did|what did|who did|how did|"
-            r"attended|participated|joined|went|visited|met|shared|recently|"
-            r"yesterday|last week|last month|last year|ago)\b",
-            q,
-        )
-        explicit_plan = re.search(
-            r"\b(will|going to|plans? to|planning to|intend|intends|scheduled|"
-            r"upcoming|tomorrow|next week|next month|next year)\b",
-            q,
-        )
-        if explicit_event or explicit_plan:
-            return False
-        stable_fact = re.search(
-            r"\b(identity|relationship status|status|preference|likes?|"
-            r"interested in|kind of|type of|types of|activities|partake|"
-            r"considered|member of|ally|field|fields|career|art)\b",
-            q,
-        )
-        if stable_fact:
-            return True
-        return (
-            temporal_intent in {"current_state", "none", ""}
-            and answer_type in {"fact", "state", "person", "location", "reason", "yes_no", "unknown"}
-        )
-
-    def _postprocess_eaes_query_plan(self, question, query_plan):
-        if not isinstance(query_plan, dict):
-            return query_plan
-        plan = dict(query_plan)
-        if self._eaes_should_use_unknown_lifecycle(question, plan):
-            plan["required_lifecycle"] = "unknown"
-            plan["temporal_intent"] = "none"
-            plan["no_time_limit"] = True
-        else:
-            plan["no_time_limit"] = False
-        return plan
-
-    @staticmethod
     def _eaes_child_query_plan(query_plan):
         """Hide parent-only query keywords from every child/reader stage."""
         if not isinstance(query_plan, dict):
@@ -456,14 +404,41 @@ class EAESMixin:
     def _normalize_eaes_retrieval_phrases(values, expected_count=4):
         if not isinstance(values, list):
             return None
-        phrases = [
-            value.strip()
-            for value in values
-            if isinstance(value, str) and value.strip()
-        ]
+        phrases = []
+        for value in values:
+            if len(phrases) >= expected_count:
+                break
+            if not isinstance(value, str):
+                continue
+            phrase = re.sub(r"\s+", " ", value).strip()
+            if not phrase:
+                continue
+            if len(phrase.split()) > 3:
+                return None
+            phrases.append(phrase)
         if len(phrases) < expected_count:
             return None
         return phrases[:expected_count]
+
+    @staticmethod
+    def _eaes_question_phrase_fallback(question):
+        words = re.findall(
+            r"[^\W_]+(?:[-'][^\W_]+)*",
+            str(question or ""),
+            flags=re.UNICODE,
+        )
+        stopwords = {
+            "a", "an", "and", "are", "at", "be", "been", "being",
+            "can", "could", "did", "do", "does", "for", "from",
+            "had", "has", "have", "how", "in", "is", "of", "on",
+            "or", "the", "to", "was", "were", "what", "when",
+            "where", "which", "who", "why", "will", "with", "would",
+        }
+        content_words = [
+            word for word in words if word.lower() not in stopwords
+        ]
+        selected = (content_words or words)[-3:]
+        return " ".join(selected) or "memory"
 
     def _regenerate_eaes_retrieval_phrases(
             self, query_question, invalid_phrases
@@ -497,8 +472,6 @@ class EAESMixin:
             "entities": self._as_list(query_out.get("entities")),
             "query_attributes": query_attributes[:3] or [query_question],
             "answer_type": query_out.get("answer_type", "unknown"),
-            "temporal_intent": query_out.get("temporal_intent", "none"),
-            "required_lifecycle": query_out.get("required_lifecycle", "unknown"),
             "keywords": self._as_list(query_out.get("keywords")),
             "query_mode": query_mode,
             "retrieval_phrases": (
@@ -523,7 +496,7 @@ class EAESMixin:
                 if value in allowed_properties and value not in required_properties:
                     required_properties.append(value)
             plan["required_semantic_properties"] = required_properties
-        return self._postprocess_eaes_query_plan(query_question, plan)
+        return plan
 
     def parse_eaes_query(self, question, question_emb=None):
         query_question = self._eaes_query_question(question)
@@ -548,8 +521,6 @@ class EAESMixin:
                 "entities": [],
                 "query_attributes": [query_question],
                 "answer_type": "unknown",
-                "temporal_intent": "none",
-                "required_lifecycle": "unknown",
                 "keywords": [],
                 "query_mode": "question_text_fallback",
                 "retrieval_phrases": [],
@@ -577,11 +548,14 @@ class EAESMixin:
             )
             phrase_source = "regenerated"
         if phrases is None:
-            phrases = [query_question] * phrase_count
+            fallback_phrase = self._eaes_question_phrase_fallback(
+                query_question
+            )
+            phrases = [fallback_phrase] * phrase_count
             phrase_source = "question_fallback"
         parsed_plan["retrieval_phrases"] = phrases
         parsed_plan["retrieval_phrase_source"] = phrase_source
-        return self._postprocess_eaes_query_plan(query_question, parsed_plan)
+        return parsed_plan
 
     def rerank_eaes_candidates(self, question, query_plan, candidates):
         if not candidates:

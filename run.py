@@ -17,6 +17,7 @@ from llm.controller import LLM
 from memory.controller import MemoryController
 from memory.system import MemorySystem
 from agent.agent import Agent
+from agent.retrieval import compact_eaes_retrieval
 from common import config
 from pathlib import Path
 from data.get_data import get_data
@@ -46,6 +47,14 @@ def _select_question_rows(question_list, sample_id):
         rows = rows[:config.MAX_QUESTIONS]
         logger.info(f"Limiting {sample_id} to first {len(rows)} selected questions.")
     return rows
+
+
+def _metric_scalars(metrics):
+    return {
+        key: (metrics or {}).get(key)
+        for key in ("hit", "recall", "exact_cover", "mrr")
+    }
+
 
 def get_question(dataset, agent, question_list, sample_id, memory, result_path, question_embeddings=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -164,37 +173,24 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             if retrieval.get("mode") == "eaes":
                 gold_memory_diagnostics = agent.diagnose_eaes_gold_memories(
                     qa.get("evidence"), retrieval, question_emb)
-            metrics = _retrieval_metrics(
-                qa.get("evidence"),
-                retrieval.get("retrieved_origins"),
-                retrieval.get("retrieved_origin_groups"),
-            )
-            prefilter_metrics = (
+            stage_metrics = {}
+            raw_stage_metrics = {}
+            for stage, groups in (
+                    retrieval.get("stage_origin_groups") or {}).items():
+                raw_metrics = _retrieval_metrics(
+                    qa.get("evidence"),
+                    (retrieval.get("stage_origins") or {}).get(stage),
+                    groups,
+                )
+                raw_stage_metrics[stage] = raw_metrics
+                stage_metrics[stage] = _metric_scalars(raw_metrics)
+            final_metrics = raw_stage_metrics.get("final_combined") or (
                 _retrieval_metrics(
                     qa.get("evidence"),
-                    retrieval.get("prefilter_origins"),
-                    retrieval.get("prefilter_origin_groups"),
+                    retrieval.get("retrieved_origins"),
+                    retrieval.get("retrieved_origin_groups"),
                 )
-                if retrieval.get("mode") == "eaes" else {}
             )
-            child_metrics = (
-                _retrieval_metrics(
-                    qa.get("evidence"),
-                    retrieval.get("child_origins"),
-                    retrieval.get("child_origin_groups"),
-                )
-                if retrieval.get("mode") == "eaes" else {}
-            )
-            parent_metrics = (
-                _retrieval_metrics(
-                    qa.get("evidence"),
-                    retrieval.get("parent_origins"),
-                    retrieval.get("parent_origin_groups"),
-                )
-                if retrieval.get("mode") == "eaes" else {}
-            )
-            graph_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("graph_origins"))
-            dense_metrics = _retrieval_metrics(qa.get("evidence"), retrieval.get("dense_origins"))
             row = {
                 "sample": sample_id,
                 "question_index": i,
@@ -202,19 +198,10 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "category": category,
                 "answer": qa.get("answer"),
                 "evidence": qa.get("evidence"),
-                **metrics,
-                "combined_metrics": metrics,
-                "prefilter_metrics": prefilter_metrics,
-                "child_metrics": child_metrics,
-                "parent_metrics": parent_metrics,
-                "retrieval_k": retrieval.get("retrieval_k"),
-                "child_k": retrieval.get("child_k"),
-                "parent_k": retrieval.get("parent_k"),
-                "prefilter_k": retrieval.get("prefilter_k"),
-                "graph_metrics": graph_metrics,
-                "dense_metrics": dense_metrics,
+                "gold_evidence_norm": final_metrics.get("gold_evidence_norm"),
+                "metrics": stage_metrics,
                 "gold_memory_diagnostics": gold_memory_diagnostics,
-                "retrieval": retrieval,
+                "retrieval": compact_eaes_retrieval(retrieval),
             }
             metric_rows.append(row)
         except Exception as e:
@@ -232,50 +219,36 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         with open(result_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False, default=list) + "\n")
 
-    scored = [r for r in metric_rows if r.get("hit") is not None]
-    if scored:
-        hit = sum(r["hit"] for r in scored) / len(scored)
-        recall = sum(r["recall"] for r in scored) / len(scored)
-        exact = sum(r["exact_cover"] for r in scored) / len(scored)
-        mrr = sum(r["mrr"] for r in scored) / len(scored)
-        retrieval_k = (
-            config.EAES_PHRASE_RERANK_LIMIT
-            + (config.PARENT_TOP_K if config.SEMANTIC_HIERARCHY else 0)
-        )
-        logger.info(
-            f"[retrieval-only] {sample_id}: n={len(scored)} "
-            f"Hit@{retrieval_k}={hit:.4f} Recall@{retrieval_k}={recall:.4f} "
-            f"ExactCover@{retrieval_k}={exact:.4f} MRR@{retrieval_k}={mrr:.4f}"
-        )
-        for label, metric_key, k in (
-            ("child-rerank", "child_metrics", config.EAES_PHRASE_RERANK_LIMIT),
-            ("parent", "parent_metrics", config.PARENT_TOP_K),
-        ):
-            stage_rows = [
-                row[metric_key] for row in scored
-                if row.get(metric_key, {}).get("hit") is not None
-            ]
-            if not stage_rows or (label == "parent" and not config.SEMANTIC_HIERARCHY):
-                continue
-            logger.info(
-                f"[{label}] {sample_id}: n={len(stage_rows)} "
-                f"Hit@{k}={sum(r['hit'] for r in stage_rows) / len(stage_rows):.4f} "
-                f"Recall@{k}={sum(r['recall'] for r in stage_rows) / len(stage_rows):.4f} "
-                f"ExactCover@{k}={sum(r['exact_cover'] for r in stage_rows) / len(stage_rows):.4f} "
-                f"MRR@{k}={sum(r['mrr'] for r in stage_rows) / len(stage_rows):.4f}"
-            )
-        prefilter_scored = [
-            row["prefilter_metrics"] for row in scored
-            if row.get("prefilter_metrics", {}).get("hit") is not None
+    count_fields = {
+        "global_child": "global_pool_k",
+        "global_plus_local": "global_plus_local_k",
+        "prefilter_child": "prefilter_k",
+        "final_child": "final_child_k",
+        "selected_parent": "final_parent_k",
+        "final_combined": "final_total_k",
+    }
+    for stage, count_field in count_fields.items():
+        valid_rows = [
+            row for row in metric_rows
+            if row.get("metrics", {}).get(stage, {}).get("hit") is not None
         ]
-        if prefilter_scored:
-            logger.info(
-                f"[combined-prefilter] {sample_id}: n={len(prefilter_scored)} "
-                f"Hit@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['hit'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"Recall@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['recall'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"ExactCover@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['exact_cover'] for r in prefilter_scored) / len(prefilter_scored):.4f} "
-                f"MRR@{config.EAES_PHRASE_UNION_LIMIT}={sum(r['mrr'] for r in prefilter_scored) / len(prefilter_scored):.4f}"
-            )
+        if not valid_rows:
+            continue
+        stage_rows = [row["metrics"][stage] for row in valid_rows]
+        k_values = {
+            row.get("retrieval", {}).get("counts", {}).get(count_field)
+            for row in valid_rows
+        }
+        k_values.discard(None)
+        k_label = str(next(iter(k_values))) if len(k_values) == 1 else "K"
+        label = "retrieval-only" if stage == "final_combined" else stage
+        logger.info(
+            f"[{label}] {sample_id}: n={len(stage_rows)} "
+            f"Hit@{k_label}={sum(r['hit'] for r in stage_rows) / len(stage_rows):.4f} "
+            f"Recall@{k_label}={sum(r['recall'] for r in stage_rows) / len(stage_rows):.4f} "
+            f"ExactCover@{k_label}={sum(r['exact_cover'] for r in stage_rows) / len(stage_rows):.4f} "
+            f"MRR@{k_label}={sum(r['mrr'] for r in stage_rows) / len(stage_rows):.4f}"
+        )
 
 
 

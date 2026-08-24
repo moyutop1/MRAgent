@@ -32,9 +32,9 @@ class _FakeLLM:
 class _FakeMemory:
     @staticmethod
     def get_eaes_support_origin(memory_ids):
-        if len(memory_ids) == 1 and str(memory_ids[0]).startswith("D1:t"):
+        if len(memory_ids) == 1 and str(memory_ids[0]).startswith("1-"):
             parent_id = memory_ids[0]
-            index = int(parent_id.rsplit("t", 1)[1])
+            index = int(parent_id.split("-", 1)[1])
             return [parent_id, f"D2:{index}", f"D2:{index + 10}"]
         return list(memory_ids)
 
@@ -50,18 +50,39 @@ class _FakeController:
 
     def retrieve_eaes_phrase_candidates(self, retrieval_phrases, **_kwargs):
         self.child_retrieval_phrases.append(list(retrieval_phrases))
-        return list(self.candidates)
+        candidates = list(self.candidates)
+        diagnostics = {"phrases": [{"selected_k": len(candidates)}] * 4}
+        return (candidates, diagnostics) if _kwargs.get("include_diagnostics") else candidates
 
-    def retrieve_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
+    def route_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
         self.parent_query_plans.append(dict(query_plan))
-        limit = _kwargs.get("limit", 4)
-        return [{
-            "parent_id": f"D1:t{i}",
+        parents = [{
+            "parent_id": f"1-{i}",
             "rewrite_content": f"Parent memory {i} about Caroline and dogs.",
             "score": 1.0 / i,
+            "posterior_score": 1.0 / i,
             "rank": i,
             "matched_keyword": "dog",
-        } for i in range(1, 5)][:limit]
+        } for i in range(1, 5)]
+        return parents, {
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
+            "parent_candidates": parents,
+        }
+
+    @staticmethod
+    def retrieve_eaes_parent_local_children(*_args, **_kwargs):
+        return [], {"per_parent_k": 3, "parents": []}
+
+    @staticmethod
+    def merge_eaes_hierarchical_candidates(children, _local, _parents, limit=60):
+        children = list(children)[:limit]
+        ids = [child["memory_id"] for child in children]
+        return children, {
+            "local_added_ids": [],
+            "global_plus_local_ids": ids,
+            "dropped_by_pool_limit_ids": [],
+        }
 
 
 class _AblationAgent(EAESMixin):
@@ -83,6 +104,8 @@ class _AblationAgent(EAESMixin):
                 "Caroline pet", "pet ownership",
                 "Caroline animal", "Caroline companion",
             ],
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
         }
 
     @staticmethod

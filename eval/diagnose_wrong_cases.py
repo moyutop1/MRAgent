@@ -247,15 +247,16 @@ def compact_candidate(cand, rank):
         "rank": rank,
         "memory_id": cand.get("memory_id"),
         "event_id": cand.get("event_id"),
+        "parent_id": cand.get("parent_id"),
         "origin": cand.get("origin"),
-        "score": cand.get("score"),
-        "score_parts": cand.get("score_parts"),
+        "tag": cand.get("tag"),
+        "max_phrase_similarity": cand.get("max_phrase_similarity"),
+        "rrf_score": cand.get("rrf_score"),
+        "candidate_score": cand.get("candidate_score"),
+        "candidate_sources": cand.get("candidate_sources"),
         "prefilter_rank": cand.get("prefilter_rank"),
         "rerank_rank": cand.get("rerank_rank"),
         "rerank_source": cand.get("rerank_source"),
-        "event_lifecycle": cand.get("event_lifecycle"),
-        "entities": cand.get("entities"),
-        "attribute_paths": (cand.get("attribute_paths") or [])[:4],
         "rewrite_content": cand.get("rewrite_content"),
     }
 
@@ -269,17 +270,18 @@ def compact_gold_diag(retrieval_row):
             memories.append({
                 "event_id": mem.get("event_id"),
                 "memory_id": mem.get("memory_id"),
+                "parent_id": mem.get("parent_id"),
                 "indexed": mem.get("indexed"),
-                "candidate_rank": mem.get("candidate_rank"),
                 "prefilter_rank": mem.get("prefilter_rank"),
                 "rerank_rank": mem.get("rerank_rank"),
-                "in_prefilter_topk": mem.get("in_prefilter_topk"),
-                "in_llm_topk": mem.get("in_llm_topk"),
+                "in_global_child": mem.get("in_global_child"),
+                "in_parent_local": mem.get("in_parent_local"),
+                "in_merged_pool": mem.get("in_merged_pool"),
+                "in_prefilter": mem.get("in_prefilter"),
+                "in_final_child": mem.get("in_final_child"),
                 "candidate_score": mem.get("candidate_score"),
-                "score_parts": mem.get("score_parts"),
+                "phrase_hits": mem.get("phrase_hits"),
                 "drop_reason": mem.get("drop_reason"),
-                "rewrite_content": mem.get("rewrite_content"),
-                "attribute_paths": (mem.get("attribute_paths") or [])[:4],
             })
         out.append({
             "origin": gold.get("origin"),
@@ -288,7 +290,6 @@ def compact_gold_diag(retrieval_row):
             "covered_by_parent": gold.get("covered_by_parent"),
             "matched_parent_ids": gold.get("matched_parent_ids"),
             "drop_reason": gold.get("drop_reason"),
-            "best_rank": gold.get("best_rank"),
             "best_prefilter_rank": gold.get("best_prefilter_rank"),
             "best_rerank_rank": gold.get("best_rerank_rank"),
             "memories": memories,
@@ -314,30 +315,27 @@ def build_case(row, judge_row, retrieval_row, topk):
     }
     if retrieval_row:
         retrieval = retrieval_row.get("retrieval") or {}
-        candidates = retrieval.get("candidates") or []
+        candidates = retrieval.get("child_candidates") or []
+        by_id = {
+            candidate.get("memory_id"): candidate for candidate in candidates
+        }
+        final_candidates = [
+            by_id[memory_id]
+            for memory_id in retrieval.get("final_child_ids") or []
+            if memory_id in by_id
+        ]
         case.update({
             "retrieval_file": retrieval_row.get("_file"),
-            "retrieval_metrics": {
-                "k": retrieval_row.get("retrieval_k"),
-                "hit": retrieval_row.get("hit"),
-                "recall": retrieval_row.get("recall"),
-                "exact_cover": retrieval_row.get("exact_cover"),
-                "mrr": retrieval_row.get("mrr"),
-            },
-            "child_metrics": retrieval_row.get("child_metrics"),
-            "parent_metrics": retrieval_row.get("parent_metrics"),
-            "prefilter_metrics": retrieval_row.get("prefilter_metrics"),
-            "question_keys": retrieval.get("question_keys"),
+            "retrieval_metrics": retrieval_row.get("metrics"),
             "query_plan": retrieval.get("query_plan"),
-            "retrieved_origins": retrieval.get("retrieved_origins"),
             "top_candidates": [
                 compact_candidate(cand, rank)
-                for rank, cand in enumerate(candidates[:topk], start=1)
+                for rank, cand in enumerate(final_candidates[:topk], start=1)
             ],
             "parent_candidates": retrieval.get("parent_candidates") or [],
             "embedding_top_candidates": [
                 compact_candidate(cand, rank)
-                for rank, cand in enumerate((retrieval.get("prefilter_candidates") or [])[:topk], start=1)
+                for rank, cand in enumerate(candidates[:topk], start=1)
             ],
             "gold_memory_diagnostics": compact_gold_diag(retrieval_row),
         })
@@ -370,14 +368,11 @@ def write_md(path, cases):
             f.write(f"**Prediction Context:** `{case.get('prediction_context')}`\n\n")
             if "retrieval_metrics" in case:
                 f.write(f"**Retrieval Metrics:** `{case.get('retrieval_metrics')}`\n\n")
-                f.write(f"**Combined Prefilter Metrics:** `{case.get('prefilter_metrics')}`\n\n")
-                f.write("<details><summary>Question Keys</summary>\n\n")
-                f.write(f"```json\n{md_json(case.get('question_keys'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Query Plan</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('query_plan'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Top Candidates</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('top_candidates'))}\n```\n\n</details>\n\n")
-                f.write("<details><summary>Combined Prefilter Top Candidates</summary>\n\n")
+                f.write("<details><summary>Unified Reranker Pool</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('embedding_top_candidates'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Gold Memory Diagnostics</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('gold_memory_diagnostics'))}\n```\n\n</details>\n\n")

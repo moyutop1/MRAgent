@@ -1,3 +1,5 @@
+import json
+import re
 import sys
 import types
 import unittest
@@ -20,7 +22,7 @@ utils_module.topk_answers_by_similarity = lambda *_args, **_kwargs: ([], [], [],
 sys.modules["common.utils"] = utils_module
 
 from agent.eaes import EAESMixin
-from agent.retrieval import RetrievalMixin
+from agent.retrieval import RetrievalMixin, compact_eaes_retrieval
 from common import config
 from eval.retrieval_metrics import retrieval_metrics
 
@@ -41,8 +43,12 @@ class _Memory:
     @staticmethod
     def get_eaes_support_origin(parent_ids):
         parent_id = parent_ids[0]
-        index = int(parent_id.rsplit("t", 1)[1])
+        index = int(parent_id.split("-", 1)[1])
         return [parent_id, f"D2:{index}", f"D2:{index + 10}"]
+
+    @staticmethod
+    def get_eaes_note(_memory_id):
+        return None
 
 
 class _Controller:
@@ -59,23 +65,40 @@ class _Controller:
         self.child_plans.append(list(retrieval_phrases))
         candidates = _children()
         diagnostics = {
-            "phrase_top15": [],
-            "phrase_final_top10": [],
-            "fused_candidate_ids": [item["memory_id"] for item in candidates],
-            "rrf_scores": {},
+            "phrases": [{"selected_k": len(candidates)}] * 4,
+            "global_candidate_ids": [item["memory_id"] for item in candidates],
         }
         return (candidates, diagnostics) if include_diagnostics else candidates
 
-    def retrieve_eaes_parent_candidates(self, query_plan, *_args, **kwargs):
+    def route_eaes_parent_candidates(self, query_plan, *_args, **kwargs):
         self.parent_plans.append(dict(query_plan))
-        limit = kwargs.get("limit", 4)
-        return [{
-            "parent_id": f"D1:t{index}",
+        parents = [{
+            "parent_id": f"1-{index}",
             "rewrite_content": f"Parent memory {index}",
             "rank": index,
             "score": 1.0 / index,
+            "posterior_score": 1.0 / index,
             "matched_keyword": "dog",
-        } for index in range(1, limit + 1)]
+        } for index in range(1, 5)]
+        return parents, {
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
+            "parent_candidates": parents,
+        }
+
+    @staticmethod
+    def retrieve_eaes_parent_local_children(*_args, **_kwargs):
+        return [], {"per_parent_k": 3, "parents": []}
+
+    @staticmethod
+    def merge_eaes_hierarchical_candidates(children, _local, _parents, limit=60):
+        children = list(children)[:limit]
+        ids = [child["memory_id"] for child in children]
+        return children, {
+            "local_added_ids": [],
+            "global_plus_local_ids": ids,
+            "dropped_by_pool_limit_ids": [],
+        }
 
 
 class _RetrievalAgent(EAESMixin, RetrievalMixin):
@@ -96,6 +119,8 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
                 "Caroline pet", "pet ownership",
                 "Caroline animal", "Caroline companion",
             ],
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
         }
 
     @staticmethod
@@ -237,6 +262,44 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         self.assertEqual(result["retrieved_origin_groups"][14], ["D9:99"])
         self.assertEqual(metrics["hit"], 1)
         self.assertEqual(metrics["mrr"], 1 / 15)
+
+    def test_compact_retrieval_schema_removes_deprecated_and_duplicate_fields(self):
+        agent = _RetrievalAgent()
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+        ):
+            internal = agent.retrieve_question_evidence("What pet does Caroline own?")
+        internal["prefilter_candidates"][0].update({
+            "temporal_intent": "deprecated",
+            "required_lifecycle": "deprecated",
+            "event_lifecycle": "historical",
+            "entities": ["duplicate index field"],
+        })
+        compact = compact_eaes_retrieval(internal)
+        serialized = json.dumps(compact)
+
+        self.assertEqual(set(compact), {
+            "mode", "query_plan", "routing", "phrase_retrieval",
+            "parent_local_retrieval", "parent_candidates",
+            "child_candidates", "final_child_ids", "counts",
+            "rollback_check",
+        })
+        self.assertNotIn("retrieved_origins", compact)
+        self.assertNotIn("prefilter_candidates", compact)
+        self.assertNotIn("candidates", compact)
+        for deprecated in (
+                "temporal_intent", "required_lifecycle",
+                "event_lifecycle", "entities"):
+            self.assertNotIn(deprecated, serialized)
+        self.assertEqual(len(compact["child_candidates"]), 24)
+        self.assertEqual(len(compact["final_child_ids"]), 15)
+        self.assertTrue(all(
+            re.fullmatch(r"\d+-\d+", item["parent_id"])
+            for item in compact["parent_candidates"]
+        ))
 
 
 if __name__ == "__main__":

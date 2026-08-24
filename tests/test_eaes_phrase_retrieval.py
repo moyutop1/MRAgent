@@ -43,6 +43,8 @@ def _query_output(phrases):
         "query_attributes": ["event.attendance: event Caroline attended"],
         "answer_type": "event_list",
         "keywords": ["Caroline"],
+        "retrieval_breadth": "several",
+        "detail_need": "exact",
         "retrieval_phrases": phrases,
     }
 
@@ -154,6 +156,25 @@ class PhrasePlanTests(unittest.TestCase):
             self.assertIn("short concrete noun phrase", prompt)
             self.assertIn("no more than three words", prompt)
 
+    def test_breadth_and_detail_labels_are_normalized_for_routing_only(self):
+        mixin = _TestEAES()
+        mixin.llm = _QueuedLLM([_query_output([
+            "support group", "career interest",
+            "pottery class", "camping location",
+        ])])
+
+        plan = mixin.parse_eaes_query("What events did Caroline join?")
+        child_plan = mixin._eaes_child_query_plan(plan)
+
+        self.assertEqual(plan["retrieval_breadth"], "several")
+        self.assertEqual(plan["breadth_value"], 0.5)
+        self.assertEqual(plan["detail_need"], "exact")
+        self.assertEqual(plan["detail_value"], 1.0)
+        for key in (
+                "retrieval_breadth", "breadth_value",
+                "detail_need", "detail_value"):
+            self.assertNotIn(key, child_plan)
+
 
 def _ranking(phrase_index):
     items = []
@@ -175,25 +196,45 @@ def _ranking(phrase_index):
 
 @unittest.skipUnless(HAS_RETRIEVAL_RUNTIME, "retrieval runtime dependencies are unavailable")
 class PhraseFusionTests(unittest.TestCase):
-    def test_fusion_protects_five_then_uses_rrf_for_five_supplements(self):
+    def test_fusion_keeps_dynamic_phrase_lists_and_uses_rrf_as_soft_feature(self):
         rankings = [_ranking(index) for index in range(4)]
 
         fused, diagnostics = MemoryController.fuse_eaes_phrase_rankings(
             rankings,
             rrf_k=10,
-            protected_top_k=5,
-            final_per_phrase=10,
         )
 
-        for phrase_index, final_ids in enumerate(
-                diagnostics["phrase_final_top10"]):
-            self.assertEqual(len(final_ids), 10)
-            self.assertIn(f"P{phrase_index}_5", final_ids)
-            self.assertIn("SHARED", final_ids)
-        self.assertLessEqual(len(fused), 40)
+        self.assertEqual(len(fused), 57)
+        self.assertIn("SHARED", diagnostics["global_candidate_ids"])
+        by_id = {item["memory_id"]: item for item in fused}
         self.assertGreater(
-            diagnostics["rrf_scores"]["SHARED"],
-            diagnostics["rrf_scores"]["P0_6"],
+            by_id["SHARED"]["rrf_score"],
+            by_id["P0_6"]["rrf_score"],
+        )
+        self.assertTrue(all("candidate_score" in item for item in fused))
+
+    def test_dynamic_phrase_topk_uses_top30_probability_mass(self):
+        sharp = [
+            {"memory_id": f"S{i}", "phrase_rank": i + 1,
+             "phrase_similarity": 1.0 if i == 0 else 0.0}
+            for i in range(30)
+        ]
+        flat = [
+            {"memory_id": f"F{i}", "phrase_rank": i + 1,
+             "phrase_similarity": 0.0}
+            for i in range(30)
+        ]
+
+        selected, diagnostics = (
+            MemoryController.select_eaes_dynamic_phrase_rankings(
+                [sharp, flat, sharp, flat]
+            )
+        )
+
+        self.assertEqual([len(items) for items in selected], [15, 24, 15, 24])
+        self.assertEqual(
+            [item["selected_k"] for item in diagnostics],
+            [15, 24, 15, 24],
         )
 
     def test_ranker_scores_each_phrase_against_stored_tags_independently(self):

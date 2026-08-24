@@ -74,6 +74,7 @@ class EAESMemoryNote:
             origin: str,
             embedding=None,
             retrieval_embedding=None,
+            parent_id: str = None,
     ):
         self.memory_id = memory_id
         self.event_id = event_id
@@ -86,11 +87,13 @@ class EAESMemoryNote:
         self.origin = origin
         self.embedding = embedding
         self.retrieval_embedding = retrieval_embedding
+        self.parent_id = parent_id
 
     def to_dict(self, include_raw: bool = False):
         data = {
             "memory_id": self.memory_id,
             "event_id": self.event_id,
+            "parent_id": self.parent_id,
             "entities": self.entities,
             "attribute_paths": self.attribute_paths,
             "rewrite_content": self.rewrite_content,

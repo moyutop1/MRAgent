@@ -30,16 +30,17 @@ parser.add_argument(
     default=float(os.getenv("CHILD_DUPLICATE_SIMILARITY_THRESHOLD", "0.55")),
     help="Fuse adjacent semantic-hierarchy child memories when cosine similarity is strictly above this threshold.",
 )
-parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "4")), help="Semantic parent memories passed directly to the EAES final reader.")
+parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "6")), help="Maximum semantic parent memories selected by the dynamic parent router.")
+parser.add_argument("--parent_relevance_floor", type=float, default=float(os.getenv("PARENT_RELEVANCE_FLOOR", "0.05")), help="Minimum raw parent similarity eligible for dynamic parent selection.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
 parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "16")), help="Child memories kept by the EAES attribute reranker for evidence selection.")
 parser.add_argument("--eaes_phrase_count", type=int, default=int(os.getenv("EAES_PHRASE_COUNT", "4")), help="Number of child-tag retrieval phrases generated per question.")
-parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "15")), help="Child-tag candidates retrieved independently for each phrase before fusion.")
-parser.add_argument("--eaes_phrase_protected_top_k", type=int, default=int(os.getenv("EAES_PHRASE_PROTECTED_TOP_K", "5")), help="Highest-similarity candidates protected in each phrase ranking.")
-parser.add_argument("--eaes_phrase_final_top_k", type=int, default=int(os.getenv("EAES_PHRASE_FINAL_TOP_K", "10")), help="Candidates retained per phrase after protected-plus-RRF selection.")
+parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Top child tags inspected per phrase when estimating dynamic TopK.")
+parser.add_argument("--eaes_phrase_protected_top_k", type=int, default=int(os.getenv("EAES_PHRASE_PROTECTED_TOP_K", "5")), help="Deprecated compatibility option; dynamic retrieval no longer protects a fixed prefix.")
+parser.add_argument("--eaes_phrase_final_top_k", type=int, default=int(os.getenv("EAES_PHRASE_FINAL_TOP_K", "10")), help="Deprecated compatibility option; dynamic retrieval no longer applies per-phrase Top10 pruning.")
 parser.add_argument("--eaes_phrase_rrf_k", type=float, default=float(os.getenv("EAES_PHRASE_RRF_K", "10")), help="Reciprocal-rank-fusion denominator constant for child-tag retrieval.")
 parser.add_argument("--eaes_phrase_rerank_limit", type=int, default=int(os.getenv("EAES_PHRASE_RERANK_LIMIT", "15")), help="Final child memories retained by the query-only phrase-candidate reranker.")
 parser.add_argument(
@@ -213,22 +214,21 @@ EAES_PHRASE_PROTECTED_TOP_K = args.eaes_phrase_protected_top_k
 EAES_PHRASE_FINAL_TOP_K = args.eaes_phrase_final_top_k
 EAES_PHRASE_RRF_K = args.eaes_phrase_rrf_k
 EAES_PHRASE_RERANK_LIMIT = args.eaes_phrase_rerank_limit
+EAES_PHRASE_MIN_TOP_K = 15
+EAES_PHRASE_MAX_TOP_K = 25
+EAES_PHRASE_TARGET_MASS = 0.80
+EAES_PHRASE_SOFTMAX_TEMPERATURE = 0.10
+EAES_PHRASE_UNION_LIMIT = 60
 if EAES_PHRASE_COUNT != 4:
     raise ValueError("--eaes_phrase_count must equal 4 for the four-phrase retrieval policy.")
-if not (
-        0 < EAES_PHRASE_PROTECTED_TOP_K
-        <= EAES_PHRASE_FINAL_TOP_K
-        <= EAES_PHRASE_INITIAL_TOP_K
-):
+if EAES_PHRASE_INITIAL_TOP_K < EAES_PHRASE_MAX_TOP_K:
     raise ValueError(
-        "phrase retrieval limits must satisfy "
-        "0 < protected_top_k <= final_top_k <= initial_top_k."
+        "--eaes_phrase_initial_top_k must be at least 25 for dynamic phrase retrieval."
     )
 if EAES_PHRASE_RRF_K <= 0:
     raise ValueError("--eaes_phrase_rrf_k must be positive.")
 if EAES_PHRASE_RERANK_LIMIT <= 0:
     raise ValueError("--eaes_phrase_rerank_limit must be positive.")
-EAES_PHRASE_UNION_LIMIT = EAES_PHRASE_COUNT * EAES_PHRASE_FINAL_TOP_K
 if EAES_PHRASE_RERANK_LIMIT > EAES_PHRASE_UNION_LIMIT:
     raise ValueError(
         "--eaes_phrase_rerank_limit cannot exceed the maximum fused phrase pool."
@@ -275,6 +275,7 @@ CHILD_MAX_TURNS = args.child_max_turns
 CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
 CHILD_DUPLICATE_SIMILARITY_THRESHOLD = args.child_duplicate_similarity_threshold
 PARENT_TOP_K = args.parent_top_k
+PARENT_RELEVANCE_FLOOR = args.parent_relevance_floor
 if EAES_ROLLBACK_CHECK and (
         EAES_RERANK_LIMIT != 16 or PARENT_TOP_K != 4
 ):
@@ -297,8 +298,10 @@ if not 0.0 <= CHILD_DUPLICATE_SIMILARITY_THRESHOLD <= 1.0:
     raise ValueError(
         "--child_duplicate_similarity_threshold must be between 0 and 1."
     )
-if PARENT_TOP_K <= 0:
-    raise ValueError("--parent_top_k must be positive.")
+if PARENT_TOP_K <= 0 or PARENT_TOP_K > 6:
+    raise ValueError("--parent_top_k must be between 1 and 6.")
+if not -1.0 <= PARENT_RELEVANCE_FLOOR <= 1.0:
+    raise ValueError("--parent_relevance_floor must be between -1 and 1.")
 
 dataset = args.data
 DATASET = dataset

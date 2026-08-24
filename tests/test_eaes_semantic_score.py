@@ -327,7 +327,7 @@ class SemanticScoringTests(unittest.TestCase):
     def test_parent_retrieval_embeds_query_keywords(self):
         memory = MemorySystem()
         memory.add_eaes_parent_node(EAESParentNode(
-            parent_id="D1:t1",
+            parent_id="1-1",
             rewrite_content="Caroline likes dogs.",
             child_ids=[],
             child_attributes=[],
@@ -347,7 +347,7 @@ class SemanticScoringTests(unittest.TestCase):
             )
 
         get_embedding.assert_called_once_with(["dog"])
-        self.assertEqual(rows[0]["parent_id"], "D1:t1")
+        self.assertEqual(rows[0]["parent_id"], "1-1")
         self.assertEqual(rows[0]["matched_keyword"], "dog")
 
 

@@ -82,12 +82,33 @@ class _ReaderGateController:
         return _children("C", 20)
 
     @staticmethod
-    def retrieve_eaes_phrase_candidates(_retrieval_phrases, **_kwargs):
-        return _children("C", 20)
+    def retrieve_eaes_phrase_candidates(_retrieval_phrases, **kwargs):
+        children = _children("C", 20)
+        diagnostics = {"phrases": [{"selected_k": 20}] * 4}
+        return (children, diagnostics) if kwargs.get("include_diagnostics") else children
 
     @staticmethod
-    def retrieve_eaes_parent_candidates(_query_plan, _question_emb, **_kwargs):
-        return _parents("P", 4)
+    def route_eaes_parent_candidates(_query_plan, _children, _question_emb=None):
+        parents = _parents("P", 4)
+        return parents, {
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
+            "parent_candidates": parents,
+        }
+
+    @staticmethod
+    def retrieve_eaes_parent_local_children(*_args, **_kwargs):
+        return [], {"per_parent_k": 3, "parents": []}
+
+    @staticmethod
+    def merge_eaes_hierarchical_candidates(children, _local, _parents, limit=60):
+        children = list(children)[:limit]
+        ids = [child["memory_id"] for child in children]
+        return children, {
+            "local_added_ids": [],
+            "global_plus_local_ids": ids,
+            "dropped_by_pool_limit_ids": [],
+        }
 
 
 class _ReaderGateAgent(EAESMixin):
@@ -103,6 +124,8 @@ class _ReaderGateAgent(EAESMixin):
             "query_attributes": ["profile.pet"],
             "keywords": ["pet"],
             "retrieval_phrases": ["pet", "owned pet", "animal", "companion"],
+            "breadth_value": 0.5,
+            "detail_value": 0.5,
         }
 
     @staticmethod

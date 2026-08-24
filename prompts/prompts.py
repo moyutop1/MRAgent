@@ -315,12 +315,18 @@ Schema:
   "query_attributes": ["semantic.path: question-side relation clause"],
   "answer_type": "event_list | time | person | location | reason | state | fact | yes_no | unknown",
   "keywords": ["important lexical constraints"],
+  "retrieval_breadth": "single | several | wide",
+  "detail_need": "coarse | mixed | exact",
   "retrieval_phrases": ["noun phrase 1", "noun phrase 2", "noun phrase 3", "noun phrase 4"]
 }
 Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
 - Each query_attribute must be a compact retrieval intent with a semantic path and an answer-slot relation clause, e.g. "object.symbolism: symbolism of Caroline's necklace" or "event.activity: activities Melanie's family did while camping".
 - Keep named entities and concrete relation words from the question. Do not output bare keywords.
+- Set retrieval_breadth to "single" for one atomic fact or event; time questions are generally single.
+- Set retrieval_breadth to "several" for a person's participated events, traits, experiences, preferences, motivations, or a person-level inference requiring multiple facts.
+- Set retrieval_breadth to "wide" only when the same person's evidence spans a long time or multiple sessions, or the question asks about a broad theme or overall development. Never use wide merely because multiple people are mentioned.
+- Set detail_need to "coarse" for a high-level summary, "exact" for a specific answer-bearing detail, and "mixed" when both levels may be useful.
 - Generate exactly four non-empty retrieval_phrases in exactly the same surface style as memory tags.
 - Every retrieval phrase must be a short concrete noun phrase of no more than three words.
 - Never output a sentence, question, clause, or question word as a retrieval phrase.

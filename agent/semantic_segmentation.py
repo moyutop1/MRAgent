@@ -112,6 +112,7 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
     expected_start = 0
     parents = []
     session_prefix = turns[0].origin.split(":", 1)[0]
+    session_number = re.sub(r"^D", "", session_prefix, flags=re.IGNORECASE)
     for number, raw in enumerate(raw_segments, start=1):
         if not isinstance(raw, dict):
             return False, f"parent_segments[{number - 1}] must be an object", None
@@ -157,7 +158,7 @@ def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
             ), None
         context_start = max(0, start - config.PARENT_CONTEXT_TURNS)
         parents.append(ParentSegment(
-            parent_id=f"{session_prefix}:t{number}",
+            parent_id=f"{session_number}-{number}",
             start_index=start,
             end_index=end,
             current_turns=list(turns[start:end + 1]),
@@ -318,4 +319,5 @@ def attach_child_memory_ids_to_parents(
                 f"no parent core contains child first origin {origins[0]}"
             )
         owner.child_ids.append(memory["id"])
+        memory["parent_id"] = owner.parent_id
     return list(parent_segments)

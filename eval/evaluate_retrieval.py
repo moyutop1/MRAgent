@@ -88,6 +88,31 @@ def print_group(name, rows, metric_key=None, k_field="retrieval_k"):
     )
 
 
+def print_stage_group(name, rows, stage, count_field):
+    valid_rows = [
+        row for row in rows
+        if row.get("metrics", {}).get(stage, {}).get("hit") is not None
+        and "error" not in row
+    ]
+    if not valid_rows:
+        print(f"{name}: n=0")
+        return
+    scored = [row["metrics"][stage] for row in valid_rows]
+    k_values = {
+        row.get("retrieval", {}).get("counts", {}).get(count_field)
+        for row in valid_rows
+    }
+    k_values.discard(None)
+    k_label = str(next(iter(k_values))) if len(k_values) == 1 else "K"
+    print(
+        f"{name}: n={len(scored)} "
+        f"Hit@{k_label}={sum(r['hit'] for r in scored) / len(scored):.4f} "
+        f"Recall@{k_label}={sum(r['recall'] for r in scored) / len(scored):.4f} "
+        f"ExactCover@{k_label}={sum(r['exact_cover'] for r in scored) / len(scored):.4f} "
+        f"MRR@{k_label}={sum(r['mrr'] for r in scored) / len(scored):.4f}"
+    )
+
+
 def main():
     args = parse_args()
     rows = load_rows(args)
@@ -95,45 +120,30 @@ def main():
     if not rows:
         return
 
-    print_group("OVERALL", rows)
-    if any("prefilter_metrics" in r for r in rows):
-        print_group(
-            "OVERALL combined prefilter", rows,
-            "prefilter_metrics", "prefilter_k",
-        )
-        print_group("OVERALL child rerank", rows, "child_metrics", "child_k")
-        print_group("OVERALL parent", rows, "parent_metrics", "parent_k")
-        print_group("OVERALL child+parent", rows, "combined_metrics")
-    if any("graph_metrics" in r for r in rows):
-        print_group("OVERALL graph", rows, "graph_metrics")
-        print_group("OVERALL dense", rows, "dense_metrics")
-        print_group("OVERALL combined", rows, "combined_metrics")
+    stages = {
+        "global_child": "global_pool_k",
+        "global_plus_local": "global_plus_local_k",
+        "prefilter_child": "prefilter_k",
+        "final_child": "final_child_k",
+        "selected_parent": "final_parent_k",
+        "final_combined": "final_total_k",
+    }
+    if any("metrics" in row for row in rows):
+        for stage, count_field in stages.items():
+            print_stage_group(f"OVERALL {stage}", rows, stage, count_field)
+    else:
+        print_group("OVERALL", rows)
     by_cat = defaultdict(list)
     for row in rows:
         by_cat[row.get("category")].append(row)
     for cat in sorted(by_cat, key=str):
-        print_group(f"category={cat}", by_cat[cat])
-        if any("prefilter_metrics" in r for r in by_cat[cat]):
-            print_group(
-                f"category={cat} combined prefilter", by_cat[cat],
-                "prefilter_metrics", "prefilter_k",
-            )
-            print_group(
-                f"category={cat} child rerank", by_cat[cat],
-                "child_metrics", "child_k",
-            )
-            print_group(
-                f"category={cat} parent", by_cat[cat],
-                "parent_metrics", "parent_k",
-            )
-            print_group(
-                f"category={cat} child+parent", by_cat[cat],
-                "combined_metrics",
-            )
-        if any("graph_metrics" in r for r in by_cat[cat]):
-            print_group(f"category={cat} graph", by_cat[cat], "graph_metrics")
-            print_group(f"category={cat} dense", by_cat[cat], "dense_metrics")
-            print_group(f"category={cat} combined", by_cat[cat], "combined_metrics")
+        if any("metrics" in row for row in by_cat[cat]):
+            for stage, count_field in stages.items():
+                print_stage_group(
+                    f"category={cat} {stage}", by_cat[cat], stage, count_field
+                )
+        else:
+            print_group(f"category={cat}", by_cat[cat])
 
     errors = [r for r in rows if "error" in r]
     if errors:

@@ -28,6 +28,13 @@ class EAESMixin:
         return text
 
     @staticmethod
+    def _normalize_eaes_parent_id(parent_id):
+        """Normalize legacy D<session>:t<n> IDs without rewriting old files."""
+        value = str(parent_id or "").strip()
+        match = re.fullmatch(r"D(\d+):t(\d+)", value, flags=re.IGNORECASE)
+        return f"{match.group(1)}-{match.group(2)}" if match else value
+
+    @staticmethod
     def _eaes_memory_id(event_id):
         return "M_" + re.sub(r"[^A-Za-z0-9]+", "_", event_id).strip("_")
 
@@ -355,6 +362,7 @@ class EAESMixin:
                 event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
                 origin=ev.origin,
                 embedding=ev.embedding,
+                parent_id=self._normalize_eaes_parent_id(ee.get("parent_id")),
             )
             self.memory.add_eaes_memory_note(note)
 
@@ -364,7 +372,7 @@ class EAESMixin:
         for spec in self._as_list(events.get("parent_nodes")):
             if not isinstance(spec, dict):
                 continue
-            parent_id = str(spec.get("parent_id") or "").strip()
+            parent_id = self._normalize_eaes_parent_id(spec.get("parent_id"))
             rewrite_content = str(spec.get("rewrite_content") or "").strip()
             if not parent_id or not rewrite_content:
                 continue
@@ -375,6 +383,9 @@ class EAESMixin:
                 note = self.memory.get_eaes_note(memory_id) if memory_id else None
                 if note is None:
                     continue
+                # New rewrite files persist this relation directly on every
+                # child. This assignment also backfills legacy rewrite files.
+                note.parent_id = parent_id
                 child_memory_ids.append(memory_id)
                 child_attributes.append({
                     "child_id": memory_id,
@@ -398,6 +409,10 @@ class EAESMixin:
         plan.pop("keywords", None)
         plan.pop("retrieval_phrases", None)
         plan.pop("retrieval_phrase_source", None)
+        plan.pop("retrieval_breadth", None)
+        plan.pop("breadth_value", None)
+        plan.pop("detail_need", None)
+        plan.pop("detail_value", None)
         return plan
 
     @staticmethod
@@ -468,12 +483,22 @@ class EAESMixin:
             value = str(value or "").strip()
             if value and value not in query_attributes:
                 query_attributes.append(value)
+        breadth = str(query_out.get("retrieval_breadth") or "").lower().strip()
+        if breadth not in {"single", "several", "wide"}:
+            breadth = "several"
+        detail = str(query_out.get("detail_need") or "").lower().strip()
+        if detail not in {"coarse", "mixed", "exact"}:
+            detail = "mixed"
         plan = {
             "entities": self._as_list(query_out.get("entities")),
             "query_attributes": query_attributes[:3] or [query_question],
             "answer_type": query_out.get("answer_type", "unknown"),
             "keywords": self._as_list(query_out.get("keywords")),
             "query_mode": query_mode,
+            "retrieval_breadth": breadth,
+            "breadth_value": {"single": 0.0, "several": 0.5, "wide": 1.0}[breadth],
+            "detail_need": detail,
+            "detail_value": {"coarse": 0.0, "mixed": 0.5, "exact": 1.0}[detail],
             "retrieval_phrases": (
                 self._normalize_eaes_retrieval_phrases(
                     query_out.get("retrieval_phrases"),
@@ -524,6 +549,10 @@ class EAESMixin:
                 "keywords": [],
                 "query_mode": "question_text_fallback",
                 "retrieval_phrases": [],
+                "retrieval_breadth": "several",
+                "breadth_value": 0.5,
+                "detail_need": "mixed",
+                "detail_value": 0.5,
             }
             if config.EAES_SEMANTIC_SCORE:
                 # A failed semantic query parse is neutral: no match and no penalty.
@@ -618,8 +647,8 @@ class EAESMixin:
         fallback_candidates = sorted(
             candidates,
             key=lambda candidate: (
-                -float(candidate.get("_rrf_score") or 0.0),
-                int(candidate.get("_rrf_rank") or 10**9),
+                -float(candidate.get("_candidate_score") or candidate.get("candidate_score") or 0.0),
+                int(candidate.get("prefilter_rank") or 10**9),
                 str(candidate.get("memory_id") or ""),
             ),
         )
@@ -677,11 +706,11 @@ class EAESMixin:
         for rerank_rank, memory_id in enumerate(ordered_ids[:limit], start=1):
             item = {
                 key: value for key, value in by_id[memory_id].items()
-                if key not in {"_rrf_score", "_rrf_rank"}
+                if not key.startswith("_")
             }
             item["rerank_rank"] = rerank_rank
             item["rerank_source"] = (
-                "llm" if memory_id in llm_selected_ids else "rrf_fill"
+                "llm" if memory_id in llm_selected_ids else "candidate_score_fill"
             )
             item["rank"] = rerank_rank
             reranked.append(item)
@@ -1344,27 +1373,99 @@ class EAESMixin:
             ),
         )
 
+    def _retrieve_eaes_first_pass(self, question, question_emb=None):
+        """Shared dynamic first pass for normal answering and retrieval-only."""
+        query_plan = self.parse_eaes_query(question, question_emb)
+        global_children, phrase_retrieval = (
+            self.memory_controller.retrieve_eaes_phrase_candidates(
+                query_plan["retrieval_phrases"],
+                include_diagnostics=True,
+            )
+        )
+        selected_parents = []
+        routing = {
+            "breadth_value": float(query_plan.get("breadth_value", 0.5)),
+            "detail_value": float(query_plan.get("detail_value", 0.5)),
+            "parent_entropy": 0.0,
+            "child_parent_dispersion": 0.0,
+            "parent_child_jsd": 0.0,
+            "retrieval_uncertainty": 0.0,
+            "target_parent_mass": 0.0,
+            "selected_parent_mass": 0.0,
+            "selected_parent_k": 0,
+            "parent_candidates": [],
+        }
+        local_children = []
+        local_retrieval = {"per_parent_k": 0, "parents": []}
+        if getattr(config, "SEMANTIC_HIERARCHY", False):
+            selected_parents, routing = (
+                self.memory_controller.route_eaes_parent_candidates(
+                    query_plan, global_children, question_emb
+                )
+            )
+            local_children, local_retrieval = (
+                self.memory_controller.retrieve_eaes_parent_local_children(
+                    query_plan["retrieval_phrases"],
+                    selected_parents,
+                    query_plan.get("detail_value", 0.5),
+                )
+            )
+        prefilter_children, merge_retrieval = (
+            self.memory_controller.merge_eaes_hierarchical_candidates(
+                global_children,
+                local_children,
+                selected_parents,
+                limit=getattr(config, "EAES_PHRASE_UNION_LIMIT", 60),
+            )
+        )
+        final_children = self.rerank_eaes_phrase_candidates(
+            question,
+            prefilter_children,
+            top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+        ) if prefilter_children else []
+        return {
+            "query_plan": query_plan,
+            "global_children": global_children,
+            "local_children": local_children,
+            "prefilter_children": prefilter_children,
+            "final_children": final_children,
+            "selected_parents": selected_parents,
+            "routing": routing,
+            "phrase_retrieval": phrase_retrieval,
+            "local_retrieval": local_retrieval,
+            "merge_retrieval": merge_retrieval,
+            "counts": {
+                "phrase_selected_k": [
+                    item.get("selected_k")
+                    for item in phrase_retrieval.get("phrases", [])
+                ],
+                "global_pool_k": len(global_children),
+                "local_candidate_k": len(local_children),
+                "local_unique_added_k": len(
+                    merge_retrieval.get("local_added_ids", [])
+                ),
+                "global_plus_local_k": len(
+                    merge_retrieval.get("global_plus_local_ids", [])
+                ),
+                "prefilter_k": len(prefilter_children),
+                "dropped_by_pool_limit_k": len(
+                    merge_retrieval.get("dropped_by_pool_limit_ids", [])
+                ),
+                "final_child_k": len(final_children),
+                "final_parent_k": len(selected_parents),
+                "final_total_k": len(final_children) + len(selected_parents),
+            },
+        }
+
     def answer_question_eaes(
             self, question, category=0, question_emb=None,
             lm_current_date=None
     ):
-        query_plan = self.parse_eaes_query(question, question_emb)
+        first_pass = self._retrieve_eaes_first_pass(question, question_emb)
+        query_plan = first_pass["query_plan"]
         child_query_plan = self._eaes_child_query_plan(query_plan)
-        parent_candidates = []
-        if getattr(config, "SEMANTIC_HIERARCHY", False):
-            parent_candidates = self.memory_controller.retrieve_eaes_parent_candidates(
-                query_plan, question_emb, limit=config.PARENT_TOP_K
-            )
-        phrase_candidates = self.memory_controller.retrieve_eaes_phrase_candidates(
-            query_plan["retrieval_phrases"]
-        )
-        if not phrase_candidates and not parent_candidates:
-            return "no information available", []
-        candidates = self.rerank_eaes_phrase_candidates(
-            question,
-            phrase_candidates,
-            top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
-        ) if phrase_candidates else []
+        parent_candidates = first_pass["selected_parents"]
+        candidates = first_pass["final_children"]
         if not candidates and not parent_candidates:
             return "no information available", []
 

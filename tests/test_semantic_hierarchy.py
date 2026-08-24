@@ -415,7 +415,7 @@ class SemanticHierarchyTests(unittest.TestCase):
                 "rewrite_content": "The repeated information was stated once."
             },
             {
-                "parent_id": "D1:t1",
+                "parent_id": "1-1",
                 "rewrite_content": "A coarse parent memory.",
             },
         ])
@@ -444,10 +444,13 @@ class SemanticHierarchyTests(unittest.TestCase):
             [item["id"] for item in output["sentence"]], expected_ids
         )
         self.assertEqual(output["parent_nodes"], [{
-            "parent_id": "D1:t1",
+            "parent_id": "1-1",
             "rewrite_content": "A coarse parent memory.",
             "child_ids": expected_ids,
         }])
+        self.assertTrue(all(
+            item["parent_id"] == "1-1" for item in output["sentence"]
+        ))
         fused = output["sentence"][-1]
         self.assertEqual(fused["text"], "The repeated information was stated once.")
         self.assertEqual(fused["origin"], "D1:4,D1:5")
@@ -491,6 +494,10 @@ class SemanticHierarchyTests(unittest.TestCase):
 
         self.assertEqual(parents[0].child_ids, ["D1:2-1", "D1:4-1"])
         self.assertEqual(parents[1].child_ids, ["D1:6-1"])
+        self.assertEqual(
+            [memory["parent_id"] for memory in memories],
+            ["1-1", "1-1", "1-2"],
+        )
 
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):
         memory = MemorySystem()
@@ -504,10 +511,11 @@ class SemanticHierarchyTests(unittest.TestCase):
             conversation_time="2023-05-08",
             event_lifecycle="historical",
             origin="D1:2",
+            parent_id="1-1",
         )
         memory.add_eaes_memory_note(note)
         parent = EAESParentNode(
-            parent_id="D1:t1",
+            parent_id="1-1",
             rewrite_content="A coarse parent memory.",
             child_ids=[note.memory_id],
             child_attributes=[{
@@ -519,12 +527,12 @@ class SemanticHierarchyTests(unittest.TestCase):
         memory.add_eaes_parent_node(parent)
 
         self.assertEqual(parent.to_reader_dict(), {
-            "parent_id": "D1:t1",
+            "parent_id": "1-1",
             "rewrite_content": "A coarse parent memory.",
         })
         self.assertEqual(
-            memory.get_eaes_support_origin(["D1:t1"]),
-            ["D1:t1", "D1:2"],
+            memory.get_eaes_support_origin(["1-1"]),
+            ["1-1", "D1:2"],
         )
 
 

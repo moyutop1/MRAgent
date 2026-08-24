@@ -213,10 +213,12 @@ class MemoryController:
     def fuse_eaes_phrase_rankings(
             phrase_rankings,
             rrf_k=10.0,
-            protected_top_k=5,
-            final_per_phrase=10,
+            protected_top_k=None,
+            final_per_phrase=None,
     ):
+        """Fuse already-selected dynamic phrase lists without hard Top10 pruning."""
         rrf_scores = {}
+        max_similarities = {}
         for ranking in phrase_rankings:
             for item in ranking:
                 memory_id = item.get("memory_id")
@@ -227,24 +229,13 @@ class MemoryController:
                     rrf_scores.get(memory_id, 0.0)
                     + 1.0 / (float(rrf_k) + rank)
                 )
-
-        final_phrase_lists = []
-        for ranking in phrase_rankings:
-            protected = list(ranking[:protected_top_k])
-            remaining = sorted(
-                ranking[protected_top_k:],
-                key=lambda item: (
-                    -rrf_scores.get(item.get("memory_id"), 0.0),
-                    -float(item.get("phrase_similarity") or 0.0),
-                    int(item.get("phrase_rank") or 0),
-                    str(item.get("memory_id") or ""),
-                ),
-            )
-            supplement_count = max(0, final_per_phrase - len(protected))
-            final_phrase_lists.append(protected + remaining[:supplement_count])
+                max_similarities[memory_id] = max(
+                    max_similarities.get(memory_id, -1.0),
+                    float(item.get("phrase_similarity") or 0.0),
+                )
 
         fused_by_id = {}
-        for ranking in final_phrase_lists:
+        for ranking in phrase_rankings:
             for item in ranking:
                 memory_id = item.get("memory_id")
                 if not memory_id or memory_id in fused_by_id:
@@ -256,42 +247,142 @@ class MemoryController:
                         "phrase_similarity",
                     }
                 }
-                public_item["_rrf_score"] = rrf_scores.get(memory_id, 0.0)
+                public_item["max_phrase_similarity"] = max_similarities.get(
+                    memory_id, 0.0
+                )
+                public_item["rrf_score"] = rrf_scores.get(memory_id, 0.0)
                 fused_by_id[memory_id] = public_item
 
-        fused = sorted(
-            fused_by_id.values(),
-            key=lambda item: (
-                -float(item.get("_rrf_score") or 0.0),
-                str(item.get("memory_id") or ""),
-            ),
-        )
-        for rrf_rank, item in enumerate(fused, start=1):
-            item["_rrf_rank"] = rrf_rank
+        fused = list(fused_by_id.values())
+        max_values = np.asarray([
+            item["max_phrase_similarity"] for item in fused
+        ], dtype=np.float32)
+        rrf_values = np.asarray([
+            item["rrf_score"] for item in fused
+        ], dtype=np.float32)
+
+        def minmax(values):
+            if len(values) == 0:
+                return values
+            low, high = float(np.min(values)), float(np.max(values))
+            if high - low <= 1e-12:
+                return np.ones_like(values) if high > 0 else np.zeros_like(values)
+            return (values - low) / (high - low)
+
+        max_norm = minmax(max_values)
+        rrf_norm = minmax(rrf_values)
+        for item, normalized_similarity, normalized_rrf in zip(
+                fused, max_norm, rrf_norm):
+            base_score = 0.75 * float(normalized_similarity) + 0.25 * float(
+                normalized_rrf
+            )
+            item["base_score"] = base_score
+            item["candidate_score"] = base_score
+            item["_candidate_score"] = base_score
+            item["candidate_sources"] = ["global_phrase"]
+        fused.sort(key=lambda item: (
+            -float(item.get("candidate_score") or 0.0),
+            str(item.get("memory_id") or ""),
+        ))
+        for rank, item in enumerate(fused, start=1):
+            item["prefilter_rank"] = rank
 
         diagnostics = {
-            "phrase_top15": [
-                [
+            "global_candidate_ids": [item.get("memory_id") for item in fused],
+        }
+        return fused, diagnostics
+
+    @staticmethod
+    def select_eaes_dynamic_phrase_rankings(phrase_rankings):
+        selected_rankings = []
+        phrase_diagnostics = []
+        temperature = float(config.EAES_PHRASE_SOFTMAX_TEMPERATURE)
+        target_mass = float(config.EAES_PHRASE_TARGET_MASS)
+        for phrase_index, ranking in enumerate(phrase_rankings):
+            similarities = np.asarray([
+                float(item.get("phrase_similarity") or 0.0)
+                for item in ranking
+            ], dtype=np.float64)
+            if len(similarities):
+                logits = (similarities - float(np.max(similarities))) / temperature
+                weights = np.exp(logits)
+                probabilities = weights / max(float(np.sum(weights)), 1e-12)
+                cumulative = np.cumsum(probabilities)
+                mass_k = int(np.searchsorted(cumulative, target_mass) + 1)
+                selected_k = min(
+                    len(ranking),
+                    max(
+                        config.EAES_PHRASE_MIN_TOP_K,
+                        min(config.EAES_PHRASE_MAX_TOP_K, mass_k),
+                    ),
+                )
+                mass_at_15 = float(cumulative[min(14, len(cumulative) - 1)])
+                selected_mass = float(cumulative[selected_k - 1])
+            else:
+                probabilities = np.asarray([], dtype=np.float64)
+                selected_k = 0
+                mass_at_15 = 0.0
+                selected_mass = 0.0
+            selected = list(ranking[:selected_k])
+            selected_rankings.append(selected)
+            phrase_diagnostics.append({
+                "phrase_index": phrase_index,
+                "selected_k": selected_k,
+                "mass_at_15": mass_at_15,
+                "selected_mass": selected_mass,
+                "candidates": [
                     {
                         "memory_id": item.get("memory_id"),
                         "rank": item.get("phrase_rank"),
                         "similarity": item.get("phrase_similarity"),
+                        "probability": float(probabilities[index]),
+                        "rrf_contribution": 1.0 / (
+                            float(config.EAES_PHRASE_RRF_K)
+                            + int(item.get("phrase_rank") or 0)
+                        ),
                     }
-                    for item in ranking
-                ]
-                for ranking in phrase_rankings
-            ],
-            "phrase_final_top10": [
-                [item.get("memory_id") for item in ranking]
-                for ranking in final_phrase_lists
-            ],
-            "fused_candidate_ids": [item.get("memory_id") for item in fused],
-            "rrf_scores": {
-                memory_id: score
-                for memory_id, score in sorted(rrf_scores.items())
-            },
-        }
-        return fused, diagnostics
+                    for index, item in enumerate(selected)
+                ],
+            })
+        return selected_rankings, phrase_diagnostics
+
+    def _rescore_eaes_global_phrase_pool(self, candidates, retrieval_phrases):
+        """Compute s_tag against all four phrases without new embeddings."""
+        if not candidates:
+            return []
+        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
+        for candidate in candidates:
+            cached = self._eaes_tag_embedding_cache[candidate["memory_id"]][1]
+            candidate["max_phrase_similarity"] = float(
+                np.max(np.dot(phrase_vectors, cached))
+            )
+        similarities = np.asarray([
+            candidate["max_phrase_similarity"] for candidate in candidates
+        ], dtype=np.float64)
+        rrf_scores = np.asarray([
+            float(candidate.get("rrf_score") or 0.0)
+            for candidate in candidates
+        ], dtype=np.float64)
+
+        def minmax(values):
+            low, high = float(np.min(values)), float(np.max(values))
+            if high - low <= 1e-12:
+                return np.ones_like(values) if high > 0 else np.zeros_like(values)
+            return (values - low) / (high - low)
+
+        for candidate, sim_norm, rrf_norm in zip(
+                candidates, minmax(similarities), minmax(rrf_scores)):
+            base_score = 0.75 * float(sim_norm) + 0.25 * float(rrf_norm)
+            candidate["base_score"] = base_score
+            candidate["candidate_score"] = base_score
+            candidate["_candidate_score"] = base_score
+        candidates.sort(key=lambda item: (
+            -float(item.get("candidate_score") or 0.0),
+            str(item.get("memory_id") or ""),
+        ))
+        for rank, candidate in enumerate(candidates, start=1):
+            candidate["prefilter_rank"] = rank
+        return candidates
 
     def retrieve_eaes_phrase_candidates(
             self,
@@ -304,12 +395,20 @@ class MemoryController:
             top_k=config.EAES_PHRASE_INITIAL_TOP_K,
             exclude_memory_ids=exclude_memory_ids,
         )
-        candidates, diagnostics = self.fuse_eaes_phrase_rankings(
-            rankings,
-            rrf_k=config.EAES_PHRASE_RRF_K,
-            protected_top_k=config.EAES_PHRASE_PROTECTED_TOP_K,
-            final_per_phrase=config.EAES_PHRASE_FINAL_TOP_K,
+        selected_rankings, phrase_diagnostics = (
+            self.select_eaes_dynamic_phrase_rankings(rankings)
         )
+        candidates, diagnostics = self.fuse_eaes_phrase_rankings(
+            selected_rankings,
+            rrf_k=config.EAES_PHRASE_RRF_K,
+        )
+        candidates = self._rescore_eaes_global_phrase_pool(
+            candidates, retrieval_phrases
+        )
+        diagnostics["global_candidate_ids"] = [
+            candidate.get("memory_id") for candidate in candidates
+        ]
+        diagnostics["phrases"] = phrase_diagnostics
         if include_diagnostics:
             return candidates, diagnostics
         return candidates
@@ -477,11 +576,43 @@ class MemoryController:
             exclude_memory_ids=exclude_memory_ids,
         )
 
-    def retrieve_eaes_parent_candidates(
-            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
-            exclude_parent_ids=None
+    @staticmethod
+    def _eaes_probability_entropy(probabilities):
+        values = np.asarray(probabilities, dtype=np.float64)
+        support_size = len(values)
+        if support_size <= 1:
+            return 0.0
+        values = values[values > 0]
+        if not len(values):
+            return 0.0
+        values = values / float(np.sum(values))
+        return float(
+            -np.sum(values * np.log(values)) / np.log(support_size)
+        )
+
+    @staticmethod
+    def _eaes_js_divergence(left, right):
+        left = np.asarray(left, dtype=np.float64)
+        right = np.asarray(right, dtype=np.float64)
+        if len(left) == 0 or len(left) != len(right):
+            return 0.0
+        if float(np.sum(left)) <= 0 or float(np.sum(right)) <= 0:
+            return 0.0
+        left = left / float(np.sum(left))
+        right = right / float(np.sum(right))
+        middle = 0.5 * (left + right)
+
+        def kl(source, target):
+            mask = source > 0
+            return float(np.sum(source[mask] * np.log(source[mask] / target[mask])))
+
+        return (0.5 * kl(left, middle) + 0.5 * kl(right, middle)) / np.log(2.0)
+
+    def score_eaes_parent_candidates(
+            self, query_plan: Dict[str, Any], question_emb=None,
+            exclude_parent_ids=None,
     ):
-        """Retrieve parents independently; this never filters child candidates."""
+        """Score every parent rewrite; selection is handled by the router."""
         if not config.SEMANTIC_HIERARCHY:
             return []
         self.prepare_eaes_parent_embeddings()
@@ -493,25 +624,285 @@ class MemoryController:
         excluded = set(exclude_parent_ids or [])
         scored = []
         for parent in self.memory.eaes_parent_nodes.values():
-            if parent.parent_id in excluded:
-                continue
-            if parent.retrieval_embedding is None:
+            if parent.parent_id in excluded or parent.retrieval_embedding is None:
                 continue
             vector = self._normalize_embedding_rows(parent.retrieval_embedding)[0]
             similarities = np.dot(query_vectors, vector)
             best_index = int(np.argmax(similarities))
-            score = float(similarities[best_index])
-            scored.append((score, best_index, parent))
-        scored.sort(key=lambda item: item[0], reverse=True)
+            scored.append({
+                **parent.to_reader_dict(),
+                "raw_similarity": float(similarities[best_index]),
+                "matched_keyword": keywords[best_index],
+            })
+        scored.sort(key=lambda item: (
+            -float(item["raw_similarity"]), item["parent_id"]
+        ))
+        return scored
+
+    def route_eaes_parent_candidates(
+            self, query_plan, global_children, question_emb=None,
+    ):
+        """Combine parent similarity and direct child support, then select 0-6."""
+        parents = self.score_eaes_parent_candidates(query_plan, question_emb)
+        if not parents:
+            return [], {
+                "breadth_value": float((query_plan or {}).get("breadth_value", 0.5)),
+                "detail_value": float((query_plan or {}).get("detail_value", 0.5)),
+                "parent_entropy": 0.0,
+                "child_parent_dispersion": 0.0,
+                "parent_child_jsd": 0.0,
+                "retrieval_uncertainty": 0.0,
+                "target_parent_mass": 0.0,
+                "selected_parent_mass": 0.0,
+                "selected_parent_k": 0,
+                "parent_candidates": [],
+            }
+
+        raw = np.asarray([
+            parent["raw_similarity"] for parent in parents
+        ], dtype=np.float64)
+        exp_raw = np.exp(raw - float(np.max(raw)))
+        parent_probabilities = exp_raw / float(np.sum(exp_raw))
+        parent_index = {
+            parent["parent_id"]: index for index, parent in enumerate(parents)
+        }
+        child_support = np.zeros(len(parents), dtype=np.float64)
+        child_mass = np.zeros(len(parents), dtype=np.float64)
+        for child in global_children or []:
+            index = parent_index.get(child.get("parent_id"))
+            if index is None:
+                continue
+            score = max(0.0, float(child.get("base_score") or 0.0))
+            child_support[index] = max(child_support[index], score)
+            child_mass[index] += score
+        support_distribution = (
+            child_support / float(np.sum(child_support))
+            if float(np.sum(child_support)) > 0 else
+            np.zeros(len(parents), dtype=np.float64)
+        )
+        child_distribution = (
+            child_mass / float(np.sum(child_mass))
+            if float(np.sum(child_mass)) > 0 else
+            np.zeros(len(parents), dtype=np.float64)
+        )
+        posterior = 0.8 * parent_probabilities + 0.2 * support_distribution
+        posterior = posterior / max(float(np.sum(posterior)), 1e-12)
+
+        parent_entropy = self._eaes_probability_entropy(parent_probabilities)
+        child_dispersion = self._eaes_probability_entropy(child_distribution)
+        parent_child_jsd = self._eaes_js_divergence(
+            parent_probabilities, support_distribution
+        )
+        uncertainty = min(
+            1.0,
+            0.4 * parent_entropy
+            + 0.3 * child_dispersion
+            + 0.3 * parent_child_jsd,
+        )
+        breadth_value = min(1.0, max(
+            0.0, float((query_plan or {}).get("breadth_value", 0.5))
+        ))
+        detail_value = min(1.0, max(
+            0.0, float((query_plan or {}).get("detail_value", 0.5))
+        ))
+        target_mass = min(0.95, 0.55 + 0.30 * breadth_value + 0.10 * uncertainty)
+
+        rows = []
+        for index, parent in enumerate(parents):
+            rows.append({
+                **parent,
+                "parent_probability": float(parent_probabilities[index]),
+                "child_support": float(child_support[index]),
+                "posterior_score": float(posterior[index]),
+                "selected": False,
+            })
+        rows.sort(key=lambda item: (
+            -item["posterior_score"], -item["raw_similarity"], item["parent_id"]
+        ))
+        for rank, row in enumerate(rows, start=1):
+            row["rank"] = rank
+        eligible = [
+            row for row in rows
+            if row["raw_similarity"] >= config.PARENT_RELEVANCE_FLOOR
+        ]
+        selected = []
+        selected_mass = 0.0
+        for row in eligible[:config.PARENT_TOP_K]:
+            item = dict(row)
+            item["selected"] = True
+            item["rank"] = len(selected) + 1
+            item["score"] = item["posterior_score"]
+            selected.append(item)
+            selected_mass += item["posterior_score"]
+            if selected_mass >= target_mass:
+                break
+        selected_ids = {item["parent_id"] for item in selected}
+        for row in rows:
+            row["selected"] = row["parent_id"] in selected_ids
+        return selected, {
+            "breadth_value": breadth_value,
+            "detail_value": detail_value,
+            "parent_entropy": parent_entropy,
+            "child_parent_dispersion": child_dispersion,
+            "parent_child_jsd": parent_child_jsd,
+            "retrieval_uncertainty": uncertainty,
+            "target_parent_mass": target_mass,
+            "selected_parent_mass": selected_mass,
+            "selected_parent_k": len(selected),
+            "parent_candidates": rows,
+        }
+
+    def retrieve_eaes_parent_local_children(
+            self, retrieval_phrases, selected_parents, detail_value,
+    ):
+        """Add a small tag-only child scan inside every selected parent."""
+        if not selected_parents or not retrieval_phrases:
+            return [], {"per_parent_k": 0, "parents": []}
+        self._prepare_eaes_tag_embeddings()
+        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
+        local_k = 2 + int(round(2 * min(1.0, max(0.0, float(detail_value)))))
+        local_candidates = []
+        diagnostics = []
+        seen = set()
+        for selected_parent in selected_parents:
+            parent_id = selected_parent.get("parent_id")
+            notes = sorted(
+                (
+                    note for note in self.memory.eaes_notes.values()
+                    if note.parent_id == parent_id
+                ),
+                key=lambda note: note.memory_id,
+            )
+            scored = []
+            for note in notes:
+                tag_vector = self._eaes_tag_embedding_cache[note.memory_id][1]
+                similarity = float(np.max(np.dot(phrase_vectors, tag_vector)))
+                scored.append((similarity, note))
+            scored.sort(key=lambda pair: (-pair[0], pair[1].memory_id))
+            parent_ids = []
+            for similarity, note in scored[:local_k]:
+                parent_ids.append(note.memory_id)
+                if note.memory_id in seen:
+                    continue
+                seen.add(note.memory_id)
+                local_candidates.append({
+                    **note.to_dict(include_raw=False),
+                    "tag": self._eaes_child_tag(note),
+                    "max_phrase_similarity": similarity,
+                    "rrf_score": 0.0,
+                    "candidate_sources": ["parent_local"],
+                })
+            diagnostics.append({
+                "parent_id": parent_id,
+                "selected_memory_ids": parent_ids,
+            })
+        return local_candidates, {"per_parent_k": local_k, "parents": diagnostics}
+
+    @staticmethod
+    def merge_eaes_hierarchical_candidates(
+            global_candidates, local_candidates, selected_parents, limit=None,
+    ):
+        """Union global/local children, rescore once, and cap the reranker pool."""
+        limit = limit or config.EAES_PHRASE_UNION_LIMIT
+        merged = {}
+        global_ids = []
+        for candidate in global_candidates or []:
+            item = dict(candidate)
+            memory_id = item.get("memory_id")
+            if not memory_id:
+                continue
+            global_ids.append(memory_id)
+            item["candidate_sources"] = list(dict.fromkeys(
+                item.get("candidate_sources") or ["global_phrase"]
+            ))
+            merged[memory_id] = item
+        local_ids = []
+        local_added_ids = []
+        for candidate in local_candidates or []:
+            memory_id = candidate.get("memory_id")
+            if not memory_id:
+                continue
+            local_ids.append(memory_id)
+            if memory_id in merged:
+                item = merged[memory_id]
+                item["candidate_sources"] = list(dict.fromkeys(
+                    list(item.get("candidate_sources") or []) + ["parent_local"]
+                ))
+                item["max_phrase_similarity"] = max(
+                    float(item.get("max_phrase_similarity") or 0.0),
+                    float(candidate.get("max_phrase_similarity") or 0.0),
+                )
+            else:
+                item = dict(candidate)
+                item["rrf_score"] = 0.0
+                item["candidate_sources"] = ["parent_local"]
+                merged[memory_id] = item
+                local_added_ids.append(memory_id)
+
+        items = list(merged.values())
+        similarities = np.asarray([
+            float(item.get("max_phrase_similarity") or 0.0) for item in items
+        ], dtype=np.float64)
+        rrf_scores = np.asarray([
+            float(item.get("rrf_score") or 0.0) for item in items
+        ], dtype=np.float64)
+
+        def minmax(values):
+            if len(values) == 0:
+                return values
+            low, high = float(np.min(values)), float(np.max(values))
+            if high - low <= 1e-12:
+                return np.ones_like(values) if high > 0 else np.zeros_like(values)
+            return (values - low) / (high - low)
+
+        parent_scores = {
+            item.get("parent_id"): float(item.get("posterior_score") or 0.0)
+            for item in selected_parents or []
+        }
+        for item, sim_norm, rrf_norm in zip(
+                items, minmax(similarities), minmax(rrf_scores)):
+            base_score = 0.75 * float(sim_norm) + 0.25 * float(rrf_norm)
+            parent_boost = 0.1 * parent_scores.get(item.get("parent_id"), 0.0)
+            candidate_score = base_score + parent_boost
+            item["base_score"] = base_score
+            item["parent_boost"] = parent_boost
+            item["candidate_score"] = candidate_score
+            item["_candidate_score"] = candidate_score
+        items.sort(key=lambda item: (
+            -float(item.get("candidate_score") or 0.0),
+            -float(item.get("max_phrase_similarity") or 0.0),
+            str(item.get("memory_id") or ""),
+        ))
+        prefilter = items[:limit]
+        for rank, item in enumerate(prefilter, start=1):
+            item["prefilter_rank"] = rank
+        return prefilter, {
+            "global_candidate_ids": global_ids,
+            "local_candidate_ids": local_ids,
+            "local_added_ids": local_added_ids,
+            "global_plus_local_ids": [item.get("memory_id") for item in items],
+            "prefilter_candidate_ids": [item.get("memory_id") for item in prefilter],
+            "dropped_by_pool_limit_ids": [
+                item.get("memory_id") for item in items[limit:]
+            ],
+        }
+
+    def retrieve_eaes_parent_candidates(
+            self, query_plan: Dict[str, Any], question_emb=None, limit: int = None,
+            exclude_parent_ids=None
+    ):
+        """Retrieve parents independently; this never filters child candidates."""
+        scored = self.score_eaes_parent_candidates(
+            query_plan, question_emb, exclude_parent_ids
+        )
         selected = scored[:limit or config.PARENT_TOP_K]
         return [
             {
-                **parent.to_reader_dict(),
-                "score": round(score, 4),
+                **parent,
+                "score": round(parent["raw_similarity"], 4),
                 "rank": rank,
-                "matched_keyword": keywords[best_index],
             }
-            for rank, (score, best_index, parent) in enumerate(selected, start=1)
+            for rank, parent in enumerate(selected, start=1)
         ]
 
     def expand_eaes_raw_text(self, memory_ids: List[str]):

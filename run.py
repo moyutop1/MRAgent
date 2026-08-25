@@ -345,8 +345,6 @@ def main():
             agent.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)
 
             agent.store_keyword(keyword_path, rewrite_path)
-            if config.EAES_MODE:
-                memory_controller.prepare_eaes_retrieval_embeddings()
             if config.EAES_MODE and config.SEMANTIC_HIERARCHY:
                 memory_controller.prepare_eaes_parent_embeddings()
 

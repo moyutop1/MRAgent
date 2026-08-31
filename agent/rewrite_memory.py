@@ -74,6 +74,37 @@ def normalize_sentence_ids(rewrite_out):
         sentence["id"] = f"{primary}-{cnt[primary]}"
 
 
+def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
+    """Preserve overlong tag terms by folding the suffix into one compound."""
+    if not isinstance(rewrite_out, dict) or max_words < 1:
+        return 0
+    sentences = rewrite_out.get("sentence")
+    if not isinstance(sentences, list):
+        return 0
+
+    changed = 0
+    for sentence in sentences:
+        if not isinstance(sentence, dict):
+            continue
+        tags = sentence.get("tag")
+        if not isinstance(tags, list):
+            continue
+        normalized_tags = []
+        for tag in tags:
+            if not isinstance(tag, str):
+                normalized_tags.append(tag)
+                continue
+            words = re.sub(r"\s+", " ", tag).strip().split(" ")
+            if len(words) > max_words:
+                words = words[:max_words - 1] + [
+                    "-".join(words[max_words - 1:])
+                ]
+                changed += 1
+            normalized_tags.append(" ".join(words))
+        sentence["tag"] = normalized_tags
+    return changed
+
+
 def _as_list(value):
     if value is None:
         return []
@@ -395,6 +426,7 @@ def _rewrite_window(
     )
     normalize_sentence_ids(rewrite_out)
     normalize_rewrite_temporal_granularity(rewrite_out, source_text)
+    normalize_rewrite_tag_lengths(rewrite_out)
     flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
     if flag:
         flag, err = _filter_context_only_outputs(
@@ -416,6 +448,7 @@ def _rewrite_window(
             )
             normalize_sentence_ids(rewrite_out)
             normalize_rewrite_temporal_granularity(rewrite_out, source_text)
+            normalize_rewrite_tag_lengths(rewrite_out)
             flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
             if flag:
                 flag, err = _filter_context_only_outputs(
@@ -749,6 +782,14 @@ def _rewrite_child_window(
         )
         normalize_sentence_ids(output)
         normalize_rewrite_temporal_granularity(output, source_text)
+        normalized_tag_count = normalize_rewrite_tag_lengths(output)
+        if normalized_tag_count and logger:
+            logger.info(
+                "normalized %d overlong child tag(s) for %s through %s",
+                normalized_tag_count,
+                window.start_origin,
+                window.end_origin,
+            )
         valid, last_error = json_scheme.check_child_window_rewrite_json(
             output, window, list(turns), source_text
         )

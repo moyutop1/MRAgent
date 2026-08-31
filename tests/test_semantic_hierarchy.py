@@ -41,6 +41,7 @@ from agent.rewrite_memory import (
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
+    normalize_rewrite_tag_lengths,
     rewrite_semantic_hierarchy_session,
 )
 from agent.semantic_segmentation import (
@@ -325,6 +326,35 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertNotIn("D1:1", _child_window_source_text(
             window, turns, "2023-05-08"
         ))
+
+    def test_overlong_child_tag_is_compounded_without_regenerating_window(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        llm = SequenceLLM([_rewrite_output(_sentence(
+            "D1:1",
+            "The family admired a lake sunrise last year.",
+            tag=["lake sunrise", "lake sunrise last year"],
+        ))])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(
+            output["sentence"][0]["tag"],
+            ["lake sunrise", "lake sunrise last-year"],
+        )
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_tag_length_normalizer_leaves_non_string_for_validation(self):
+        output = _rewrite_output(_sentence(
+            "D1:1", "memory", tag=["valid tag", 123]
+        ))
+
+        changed = normalize_rewrite_tag_lengths(output)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(output["sentence"][0]["tag"], ["valid tag", 123])
 
     def test_duplicate_model_outputs_are_fused_after_window_validation(self):
         turns = parse_session_turns(_dialogue(1))

@@ -24,6 +24,7 @@ TASK:
 - Create a memory only when CURRENT_DIALOGUE_WINDOW adds answer-bearing information. Never create a memory supported only by PREVIOUS_DIALOGUE_CONTEXT.
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
 - Output "tag" as an array of two to four short concrete noun phrases, each with no more than three words.
+- Count tag words by whitespace and verify every tag before returning. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Before writing tags, internally identify every independent fact in the memory. The tags must collectively cover all independent facts rather than only the overall topic.
 - If the memory contains one independent fact, use two to four meaningfully different synonymous tags for that same fact. If it contains two to four independent facts, give every fact at least one tag and use any remaining slots for useful synonymous wording.
 - If more than four independent facts would be needed, split the content into additional sentence objects instead of omitting a fact or exceeding four tags.
@@ -203,6 +204,7 @@ Rules:
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
 - Output tag as an array of two to four short concrete noun phrases of at most three words each and set topic to [].
+- Count tag words by whitespace and verify every tag before returning. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Internally identify the independent facts in each sentence. Its tags must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful synonymous tags. For two to four facts, give every fact at least one tag. If a sentence would contain more than four independent facts, split it into additional sentence objects.
 - Preserve distinctive people, events, objects, relations, and applicable time/place/occasion qualifiers in the tags. Never use generic tags such as Event, Fact, Question, or Conversation.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.

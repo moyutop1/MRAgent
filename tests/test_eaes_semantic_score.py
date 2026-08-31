@@ -39,7 +39,7 @@ def _valid_rewrite():
         "sentence": [{
             "id": "D1:1-1",
             "text": "Caroline owns a dog and works as a counselor.",
-            "tag": "Personal Profile",
+            "tag": ["Personal Profile", "Counselor Profile"],
             "origin": "D1:1",
             "topic": [],
             "semantic_properties": ["personal_profile", "durable"],
@@ -61,6 +61,22 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
     def test_valid_semantic_properties_pass_schema(self):
         ok, error = check_rewrite_json(_valid_rewrite(), self.dialogue)
         self.assertTrue(ok, error)
+
+    @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
+    def test_tags_require_strict_two_to_four_short_phrase_array(self):
+        invalid_tags = [
+            "Personal Profile",
+            ["only one"],
+            ["one", "two", "three", "four", "five"],
+            ["valid tag", "four word tag is invalid"],
+            ["Personal Profile", " personal   profile "],
+        ]
+        for tags in invalid_tags:
+            payload = _valid_rewrite()
+            payload["sentence"][0]["tag"] = tags
+            with self.subTest(tags=tags):
+                ok, _ = check_rewrite_json(payload, self.dialogue)
+                self.assertFalse(ok)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_legacy_labels_duplicates_and_invalid_axis_counts_are_rejected(self):
@@ -107,6 +123,14 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
         self.assertIn('"personal_profile"', prompt)
         self.assertIn('"relation_social"', prompt)
         self.assertIn('never "profile_preference" or "fact_background"', prompt)
+
+    def test_rewrite_prompts_require_multi_tag_fact_coverage(self):
+        for prompt in (
+                Prompts.REWRITE_SYSTEM_PROMPT,
+                Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT):
+            self.assertIn("two to four", prompt)
+            self.assertIn("independent fact", prompt)
+            self.assertIn("collectively cover", prompt)
 
 
 class SemanticPersistenceTests(unittest.TestCase):

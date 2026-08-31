@@ -466,7 +466,12 @@ class Agent(EAESMixin, RetrievalMixin):
                     conv_time=conversation_time,
                     semantic_properties=semantic_properties,
                 )
-                ee_event.tag_t = ee.get("tag")
+                tags = ee.get("tag")
+                if not isinstance(tags, list) or not 2 <= len(tags) <= 4:
+                    raise ValueError(
+                        f"episode event {id} requires a tag array with 2-4 items"
+                    )
+                ee_event.tag_t = list(tags)
                 self.memory.episode_events[id] = ee_event
                 # New rewrite memories carry source-supported event time in
                 # their text. Keep legacy cached structured times readable,

@@ -656,6 +656,9 @@ def _fuse_adjacent_duplicate_child_memories(
 
     if not candidates:
         return kept_candidates, last_embedding
+    if threshold >= 1.0:
+        retained_memories.extend(candidates)
+        return candidates, None
 
     embedding_inputs = list(current_texts)
     includes_previous = bool(retained_memories and last_embedding is None)

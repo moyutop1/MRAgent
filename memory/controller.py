@@ -114,39 +114,63 @@ class MemoryController:
             for parent, vector in zip(pending, vectors):
                 parent.retrieval_embedding = vector
 
-    def _eaes_child_tag(self, note):
-        return self.memory.episode_events[note.event_id].tag_t.strip()
+    def _eaes_child_tags(self, note):
+        event = self.memory.episode_events[note.event_id]
+        tags = event.tag_t
+        if not isinstance(tags, list) or not 2 <= len(tags) <= 4:
+            raise ValueError(
+                f"EAES child {note.event_id} requires a tag array with 2-4 items"
+            )
+        clean_tags = []
+        for tag in tags:
+            clean_tag = re.sub(r"\s+", " ", str(tag or "")).strip()
+            if not clean_tag or len(clean_tag.split()) > 3:
+                raise ValueError(
+                    f"EAES child {note.event_id} has an invalid tag: {tag!r}"
+                )
+            clean_tags.append(clean_tag)
+        if len({tag.casefold() for tag in clean_tags}) != len(clean_tags):
+            raise ValueError(
+                f"EAES child {note.event_id} has duplicate normalized tags"
+            )
+        return clean_tags
 
     def _prepare_eaes_tag_embeddings(self):
         pending = []
         for note in self.memory.eaes_notes.values():
-            tag = self._eaes_child_tag(note)
+            tags = tuple(self._eaes_child_tags(note))
             cached = self._eaes_tag_embedding_cache.get(note.memory_id)
-            if cached is None or cached[0] != tag:
-                pending.append((note, tag))
+            if cached is None or cached[0] != tags:
+                pending.append((note, tags))
         if not pending:
             return
 
         with _EAES_EMBEDDING_LOCK:
             pending = []
             for note in self.memory.eaes_notes.values():
-                tag = self._eaes_child_tag(note)
+                tags = tuple(self._eaes_child_tags(note))
                 cached = self._eaes_tag_embedding_cache.get(note.memory_id)
-                if cached is None or cached[0] != tag:
-                    pending.append((note, tag))
+                if cached is None or cached[0] != tags:
+                    pending.append((note, tags))
             if not pending:
                 return
 
+            flat_tags = [tag for _, tags in pending for tag in tags]
             vectors = self._normalize_embedding_rows(
-                get_embedding([tag for _, tag in pending])
+                get_embedding(flat_tags)
             )
-            if len(vectors) != len(pending):
+            if len(vectors) != len(flat_tags):
                 raise RuntimeError(
                     "EAES tag embedding count mismatch: "
-                    f"{len(vectors)} != {len(pending)}"
+                    f"{len(vectors)} != {len(flat_tags)}"
                 )
-            for (note, tag), vector in zip(pending, vectors):
-                self._eaes_tag_embedding_cache[note.memory_id] = (tag, vector)
+            offset = 0
+            for note, tags in pending:
+                count = len(tags)
+                self._eaes_tag_embedding_cache[note.memory_id] = (
+                    tags, vectors[offset:offset + count]
+                )
+                offset += count
 
     def _eaes_phrase_embeddings(self, retrieval_phrases):
         cache_key = tuple(retrieval_phrases)
@@ -184,27 +208,37 @@ class MemoryController:
         if not notes:
             return [[] for _ in phrases]
 
-        tag_matrix = np.vstack([
-            self._eaes_tag_embedding_cache[note.memory_id][1]
-            for note in notes
-        ])
         phrase_rankings = []
         for phrase_index, (phrase, phrase_vector) in enumerate(
                 zip(phrases, phrase_vectors)):
-            similarities = np.dot(tag_matrix, phrase_vector)
+            scored = []
+            for note in notes:
+                tags, tag_vectors = self._eaes_tag_embedding_cache[note.memory_id]
+                similarities = np.dot(tag_vectors, phrase_vector)
+                best_tag_index = int(np.argmax(similarities))
+                scored.append((
+                    note,
+                    float(similarities[best_tag_index]),
+                    tags[best_tag_index],
+                    best_tag_index,
+                ))
             scored = sorted(
-                zip(notes, similarities),
-                key=lambda pair: (-float(pair[1]), pair[0].memory_id),
+                scored,
+                key=lambda item: (-item[1], item[0].memory_id),
             )[:top_k]
             ranking = []
-            for phrase_rank, (note, similarity) in enumerate(scored, start=1):
+            for phrase_rank, (
+                    note, similarity, matched_tag, matched_tag_index
+            ) in enumerate(scored, start=1):
                 ranking.append({
                     **note.to_dict(include_raw=False),
-                    "tag": self._eaes_child_tag(note),
+                    "tag": self._eaes_child_tags(note),
                     "phrase_index": phrase_index,
                     "phrase": phrase,
                     "phrase_rank": phrase_rank,
-                    "phrase_similarity": float(similarity),
+                    "phrase_similarity": similarity,
+                    "matched_tag": matched_tag,
+                    "matched_tag_index": matched_tag_index,
                 })
             phrase_rankings.append(ranking)
         return phrase_rankings
@@ -219,6 +253,7 @@ class MemoryController:
         """Fuse already-selected dynamic phrase lists without hard Top10 pruning."""
         rrf_scores = {}
         max_similarities = {}
+        phrase_matches = {}
         for ranking in phrase_rankings:
             for item in ranking:
                 memory_id = item.get("memory_id")
@@ -233,6 +268,16 @@ class MemoryController:
                     max_similarities.get(memory_id, -1.0),
                     float(item.get("phrase_similarity") or 0.0),
                 )
+                phrase_matches.setdefault(memory_id, []).append({
+                    "phrase_index": item.get("phrase_index"),
+                    "phrase": item.get("phrase"),
+                    "phrase_rank": rank,
+                    "phrase_similarity": float(
+                        item.get("phrase_similarity") or 0.0
+                    ),
+                    "matched_tag": item.get("matched_tag"),
+                    "matched_tag_index": item.get("matched_tag_index"),
+                })
 
         fused_by_id = {}
         for ranking in phrase_rankings:
@@ -244,13 +289,23 @@ class MemoryController:
                     key: value for key, value in item.items()
                     if key not in {
                         "phrase_index", "phrase", "phrase_rank",
-                        "phrase_similarity",
+                        "phrase_similarity", "matched_tag",
+                        "matched_tag_index",
                     }
                 }
                 public_item["max_phrase_similarity"] = max_similarities.get(
                     memory_id, 0.0
                 )
                 public_item["rrf_score"] = rrf_scores.get(memory_id, 0.0)
+                public_item["phrase_matches"] = phrase_matches.get(
+                    memory_id, []
+                )
+                if public_item["phrase_matches"]:
+                    best_match = max(
+                        public_item["phrase_matches"],
+                        key=lambda match: match["phrase_similarity"],
+                    )
+                    public_item["matched_tag"] = best_match["matched_tag"]
                 fused_by_id[memory_id] = public_item
 
         fused = list(fused_by_id.values())
@@ -347,15 +402,23 @@ class MemoryController:
         return selected_rankings, phrase_diagnostics
 
     def _rescore_eaes_global_phrase_pool(self, candidates, retrieval_phrases):
-        """Compute s_tag against all four phrases without new embeddings."""
+        """Compute the maximum phrase-to-any-tag score without new embeddings."""
         if not candidates:
             return []
         phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
         for candidate in candidates:
-            cached = self._eaes_tag_embedding_cache[candidate["memory_id"]][1]
-            candidate["max_phrase_similarity"] = float(
-                np.max(np.dot(phrase_vectors, cached))
+            tags, tag_vectors = self._eaes_tag_embedding_cache[
+                candidate["memory_id"]
+            ]
+            similarities = np.dot(phrase_vectors, tag_vectors.T)
+            best_flat_index = int(np.argmax(similarities))
+            _, best_tag_index = np.unravel_index(
+                best_flat_index, similarities.shape
             )
+            candidate["max_phrase_similarity"] = float(
+                np.max(similarities)
+            )
+            candidate["matched_tag"] = tags[int(best_tag_index)]
         similarities = np.asarray([
             candidate["max_phrase_similarity"] for candidate in candidates
         ], dtype=np.float64)
@@ -775,19 +838,30 @@ class MemoryController:
             )
             scored = []
             for note in notes:
-                tag_vector = self._eaes_tag_embedding_cache[note.memory_id][1]
-                similarity = float(np.max(np.dot(phrase_vectors, tag_vector)))
-                scored.append((similarity, note))
-            scored.sort(key=lambda pair: (-pair[0], pair[1].memory_id))
+                tags, tag_vectors = self._eaes_tag_embedding_cache[
+                    note.memory_id
+                ]
+                similarities = np.dot(phrase_vectors, tag_vectors.T)
+                best_flat_index = int(np.argmax(similarities))
+                _, best_tag_index = np.unravel_index(
+                    best_flat_index, similarities.shape
+                )
+                scored.append((
+                    float(np.max(similarities)),
+                    note,
+                    tags[int(best_tag_index)],
+                ))
+            scored.sort(key=lambda item: (-item[0], item[1].memory_id))
             parent_ids = []
-            for similarity, note in scored[:local_k]:
+            for similarity, note, matched_tag in scored[:local_k]:
                 parent_ids.append(note.memory_id)
                 if note.memory_id in seen:
                     continue
                 seen.add(note.memory_id)
                 local_candidates.append({
                     **note.to_dict(include_raw=False),
-                    "tag": self._eaes_child_tag(note),
+                    "tag": self._eaes_child_tags(note),
+                    "matched_tag": matched_tag,
                     "max_phrase_similarity": similarity,
                     "rrf_score": 0.0,
                     "candidate_sources": ["parent_local"],

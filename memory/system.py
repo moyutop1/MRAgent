@@ -52,7 +52,7 @@ class EpisodeEvent:
         self.text = text
         self.time = time
         self.true_time = true_time
-        self.tag_t = ""
+        self.tag_t = []
         self.origin = origin
         self.embedding = embedding
         self.conversation_time = conv_time

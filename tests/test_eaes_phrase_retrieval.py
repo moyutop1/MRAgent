@@ -155,6 +155,7 @@ class PhrasePlanTests(unittest.TestCase):
                 Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT):
             self.assertIn("short concrete noun phrase", prompt)
             self.assertIn("no more than three words", prompt)
+            self.assertIn("access wording", prompt)
 
     def test_breadth_and_detail_labels_are_normalized_for_routing_only(self):
         mixin = _TestEAES()
@@ -184,7 +185,7 @@ def _ranking(phrase_index):
             "memory_id": memory_id,
             "event_id": memory_id,
             "origin": memory_id,
-            "tag": memory_id,
+            "tag": [memory_id, f"alternate {memory_id}"],
             "rewrite_content": memory_id,
             "phrase_index": phrase_index,
             "phrase": f"phrase {phrase_index}",
@@ -237,14 +238,17 @@ class PhraseFusionTests(unittest.TestCase):
             [15, 24, 15, 24],
         )
 
-    def test_ranker_scores_each_phrase_against_stored_tags_independently(self):
+    def test_ranker_uses_each_childs_maximum_tag_similarity(self):
         store = MemorySystem()
-        for index, (tag, vector) in enumerate(
-                [("alpha", np.array([1.0, 0.0])), ("beta", np.array([0.0, 1.0]))],
+        for index, (tags, vector) in enumerate(
+                [
+                    (["unrelated", "alpha"], np.array([1.0, 0.0])),
+                    (["other topic", "beta"], np.array([0.0, 1.0])),
+                ],
                 start=1):
             event_id = f"D1:{index}-1"
             event = EpisodeEvent(event_id, f"memory {index}", f"D1:{index}", vector)
-            event.tag_t = tag
+            event.tag_t = tags
             store.episode_events[event_id] = event
             note = EAESMemoryNote(
                 memory_id=f"M_{index}",
@@ -260,7 +264,9 @@ class PhraseFusionTests(unittest.TestCase):
             store.add_eaes_memory_note(note)
 
         vectors = {
+            "unrelated": np.array([-1.0, 0.0]),
             "alpha": np.array([1.0, 0.0]),
+            "other topic": np.array([0.0, -1.0]),
             "beta": np.array([0.0, 1.0]),
             "alpha query": np.array([1.0, 0.0]),
             "beta query": np.array([0.0, 1.0]),
@@ -275,7 +281,11 @@ class PhraseFusionTests(unittest.TestCase):
             rankings = controller.rank_eaes_children_per_phrase(phrases, top_k=2)
 
         self.assertEqual(rankings[0][0]["memory_id"], "M_1")
+        self.assertEqual(rankings[0][0]["matched_tag"], "alpha")
+        self.assertEqual(rankings[0][0]["matched_tag_index"], 1)
+        self.assertEqual(rankings[0][0]["tag"], ["unrelated", "alpha"])
         self.assertEqual(rankings[1][0]["memory_id"], "M_2")
+        self.assertEqual(rankings[1][0]["matched_tag"], "beta")
         self.assertEqual(rankings[2][0]["memory_id"], "M_1")
         self.assertEqual(rankings[3][0]["memory_id"], "M_2")
 
@@ -288,7 +298,7 @@ class PhraseRerankerTests(unittest.TestCase):
             {
                 "memory_id": "M_1",
                 "origin": "D1:1",
-                "tag": "alpha",
+                "tag": ["alpha", "alpha topic"],
                 "rewrite_content": "Alpha memory",
                 "_rrf_score": 0.9,
                 "_rrf_rank": 1,
@@ -298,7 +308,7 @@ class PhraseRerankerTests(unittest.TestCase):
             {
                 "memory_id": "M_2",
                 "origin": "D1:2",
-                "tag": "beta",
+                "tag": ["beta", "beta topic"],
                 "rewrite_content": "Beta memory",
                 "_rrf_score": 0.4,
                 "_rrf_rank": 2,

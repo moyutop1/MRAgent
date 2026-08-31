@@ -18,7 +18,7 @@ def compact_eaes_retrieval(retrieval):
         "rewrite_content", "max_phrase_similarity", "rrf_score",
         "base_score", "parent_boost", "candidate_score",
         "candidate_sources", "prefilter_rank", "rerank_rank",
-        "rerank_source",
+        "rerank_source", "matched_tag", "phrase_matches",
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",

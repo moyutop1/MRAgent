@@ -23,7 +23,11 @@ TASK:
 - PREVIOUS_DIALOGUE_CONTEXT contains the tail of the preceding raw-dialogue window. Use it to resolve cross-window questions and answers, ellipsis, pronouns, entities, and qualifiers such as time and place.
 - Create a memory only when CURRENT_DIALOGUE_WINDOW adds answer-bearing information. Never create a memory supported only by PREVIOUS_DIALOGUE_CONTEXT.
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
-- Use a short concrete noun phrase for "tag", e.g. Movie Preference, Support Group, Travel Plan. No more than three words.
+- Output "tag" as an array of two to four short concrete noun phrases, each with no more than three words.
+- Before writing tags, internally identify every independent fact in the memory. The tags must collectively cover all independent facts rather than only the overall topic.
+- If the memory contains one independent fact, use two to four meaningfully different synonymous tags for that same fact. If it contains two to four independent facts, give every fact at least one tag and use any remaining slots for useful synonymous wording.
+- If more than four independent facts would be needed, split the content into additional sentence objects instead of omitting a fact or exceeding four tags.
+- Tags are retrieval summaries, not full sentences or questions. Preserve distinctive people, events, objects, relations, and applicable time/place/occasion qualifiers. Do not use generic labels such as Event, Fact, Question, or Conversation.
 - Classify every memory with one orthogonal "semantic_properties" array in the same rewrite call. Do not create a separate classification response.
   - Content properties (choose zero to three):
     - "event_action": a concrete action, event, plan, decision, or task outcome.
@@ -47,7 +51,7 @@ Schema:
     {
       "id":"D1:1-1", 
       "text":"sentence.", 
-      "tag":"short concrete tag",
+      "tag":["short concrete tag", "synonymous tag"],
       "origin":"D1:1",
       "topic": ["t1","t3"],
       "semantic_properties":["personal_profile","durable"]
@@ -100,7 +104,7 @@ Rules:
 - Return the complete plan for the entire session in one response.
 - Parent segments must cover every input turn exactly once, in dialogue order, with no gaps or core overlap.
 - Choose boundaries where a broad topic, event episode, or discourse unit is semantically closed.
-- Avoid cutting an unresolved question/answer pair, pronoun reference, temporal qualifier, or causal explanation when a legal alternative exists.
+- Never place a boundary between a direct question and its immediately following answer. Keep that complete pair in one child window and move the boundary instead. Also avoid cutting unresolved pronoun references, temporal qualifiers, or causal explanations.
 - Each turn has a one-based position. Segment length is end position minus start position plus one; count with these positions rather than estimating from the text.
 - Return at least minimum_segment_count segments. If total_turns exceeds maximum_turns, returning the whole session as one segment is invalid even when it is semantically coherent.
 - Never place more than 10 dialogue turns in one parent segment. The supplied maximum_turns may be lower but can never be higher than 10.
@@ -190,14 +194,17 @@ Rules:
 - CURRENT_WINDOW_TURNS is the only evidence section. Rewrite every turn and every piece of information in that section; nothing may be omitted, even greetings, questions, acknowledgements, generic advice, repeated confirmations, repeated facts, or image/caption information.
 - A single turn containing several independent pieces of information must produce several sentence objects. A window may therefore produce one or many sentence objects.
 - If adjacent current-window turns express the same fact or event, represent that information once and include every contributing current-window origin in dialogue order. Do not create multiple sentence objects that merely restate the same content.
-- REFERENCE_PREVIOUS_CHILD_REWRITES contains only the two most recently retained child rewrite texts. Use it to recognize repeated content and to resolve people, objects, topics, pronouns, and ellipsis in the current window. It is not evidence, must not independently produce a memory, and must never supply an origin. When a current turn repeats a referenced fact, express the current evidence at most once using only current-window origins; a downstream similarity check decides whether to fuse it with the previous child.
+- REFERENCE_PREVIOUS_CHILD_REWRITES contains only the two most recently retained child rewrite texts. Use it to recognize repeated content and to resolve people, objects, topics, pronouns, and ellipsis in the current window. It is not evidence, must not independently produce a memory, and must never supply an origin. When a current turn repeats a referenced fact, express the current evidence at most once using only current-window origins; an optional downstream duplicate check may fuse it with the previous child.
 - Every sentence must be self-contained. Resolve pronouns into concrete entities and preserve all source-supported people, relationships, time, place, state, causality, task outcomes, questions, responses, and image facts.
+- When a current-window turn directly answers the immediately preceding current-window question, inherit every applicable person, entity, relation, temporal constraint, location, occasion, comparison, and causal condition from that question into the answer memory. The memory must not remain an elliptical response. Include both the question and answer origins in that memory because both turns contribute to its meaning.
 - Every origin must come from CURRENT_WINDOW_TURNS, must list all current-window turns contributing to that memory in dialogue order, and must never cite a reference-only rewrite.
 - Across the complete sentence list, every turn in CURRENT_WINDOW_TURNS must appear in at least one origin.
 - The id may be any placeholder whose prefix matches the first origin; code assigns deterministic final IDs after generation.
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
-- Use a short concrete tag of at most three words and set topic to [].
+- Output tag as an array of two to four short concrete noun phrases of at most three words each and set topic to [].
+- Internally identify the independent facts in each sentence. Its tags must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful synonymous tags. For two to four facts, give every fact at least one tag. If a sentence would contain more than four independent facts, split it into additional sentence objects.
+- Preserve distinctive people, events, objects, relations, and applicable time/place/occasion qualifiers in the tags. Never use generic tags such as Event, Fact, Question, or Conversation.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
 - Do not output raw_text, raw_content, source_text, current_turns, dialogue text, or any other raw-text storage field.
 Schema:
@@ -207,7 +214,7 @@ Schema:
     {
       "id": "D1:5",
       "text": "One atomic self-contained memory.",
-      "tag": "short tag",
+      "tag": ["short tag", "synonymous tag"],
       "origin": "D1:5",
       "topic": [],
       "semantic_properties": ["event_action", "episodic"]
@@ -332,6 +339,8 @@ Rules:
 - Never output a sentence, question, clause, or question word as a retrieval phrase.
 - Valid phrase forms include "support group", "career interest", "pottery class", and "camping location"; do not copy an example unless the question supports it.
 - The four retrieval phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
+- Treat the phrases as four access wordings for the question, not as four required evidence categories. Collectively preserve the known person/entity, event/object, asked relation, and applicable time/place/occasion constraints from the question.
+- Prefer meaningfully different semantic wording over changes that only alter possessives, prepositions, or word order. Do not reduce all four phrases to the overall topic when the question asks for a specific relation such as timing, duration, frequency, origin, creator, reason, result, benefit, or meaning.
 - Do not force different evidence aspects, invent implicit subquestions, or add entities, facts, times, constraints, or answer values not present in the question.
 - Do not answer the question."""
 
@@ -341,6 +350,7 @@ The previous output had the wrong count or contained an invalid phrase.
 Every phrase must use exactly the same surface style as a memory tag: a short concrete noun phrase of no more than three words.
 Never output a sentence, question, clause, or question word as a retrieval phrase.
 The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
+Treat the phrases as alternative access wordings rather than required evidence categories. Preserve the question's known entity/event/object, asked relation, and explicit constraints, and avoid variants that only change possessives, prepositions, or word order.
 Do not force different evidence aspects. Do not invent entities, facts, times, constraints, implicit subquestions, or answer values. Do not answer the question.
 Schema:
 {

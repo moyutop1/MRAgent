@@ -147,14 +147,14 @@ class RewriteWindowContextTests(unittest.TestCase):
                         {
                             "id": "D1:4-1",
                             "text": "Context-only duplicate.",
-                            "tag": "Duplicate",
+                            "tag": ["Duplicate", "Repeated Detail"],
                             "origin": "D1:4",
                             "topic": ["t1"],
                         },
                         {
                             "id": "D1:4-2",
                             "text": "Morgan answered the boundary question.",
-                            "tag": "Boundary Answer",
+                            "tag": ["Boundary Answer", "Current Answer"],
                             "origin": "D1:4,D1:5",
                             "topic": ["t2"],
                         },
@@ -214,7 +214,7 @@ class RewriteWindowContextTests(unittest.TestCase):
                     "sentence": [{
                         "id": "D1:4-1",
                         "text": "Context-only duplicate.",
-                        "tag": "Duplicate",
+                        "tag": ["Duplicate", "Repeated Detail"],
                         "origin": "D1:4",
                         "topic": ["t1"],
                     }],
@@ -257,7 +257,7 @@ class RewriteWindowContextTests(unittest.TestCase):
                         "sentence": [{
                             "id": "D1:1-1",
                             "text": "Morgan ate breakfast with the family.",
-                            "tag": "Family Breakfast",
+                            "tag": ["Family Breakfast", "Breakfast Meal"],
                             "origin": "D1:1",
                             "topic": [],
                         }],
@@ -311,7 +311,7 @@ class RewriteWindowContextTests(unittest.TestCase):
                     "sentence": [{
                         "id": "D1:4-1",
                         "text": "Morgan went to the national park with Morgan's kids.",
-                        "tag": "Park Visit",
+                        "tag": ["Park Visit", "National Park"],
                         "origin": "D1:4,D1:5",
                         "topic": [],
                     }],

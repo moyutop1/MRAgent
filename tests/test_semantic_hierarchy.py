@@ -85,7 +85,7 @@ def _sentence(origin, text, sentence_id=None, **extra):
     item = {
         "id": sentence_id or origin.split(",", 1)[0],
         "text": text,
-        "tag": "Turn Memory",
+        "tag": ["Turn Memory", "Dialogue Detail"],
         "origin": origin,
         "topic": [],
         "semantic_properties": ["event_action", "episodic"],
@@ -206,6 +206,30 @@ class SemanticHierarchyTests(unittest.TestCase):
             "contiguous ordered coverage",
             llm.calls[1][0]["content"],
         )
+
+    def test_child_window_plan_rejects_boundary_between_question_and_answer(self):
+        turns = parse_session_turns("\n".join([
+            "time:2023-05-08",
+            "dia_id:D1:1 Alex: I have an update.",
+            "dia_id:D1:2 Alex: What are your summer plans?",
+            "dia_id:D1:3 Morgan: I am researching adoption agencies.",
+            "dia_id:D1:4 Alex: That sounds promising.",
+        ]))
+        llm = SequenceLLM([
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:2"},
+                {"start_origin": "D1:3", "end_origin": "D1:4"},
+            ]},
+            {"child_segments": [
+                {"start_origin": "D1:1", "end_origin": "D1:3"},
+                {"start_origin": "D1:4", "end_origin": "D1:4"},
+            ]},
+        ])
+
+        windows = plan_child_windows(llm, turns, "2023-05-08")
+
+        self.assertEqual(windows[0], ChildWindow("D1:1", "D1:3"))
+        self.assertIn("question/answer pair", llm.calls[1][0]["content"])
 
     def test_child_window_plan_allows_one_turn_and_enforces_maximum(self):
         single_turns = parse_session_turns(_dialogue(1))
@@ -368,6 +392,24 @@ class SemanticHierarchyTests(unittest.TestCase):
             "Do not create multiple sentence objects that merely restate",
             prompt,
         )
+        self.assertIn("directly answers the immediately preceding", prompt)
+        self.assertIn("Include both the question and answer origins", prompt)
+
+    def test_threshold_one_bypasses_child_similarity_embeddings(self):
+        retained = [_sentence("D1:1", "previous", "D1:1-1")]
+        current = _sentence("D1:2", "current", "D1:2-1")
+
+        with patch(
+                "agent.rewrite_memory._embed_child_memory_texts",
+                side_effect=AssertionError("embedding must not be called"),
+        ):
+            kept, last_embedding = _fuse_adjacent_duplicate_child_memories(
+                SequenceLLM([]), retained, [current], threshold=1.0
+            )
+
+        self.assertEqual(kept, [current])
+        self.assertEqual(retained[-1], current)
+        self.assertIsNone(last_embedding)
 
     def test_child_window_rewrite_rejects_raw_storage_fields(self):
         turns = parse_session_turns(_dialogue(1))
@@ -397,7 +439,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             _sentence(
                 "D1:5",
                 "repeated information",
-                tag="Different Tag",
+                tag=["Different Tag", "Alternate Detail"],
                 semantic_properties=["state_opinion", "transient"],
             ),
         )
@@ -454,7 +496,7 @@ class SemanticHierarchyTests(unittest.TestCase):
         fused = output["sentence"][-1]
         self.assertEqual(fused["text"], "The repeated information was stated once.")
         self.assertEqual(fused["origin"], "D1:4,D1:5")
-        self.assertEqual(fused["tag"], "Turn Memory")
+        self.assertEqual(fused["tag"], ["Turn Memory", "Dialogue Detail"])
         self.assertEqual(
             fused["semantic_properties"], ["event_action", "episodic"]
         )

@@ -25,7 +25,14 @@ SCHEMA = {
             "minLength": 1
           },
           "tag": {
-            "type": "string",
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "uniqueItems": True,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "origin": {
             "type": "string",
@@ -133,6 +140,24 @@ def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
     sid = s.get("id", "")
     origin = s.get("origin", "")
     semantic_properties = s.get("semantic_properties")
+    tags = s.get("tag")
+
+    normalized_tags = []
+    for tag_index, tag in enumerate(tags):
+      clean_tag = re.sub(r"\s+", " ", tag).strip()
+      if not clean_tag:
+        return False, f"sentence[{i}].tag[{tag_index}] must be non-empty"
+      if len(clean_tag.split()) > 3:
+        return False, (
+          f"sentence[{i}].tag[{tag_index}] must contain no more than "
+          f"three words: {tag!r}"
+        )
+      normalized_tags.append(clean_tag.casefold())
+    if len(normalized_tags) != len(set(normalized_tags)):
+      return False, (
+        f"sentence[{i}].tag values must be unique after whitespace and "
+        "case normalization"
+      )
 
     # The semantic field combines two independent axes: up to three content
     # properties plus exactly one persistence property. Schema validation above

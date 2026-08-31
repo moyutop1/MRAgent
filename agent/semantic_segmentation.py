@@ -95,6 +95,11 @@ def _turn_payload(turns: Sequence[TurnRecord]):
     ]
 
 
+def _turn_contains_question(turn: TurnRecord) -> bool:
+    """Conservative structural guard for direct adjacent Q/A pairs."""
+    return "?" in str(getattr(turn, "line", "") or "")
+
+
 def _validate_parent_plan(output, turns: Sequence[TurnRecord]):
     if not isinstance(output, dict):
         return False, "parent plan must be a JSON object", None
@@ -246,6 +251,13 @@ def _validate_child_window_plan(output, turns: Sequence[TurnRecord]):
                 f"through {end_origin}. Its inclusive length is {length} turns, "
                 f"which exceeds the hard maximum of {config.CHILD_MAX_TURNS}; "
                 f"split this range into at least {required_parts} contiguous windows"
+            ), None
+        if end < len(turns) - 1 and _turn_contains_question(turns[end]):
+            return False, (
+                f"child window {number} ends at question turn {end_origin}; "
+                f"a boundary before its immediately following answer "
+                f"{turns[end + 1].origin} is invalid. Keep the adjacent "
+                "question/answer pair in one child window and move the boundary"
             ), None
         windows.append(ChildWindow(
             start_origin=start_origin,

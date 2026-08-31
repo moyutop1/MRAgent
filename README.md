@@ -12,7 +12,7 @@ The pipeline has two phases:
 
 **Phase 1 — Build memory** (once per conversation sample):
 
-- **rewrite** — compress dialogue into self-contained memories: resolve pronouns, render relative times at their source granularity, store normalized `YYYY-MM-DD` start dates for indexing, attach topic tags, and extract topics and person-level facts.
+- **rewrite** — compress dialogue into self-contained memories: resolve pronouns and adjacent-question constraints, render relative times at their source granularity, attach 2–4 short fact-covering tags to every child, and extract topics and person-level facts.
 - **extract_keyword** — extract memory-side hints used only to build the EAES entity/attribute index.
 - **store** — build child EAES notes and, with semantic hierarchy enabled, their parent memories.
 
@@ -155,12 +155,12 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--rewrite_window_size` | Current raw turns per rewrite window, excluding overlap context | `40` |
 | `--rewrite_overlap_size` | Tail turns from the preceding window supplied as raw context | `2` |
 | `--rewrite_previous_limit` | Previous compressed memories supplied for deduplication | `3` |
-| `--child_duplicate_similarity_threshold` | fuse adjacent semantic-hierarchy children when cosine similarity is strictly above this value | `0.55` |
+| `--child_duplicate_similarity_threshold` | fuse adjacent semantic-hierarchy children when cosine similarity is strictly above this value; `1` bypasses similarity embeddings and fusion | `0.55` |
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
 | `--eaes_phrase_count` | retrieval phrases generated for each question (fixed policy) | `4` |
-| `--eaes_phrase_initial_top_k` | tag-similarity candidates independently retrieved per phrase | `15` |
+| `--eaes_phrase_initial_top_k` | tag-similarity candidates inspected independently per phrase before dynamic TopK selection | `30` |
 | `--eaes_phrase_protected_top_k` | original similarity-ranked candidates protected per phrase | `5` |
 | `--eaes_phrase_final_top_k` | candidates retained per phrase after RRF selection | `10` |
 | `--eaes_phrase_rrf_k` | RRF denominator constant | `10` |
@@ -257,5 +257,5 @@ normalized gold evidence do not enter this metric.
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
-- Normal EAES child retrieval generates four tag-style short concrete noun phrases of at most three words, retrieves tag-similarity Top15 independently, protects each phrase's original Top5, uses RRF (`k=10`) to retain Top10 per phrase, deduplicates the at-most-40 union, and applies a query-only reranker to keep Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
+- Every child stores 2–4 short fact-covering tags. Normal EAES child retrieval generates four tag-style short concrete noun phrases of at most three words and scores each child against a phrase by the maximum similarity across all of that child's tags. Each phrase dynamically keeps Top15–25 from an inspected Top30, RRF (`k=10`) operates once per child per phrase, the hierarchical union is capped at 60, and a query-only reranker keeps Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
 - With semantic hierarchy enabled, retrieval-only normally reports `Hit@19` for 15 ranked children plus 4 independently ranked parents. It also reports child `Hit@15`, parent `Hit@4`, and fused-prefilter `Hit@40` separately.

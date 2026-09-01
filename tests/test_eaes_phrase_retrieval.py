@@ -65,39 +65,67 @@ class _QueuedLLM:
 class PhrasePlanTests(unittest.TestCase):
     def test_normalizer_requires_four_but_does_not_deduplicate(self):
         self.assertIsNone(
-            EAESMixin._normalize_eaes_retrieval_phrases(["a", "b", "c"])
+            EAESMixin._normalize_eaes_retrieval_phrases([
+                "Caroline activity.a", "Caroline activity.b",
+                "Caroline activity.c",
+            ])
         )
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases(
-                ["a", "b", None, "d"]
+                [
+                    "Caroline activity.a", "Caroline activity.b",
+                    None, "Caroline activity.d",
+                ]
             )
         )
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases(
-                ["one", "two", "three", "four word phrase invalid"]
+                [
+                    "Caroline activity.one", "Caroline activity.two",
+                    "Caroline activity.three",
+                    "Caroline activity.four word phrase invalid",
+                ]
             )
+        )
+        self.assertIsNone(
+            EAESMixin._normalize_eaes_retrieval_phrases([
+                "support group", "Caroline topic.unknown head",
+                "Caroline activity.valid", "Caroline activity.valid two",
+            ])
         )
         self.assertEqual(
             EAESMixin._normalize_eaes_retrieval_phrases(
                 [
-                    "support group", "support group", "career interest",
-                    "pottery class", "ignored phrase",
+                    "Caroline relationship.support group",
+                    "Caroline relationship.support group",
+                    "Caroline profile.career interest",
+                    "Caroline activity.pottery class",
+                    "Caroline activity.ignored phrase",
                 ]
             ),
-            ["support group", "support group", "career interest", "pottery class"],
+            [
+                "Caroline relationship.support group",
+                "Caroline relationship.support group",
+                "Caroline profile.career interest",
+                "Caroline activity.pottery class",
+            ],
         )
 
     def test_parse_repairs_wrong_count_or_overlong_phrase_once(self):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([
             _query_output([
-                "support group", "career interest", "pottery class",
-                "four word phrase invalid",
+                "Caroline relationship.support group",
+                "Caroline profile.career interest",
+                "Caroline activity.pottery class",
+                "Caroline activity.four word phrase invalid",
             ]),
             {
                 "retrieval_phrases": [
-                    "support group", "career interest",
-                    "pottery class", "camping location",
+                    "Caroline relationship.support group",
+                    "Caroline profile.career interest",
+                    "Caroline activity.pottery class",
+                    "Caroline activity.camping location",
                 ]
             },
         ])
@@ -107,8 +135,10 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertEqual(
             plan["retrieval_phrases"],
             [
-                "support group", "career interest",
-                "pottery class", "camping location",
+                "Caroline relationship.support group",
+                "Caroline profile.career interest",
+                "Caroline activity.pottery class",
+                "Caroline activity.camping location",
             ],
         )
         self.assertEqual(plan["retrieval_phrase_source"], "regenerated")
@@ -125,15 +155,32 @@ class PhrasePlanTests(unittest.TestCase):
         plan = mixin.parse_eaes_query(question)
 
         self.assertEqual(
-            plan["retrieval_phrases"], ["event Caroline attend"] * 4
+            plan["retrieval_phrases"],
+            ["Caroline activity.event attend"] * 4,
         )
         self.assertEqual(plan["retrieval_phrase_source"], "question_fallback")
         self.assertEqual(len(mixin.llm.inputs), 2)
 
+    def test_question_fallback_keeps_entity_head_and_detail(self):
+        self.assertEqual(
+            EAESMixin._eaes_question_phrase_fallback(
+                "How long ago was Caroline's 18th birthday?"
+            ),
+            "Caroline activity.ago 18th birthday",
+        )
+        self.assertEqual(
+            EAESMixin._eaes_question_phrase_fallback(
+                "What pet does Caroline own?"
+            ),
+            "Caroline possession.pet own",
+        )
+
     def test_deprecated_temporal_fields_are_never_kept_in_query_plan(self):
         output = _query_output([
-            "support group", "career interest",
-            "pottery class", "camping location",
+            "Caroline relationship.support group",
+            "Caroline profile.career interest",
+            "Caroline activity.pottery class",
+            "Caroline activity.camping location",
         ])
         output.update({
             "temporal_intent": "historical_event",
@@ -149,19 +196,22 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertNotIn("required_lifecycle", plan)
         self.assertNotIn("no_time_limit", plan)
 
-    def test_query_prompts_require_tag_style_three_word_noun_phrases(self):
+    def test_query_prompts_require_composite_tag_style_phrases(self):
         for prompt in (
                 Prompts.EAES_QUERY_SYSTEM_PROMPT,
                 Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT):
             self.assertIn("short concrete noun phrase", prompt)
-            self.assertIn("no more than three words", prompt)
+            self.assertIn("prefix.facet", prompt)
+            self.assertIn("no more than three whitespace-separated words", prompt)
             self.assertIn("access wording", prompt)
 
     def test_breadth_and_detail_labels_are_normalized_for_routing_only(self):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([_query_output([
-            "support group", "career interest",
-            "pottery class", "camping location",
+            "Caroline relationship.support group",
+            "Caroline profile.career interest",
+            "Caroline activity.pottery class",
+            "Caroline activity.camping location",
         ])])
 
         plan = mixin.parse_eaes_query("What events did Caroline join?")
@@ -242,8 +292,14 @@ class PhraseFusionTests(unittest.TestCase):
         store = MemorySystem()
         for index, (tags, vector) in enumerate(
                 [
-                    (["unrelated", "alpha"], np.array([1.0, 0.0])),
-                    (["other topic", "beta"], np.array([0.0, 1.0])),
+                    ([
+                        "Caroline profile.unrelated",
+                        "Caroline profile.alpha",
+                    ], np.array([1.0, 0.0])),
+                    ([
+                        "Caroline activity.other topic",
+                        "Caroline activity.beta",
+                    ], np.array([0.0, 1.0])),
                 ],
                 start=1):
             event_id = f"D1:{index}-1"
@@ -264,28 +320,39 @@ class PhraseFusionTests(unittest.TestCase):
             store.add_eaes_memory_note(note)
 
         vectors = {
-            "unrelated": np.array([-1.0, 0.0]),
-            "alpha": np.array([1.0, 0.0]),
-            "other topic": np.array([0.0, -1.0]),
-            "beta": np.array([0.0, 1.0]),
-            "alpha query": np.array([1.0, 0.0]),
-            "beta query": np.array([0.0, 1.0]),
+            "Caroline profile.unrelated": np.array([-1.0, 0.0]),
+            "Caroline profile.alpha": np.array([1.0, 0.0]),
+            "Caroline activity.other topic": np.array([0.0, -1.0]),
+            "Caroline activity.beta": np.array([0.0, 1.0]),
+            "Caroline profile.alpha query": np.array([1.0, 0.0]),
+            "Caroline activity.beta query": np.array([0.0, 1.0]),
         }
 
         def fake_embedding(texts):
             return np.vstack([vectors[text] for text in texts])
 
         controller = MemoryController(store)
-        phrases = ["alpha query", "beta query", "alpha query", "beta query"]
+        phrases = [
+            "Caroline profile.alpha query",
+            "Caroline activity.beta query",
+            "Caroline profile.alpha query",
+            "Caroline activity.beta query",
+        ]
         with patch("memory.controller.get_embedding", side_effect=fake_embedding):
             rankings = controller.rank_eaes_children_per_phrase(phrases, top_k=2)
 
         self.assertEqual(rankings[0][0]["memory_id"], "M_1")
-        self.assertEqual(rankings[0][0]["matched_tag"], "alpha")
+        self.assertEqual(
+            rankings[0][0]["matched_tag"], "Caroline profile.alpha"
+        )
         self.assertEqual(rankings[0][0]["matched_tag_index"], 1)
-        self.assertEqual(rankings[0][0]["tag"], ["unrelated", "alpha"])
+        self.assertEqual(rankings[0][0]["tag"], [
+            "Caroline profile.unrelated", "Caroline profile.alpha",
+        ])
         self.assertEqual(rankings[1][0]["memory_id"], "M_2")
-        self.assertEqual(rankings[1][0]["matched_tag"], "beta")
+        self.assertEqual(
+            rankings[1][0]["matched_tag"], "Caroline activity.beta"
+        )
         self.assertEqual(rankings[2][0]["memory_id"], "M_1")
         self.assertEqual(rankings[3][0]["memory_id"], "M_2")
 
@@ -298,7 +365,9 @@ class PhraseRerankerTests(unittest.TestCase):
             {
                 "memory_id": "M_1",
                 "origin": "D1:1",
-                "tag": ["alpha", "alpha topic"],
+                "tag": [
+                    "Person profile.alpha", "Person profile.alpha topic",
+                ],
                 "rewrite_content": "Alpha memory",
                 "_rrf_score": 0.9,
                 "_rrf_rank": 1,
@@ -308,7 +377,9 @@ class PhraseRerankerTests(unittest.TestCase):
             {
                 "memory_id": "M_2",
                 "origin": "D1:2",
-                "tag": ["beta", "beta topic"],
+                "tag": [
+                    "Person profile.beta", "Person profile.beta topic",
+                ],
                 "rewrite_content": "Beta memory",
                 "_rrf_score": 0.4,
                 "_rrf_rank": 2,

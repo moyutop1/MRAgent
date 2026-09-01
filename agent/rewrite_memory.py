@@ -75,7 +75,7 @@ def normalize_sentence_ids(rewrite_out):
 
 
 def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
-    """Preserve overlong tag terms by folding the suffix into one compound."""
+    """Fold only an overlong tag/facet suffix into one compound token."""
     if not isinstance(rewrite_out, dict) or max_words < 1:
         return 0
     sentences = rewrite_out.get("sentence")
@@ -94,13 +94,24 @@ def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
             if not isinstance(tag, str):
                 normalized_tags.append(tag)
                 continue
-            words = re.sub(r"\s+", " ", tag).strip().split(" ")
+            clean_tag = re.sub(r"\s+", " ", tag).strip()
+            prefix = None
+            phrase = clean_tag
+            if clean_tag.count(".") == 1:
+                raw_prefix, raw_facet = clean_tag.split(".", 1)
+                prefix = re.sub(r"\s+", " ", raw_prefix).strip()
+                phrase = re.sub(r"\s+", " ", raw_facet).strip()
+            words = phrase.split(" ")
             if len(words) > max_words:
                 words = words[:max_words - 1] + [
                     "-".join(words[max_words - 1:])
                 ]
                 changed += 1
-            normalized_tags.append(" ".join(words))
+            normalized_phrase = " ".join(words)
+            normalized_tags.append(
+                f"{prefix}.{normalized_phrase}"
+                if prefix is not None else normalized_phrase
+            )
         sentence["tag"] = normalized_tags
     return changed
 
@@ -562,6 +573,58 @@ def _rewrite_parent_segment(llm, parent, logger=None):
     )
 
 
+def _extract_session_tag_prefix_pool(llm, parents, logger=None):
+    """Induce one fixed topic-prefix pool from all rewritten Parents."""
+    payload = [
+        {
+            "parent_id": parent.parent_id,
+            "rewrite_content": parent.rewrite_content,
+        }
+        for parent in parents
+    ]
+    user_prompt = Prompts.extract_tag_prefix_pool_prompt(
+        json.dumps(payload, ensure_ascii=False)
+    )
+    last_error = ""
+    for attempt in range(4):
+        system_prompt = Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT
+        if attempt:
+            system_prompt += (
+                "\nThe previous prefix pool was invalid. Return the complete "
+                "JSON object again. "
+                f"Validation error: {last_error}"
+            )
+        output = llm.chat_text(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0 if attempt == 0 else 0.7,
+        )
+        if not isinstance(output, dict):
+            last_error = "tag prefix pool must be a JSON object"
+            continue
+        raw_pool = output.get("tag_prefix_pool")
+        if not isinstance(raw_pool, list):
+            last_error = "tag_prefix_pool must be an array"
+            continue
+        pool = [
+            re.sub(r"\s+", " ", value).strip()
+            if isinstance(value, str) else value
+            for value in raw_pool
+        ]
+        valid, last_error = json_scheme.check_tag_prefix_pool(pool)
+        if valid:
+            return pool
+    if logger:
+        logger.error(
+            "session tag prefix pool failed after retries: %s", last_error
+        )
+    raise ValueError(
+        f"session tag prefix pool failed after retries: {last_error}"
+    )
+
+
 def _child_window_source_text(window, turns, conversation_time):
     dialogue = "\n".join(
         turn.line for turn in child_window_turns(window, turns)
@@ -749,6 +812,7 @@ def _rewrite_child_window(
         turns,
         conversation_time,
         previous_rewrites=None,
+        tag_prefix_pool=None,
         logger=None,
 ):
     current_turns = child_window_turns(window, turns)
@@ -760,6 +824,7 @@ def _rewrite_child_window(
             "current_window_turns": [turn.line for turn in current_turns],
         }, ensure_ascii=False),
         json.dumps(previous_rewrites or [], ensure_ascii=False),
+        json.dumps(tag_prefix_pool or [], ensure_ascii=False),
     )
     source_text = _child_window_source_text(
         window, turns, conversation_time
@@ -791,7 +856,11 @@ def _rewrite_child_window(
                 window.end_origin,
             )
         valid, last_error = json_scheme.check_child_window_rewrite_json(
-            output, window, list(turns), source_text
+            output,
+            window,
+            list(turns),
+            source_text,
+            tag_prefix_pool=tag_prefix_pool or [],
         )
         if valid:
             output["conversation_time"] = conversation_time or output.get(
@@ -817,10 +886,19 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
     if not turns:
         empty = _empty_rewrite(conversation_time)
         empty["parent_nodes"] = []
+        empty["tag_prefix_pool"] = []
         return empty
 
     parents = plan_parent_segments(llm, turns, conversation_time)
     child_windows = plan_child_windows(llm, turns, conversation_time)
+
+    rewritten_parents = [
+        _rewrite_parent_segment(llm, parent, logger=logger)
+        for parent in parents
+    ]
+    tag_prefix_pool = _extract_session_tag_prefix_pool(
+        llm, rewritten_parents, logger=logger
+    )
 
     window_outputs = []
     generated_memories = []
@@ -835,6 +913,7 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             turns,
             conversation_time,
             previous_rewrites=previous_rewrites,
+            tag_prefix_pool=tag_prefix_pool,
             logger=logger,
         )
         kept_sentences, last_child_embedding = (
@@ -849,17 +928,14 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         output["sentence"] = kept_sentences
         window_outputs.append(output)
 
-    parents = attach_child_memory_ids_to_parents(
-        parents, generated_memories
+    rewritten_parents = attach_child_memory_ids_to_parents(
+        rewritten_parents, generated_memories
     )
 
     parent_outputs = []
-    for parent in parents:
+    for parent in rewritten_parents:
         if not parent.child_ids:
             continue
-        parent = _rewrite_parent_segment(
-            llm, parent, logger=logger
-        )
         parent_outputs.append({
             "parent_id": parent.parent_id,
             "rewrite_content": parent.rewrite_content,
@@ -868,6 +944,7 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
 
     merged = _empty_rewrite(conversation_time)
     merged["parent_nodes"] = parent_outputs
+    merged["tag_prefix_pool"] = tag_prefix_pool
     personal_counter = 1
     for output in window_outputs:
         for sentence in output.get("sentence") or []:

@@ -38,6 +38,7 @@ sys.modules.setdefault("jsonschema", jsonschema_module)
 
 from agent.rewrite_memory import (
     _child_window_source_text,
+    _extract_session_tag_prefix_pool,
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
@@ -86,7 +87,10 @@ def _sentence(origin, text, sentence_id=None, **extra):
     item = {
         "id": sentence_id or origin.split(",", 1)[0],
         "text": text,
-        "tag": ["Turn Memory", "Dialogue Detail"],
+        "tag": [
+            "Speaker activity.turn memory",
+            "Speaker activity.dialogue detail",
+        ],
         "origin": origin,
         "topic": [],
         "semantic_properties": ["event_action", "episodic"],
@@ -333,7 +337,10 @@ class SemanticHierarchyTests(unittest.TestCase):
         llm = SequenceLLM([_rewrite_output(_sentence(
             "D1:1",
             "The family admired a lake sunrise last year.",
-            tag=["lake sunrise", "lake sunrise last year"],
+            tag=[
+                "Speaker activity.lake sunrise",
+                "Speaker activity.lake sunrise last year",
+            ],
         ))])
 
         output = _rewrite_child_window(
@@ -342,19 +349,75 @@ class SemanticHierarchyTests(unittest.TestCase):
 
         self.assertEqual(
             output["sentence"][0]["tag"],
-            ["lake sunrise", "lake sunrise last-year"],
+            [
+                "Speaker activity.lake sunrise",
+                "Speaker activity.lake sunrise last-year",
+            ],
         )
         self.assertEqual(len(llm.calls), 1)
 
     def test_tag_length_normalizer_leaves_non_string_for_validation(self):
         output = _rewrite_output(_sentence(
-            "D1:1", "memory", tag=["valid tag", 123]
+            "D1:1", "memory", tag=["Speaker activity.valid tag", 123]
         ))
 
         changed = normalize_rewrite_tag_lengths(output)
 
         self.assertEqual(changed, 0)
-        self.assertEqual(output["sentence"][0]["tag"], ["valid tag", 123])
+        self.assertEqual(
+            output["sentence"][0]["tag"],
+            ["Speaker activity.valid tag", 123],
+        )
+
+    def test_prefix_pool_retries_generic_prefix_and_reads_all_parents(self):
+        parents = [
+            types.SimpleNamespace(
+                parent_id="1-1", rewrite_content="Caroline shared her journey."
+            ),
+            types.SimpleNamespace(
+                parent_id="1-2", rewrite_content="Caroline joined mentoring."
+            ),
+        ]
+        llm = SequenceLLM([
+            {"tag_prefix_pool": ["Caroline activity"]},
+            {"tag_prefix_pool": ["Caroline advocacy activity"]},
+        ])
+
+        pool = _extract_session_tag_prefix_pool(llm, parents)
+
+        self.assertEqual(pool, ["Caroline advocacy activity"])
+        self.assertIn("must contain a person", llm.calls[1][0]["content"])
+        payload = llm.calls[0][1]["content"]
+        self.assertIn("Caroline shared her journey.", payload)
+        self.assertIn("Caroline joined mentoring.", payload)
+
+    def test_child_tags_use_exact_pool_prefix_or_two_word_fallback(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        llm = SequenceLLM([_rewrite_output(_sentence(
+            "D1:1",
+            "Caroline delivered a school speech.",
+            tag=[
+                "Caroline advocacy activity.school speech",
+                "Caroline advocacy activity.journey sharing",
+            ],
+        ))])
+
+        output = _rewrite_child_window(
+            llm,
+            window,
+            turns,
+            "2023-05-08",
+            tag_prefix_pool=["Caroline advocacy activity"],
+        )
+
+        self.assertEqual(
+            output["sentence"][0]["tag"][0],
+            "Caroline advocacy activity.school speech",
+        )
+        self.assertIn(
+            '"Caroline advocacy activity"', llm.calls[0][1]["content"]
+        )
 
     def test_duplicate_model_outputs_are_fused_after_window_validation(self):
         turns = parse_session_turns(_dialogue(1))
@@ -469,7 +532,10 @@ class SemanticHierarchyTests(unittest.TestCase):
             _sentence(
                 "D1:5",
                 "repeated information",
-                tag=["Different Tag", "Alternate Detail"],
+                tag=[
+                    "Speaker activity.different tag",
+                    "Speaker activity.alternate detail",
+                ],
                 semantic_properties=["state_opinion", "transient"],
             ),
         )
@@ -481,14 +547,15 @@ class SemanticHierarchyTests(unittest.TestCase):
                 {"start_origin": "D1:1", "end_origin": "D1:3"},
                 {"start_origin": "D1:4", "end_origin": "D1:5"},
             ]},
+            {
+                "parent_id": "1-1",
+                "rewrite_content": "A coarse parent memory.",
+            },
+            {"tag_prefix_pool": ["Speaker conversation activity"]},
             first_window,
             second_window,
             {
                 "rewrite_content": "The repeated information was stated once."
-            },
-            {
-                "parent_id": "1-1",
-                "rewrite_content": "A coarse parent memory.",
             },
         ])
 
@@ -520,32 +587,40 @@ class SemanticHierarchyTests(unittest.TestCase):
             "rewrite_content": "A coarse parent memory.",
             "child_ids": expected_ids,
         }])
+        self.assertEqual(
+            output["tag_prefix_pool"], ["Speaker conversation activity"]
+        )
         self.assertTrue(all(
             item["parent_id"] == "1-1" for item in output["sentence"]
         ))
         fused = output["sentence"][-1]
         self.assertEqual(fused["text"], "The repeated information was stated once.")
         self.assertEqual(fused["origin"], "D1:4,D1:5")
-        self.assertEqual(fused["tag"], ["Turn Memory", "Dialogue Detail"])
+        self.assertEqual(fused["tag"], [
+            "Speaker activity.turn memory",
+            "Speaker activity.dialogue detail",
+        ])
         self.assertEqual(
             fused["semantic_properties"], ["event_action", "episodic"]
         )
-        self.assertEqual(len(llm.calls), 6)
-        second_prompt = llm.calls[3][1]["content"]
+        self.assertEqual(len(llm.calls), 7)
+        parent_rewrite_call = llm.calls[2]
+        self.assertIn("PERSON PROFILE MEMORY", parent_rewrite_call[0]["content"])
+        prefix_pool_call = llm.calls[3]
+        self.assertIn("topic-prefix pool", prefix_pool_call[0]["content"])
+        second_prompt = llm.calls[5][1]["content"]
         reference_section = second_prompt.split("CURRENT_CHILD_WINDOW:", 1)[0]
         self.assertIn("second fact in turn two", reference_section)
         self.assertIn("third turn", reference_section)
         self.assertNotIn("first fact in turn two", reference_section)
         self.assertNotIn(
-            "every repeated occurrence", llm.calls[3][0]["content"]
+            "every repeated occurrence", llm.calls[5][0]["content"]
         )
-        fusion_call = llm.calls[4]
+        fusion_call = llm.calls[6]
         self.assertIn(
             "highly similar adjacent child memories",
             fusion_call[0]["content"],
         )
-        parent_rewrite_call = llm.calls[5]
-        self.assertIn("PERSON PROFILE MEMORY", parent_rewrite_call[0]["content"])
 
     def test_memory_ids_attach_to_parent_by_first_origin(self):
         turns = parse_session_turns(_dialogue(6))

@@ -101,8 +101,10 @@ class _AblationAgent(EAESMixin):
             "query_attributes": ["profile.pet: pet owned by Caroline"],
             "keywords": ["dog"],
             "retrieval_phrases": [
-                "Caroline pet", "pet ownership",
-                "Caroline animal", "Caroline companion",
+                "Caroline possession.pet ownership",
+                "Caroline possession.owned animal",
+                "Caroline profile.animal companion",
+                "Caroline possession.dog ownership",
             ],
             "breadth_value": 0.5,
             "detail_value": 0.5,
@@ -242,8 +244,10 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         self.assertEqual(
             agent.memory_controller.child_retrieval_phrases[0],
             [
-                "Caroline pet", "pet ownership",
-                "Caroline animal", "Caroline companion",
+                "Caroline possession.pet ownership",
+                "Caroline possession.owned animal",
+                "Caroline profile.animal companion",
+                "Caroline possession.dog ownership",
             ],
         )
         self.assertNotIn("keywords", agent.selector_query_plans[0])

@@ -11,6 +11,7 @@ from common import config
 from llm.controller import LLM
 from llm.embeddings import get_embedding
 from memory.system import MemorySystem
+from prompts.schema import check_composite_tag
 import logging
 logger = logging.getLogger(__name__)
 
@@ -124,9 +125,11 @@ class MemoryController:
         clean_tags = []
         for tag in tags:
             clean_tag = re.sub(r"\s+", " ", str(tag or "")).strip()
-            if not clean_tag or len(clean_tag.split()) > 3:
+            valid, error = check_composite_tag(clean_tag)
+            if not valid:
                 raise ValueError(
-                    f"EAES child {note.event_id} has an invalid tag: {tag!r}"
+                    f"EAES child {note.event_id} has an invalid tag "
+                    f"{tag!r}: {error}"
                 )
             clean_tags.append(clean_tag)
         if len({tag.casefold() for tag in clean_tags}) != len(clean_tags):

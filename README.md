@@ -12,7 +12,7 @@ The pipeline has two phases:
 
 **Phase 1 — Build memory** (once per conversation sample):
 
-- **rewrite** — compress dialogue into self-contained memories: resolve pronouns and adjacent-question constraints, render relative times at their source granularity, attach 2–4 short fact-covering tags to every child, and extract topics and person-level facts.
+- **rewrite** — compress dialogue into self-contained memories: resolve pronouns and adjacent-question constraints, render relative times at their source granularity, rewrite every Parent before its Children, induce a session-level pool of up to 10 topic prefixes, and attach 2–4 fact-covering `prefix.facet` tags to every child.
 - **extract_keyword** — extract memory-side hints used only to build the EAES entity/attribute index.
 - **store** — build child EAES notes and, with semantic hierarchy enabled, their parent memories.
 
@@ -257,5 +257,6 @@ normalized gold evidence do not enter this metric.
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
-- Every child stores 2–4 short fact-covering tags. Normal EAES child retrieval generates four tag-style short concrete noun phrases of at most three words and scores each child against a phrase by the maximum similarity across all of that child's tags. Each phrase dynamically keeps Top15–25 from an inspected Top30, RRF (`k=10`) operates once per child per phrase, the hierarchical union is capped at 60, and a query-only reranker keeps Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
+- With semantic hierarchy enabled, each rewrite-session JSON object stores a topic-specific `tag_prefix_pool` induced from all rewritten Parents (up to 10 entries, each ending in `activity`, `plan`, `profile`, `possession`, or `relationship`). Every child stores 2–4 complete `prefix.facet` tags. A child copies the best matching topic prefix exactly; only when none fits may it use a local two-word `Person + head` fallback, which is not added to the pool.
+- Normal EAES child retrieval generates four matching `prefix.facet` phrases and embeds each complete phrase/tag string. Its phrase-to-child score is the maximum similarity across all complete tags belonging to that child; prefix and facet are not embedded or fused separately. Each phrase dynamically keeps Top15–25 from an inspected Top30, RRF (`k=10`) operates once per child per phrase, the hierarchical union is capped at 60, and a query-only reranker keeps Top15. The reranker does not receive phrases, coverage, similarity, or RRF scores.
 - With semantic hierarchy enabled, retrieval-only normally reports `Hit@19` for 15 ranked children plus 4 independently ranked parents. It also reports child `Hit@15`, parent `Hit@4`, and fused-prefilter `Hit@40` separately.

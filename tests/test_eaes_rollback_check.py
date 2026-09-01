@@ -123,7 +123,12 @@ class _ReaderGateAgent(EAESMixin):
         return {
             "query_attributes": ["profile.pet"],
             "keywords": ["pet"],
-            "retrieval_phrases": ["pet", "owned pet", "animal", "companion"],
+            "retrieval_phrases": [
+                "Caroline possession.pet",
+                "Caroline possession.owned pet",
+                "Caroline profile.animal",
+                "Caroline profile.companion",
+            ],
             "breadth_value": 0.5,
             "detail_value": 0.5,
         }

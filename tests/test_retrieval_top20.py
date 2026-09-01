@@ -116,8 +116,10 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
             "query_attributes": ["profile.pet: pet owned by Caroline"],
             "keywords": ["dog"],
             "retrieval_phrases": [
-                "Caroline pet", "pet ownership",
-                "Caroline animal", "Caroline companion",
+                "Caroline possession.pet ownership",
+                "Caroline possession.owned animal",
+                "Caroline profile.animal companion",
+                "Caroline possession.dog ownership",
             ],
             "breadth_value": 0.5,
             "detail_value": 0.5,

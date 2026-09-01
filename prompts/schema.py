@@ -67,6 +67,15 @@ SCHEMA = {
     "personal_sentences": {
       "type": "array",
 
+    },
+    "tag_prefix_pool": {
+      "type": "array",
+      "maxItems": 10,
+      "uniqueItems": True,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   }
 }
@@ -107,9 +116,101 @@ from typing import List, Dict, Any, Tuple, Set
 ID_RE = re.compile(r'^D\d+:\d+-\d+$')
 ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
 DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
+TAG_PREFIX_HEADS = frozenset({
+  "activity", "plan", "profile", "possession", "relationship"
+})
 
 
-def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
+def _normalized_phrase(value):
+  return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def check_tag_prefix_pool(values, require_nonempty=False):
+  """Validate a session's topic-specific, Parent-induced prefix pool."""
+  if not isinstance(values, list):
+    return False, "tag_prefix_pool must be an array"
+  if require_nonempty and not values:
+    return False, "tag_prefix_pool must contain at least one topic prefix"
+  if len(values) > 10:
+    return False, "tag_prefix_pool must contain no more than 10 prefixes"
+  normalized = []
+  for index, value in enumerate(values):
+    if not isinstance(value, str):
+      return False, f"tag_prefix_pool[{index}] must be a string"
+    prefix = _normalized_phrase(value)
+    words = prefix.split()
+    if "." in prefix:
+      return False, f"tag_prefix_pool[{index}] must not contain '.'"
+    if not 3 <= len(words) <= 4:
+      return False, (
+        f"tag_prefix_pool[{index}] must contain a person, an explicit "
+        f"topic, and a canonical head in 3-4 words: {value!r}"
+      )
+    if not words[0][0].isupper():
+      return False, (
+        f"tag_prefix_pool[{index}] must start with an explicit capitalized "
+        f"person/entity: {value!r}"
+      )
+    if words[-1].casefold() not in TAG_PREFIX_HEADS:
+      return False, (
+        f"tag_prefix_pool[{index}] must end with one of "
+        f"{sorted(TAG_PREFIX_HEADS)!r}: {value!r}"
+      )
+    normalized.append(prefix.casefold())
+  if len(normalized) != len(set(normalized)):
+    return False, "tag_prefix_pool values must be unique after normalization"
+  return True, ""
+
+
+def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
+  """Validate one complete ``prefix.facet`` tag."""
+  if not isinstance(tag, str):
+    return False, "tag must be a string"
+  clean_tag = _normalized_phrase(tag)
+  if clean_tag.count(".") != 1:
+    return False, "tag must contain exactly one '.' between prefix and facet"
+  if re.search(r"\s\.|\.\s", clean_tag):
+    return False, "tag must not contain spaces around the '.' delimiter"
+  raw_prefix, raw_facet = clean_tag.split(".", 1)
+  prefix = _normalized_phrase(raw_prefix)
+  facet = _normalized_phrase(raw_facet)
+  prefix_words = prefix.split()
+  facet_words = facet.split()
+  if not prefix or not facet:
+    return False, "tag prefix and facet must both be non-empty"
+  if not 2 <= len(prefix_words) <= 4:
+    return False, "tag prefix must contain 2-4 words"
+  if not prefix_words[0][0].isupper():
+    return False, "tag prefix must start with a capitalized person/entity"
+  if prefix_words[-1].casefold() not in TAG_PREFIX_HEADS:
+    return False, (
+      f"tag prefix must end with one of {sorted(TAG_PREFIX_HEADS)!r}"
+    )
+  if len(facet_words) > 3:
+    return False, "tag facet must contain no more than three words"
+  if enforce_source:
+    normalized_pool = {
+      _normalized_phrase(value)
+      for value in tag_prefix_pool or []
+      if isinstance(value, str)
+    }
+    in_pool = prefix in normalized_pool
+    is_base_fallback = len(prefix_words) == 2
+    if not in_pool and not is_base_fallback:
+      return False, (
+        "tag prefix must be an exact tag_prefix_pool member or a two-word "
+        "person + canonical-head fallback"
+      )
+  return True, ""
+
+
+def check_rewrite_json(
+    text,
+    dialogue_text,
+    allow_origin_id=False,
+    tag_prefix_pool=None,
+    require_composite_tags=False,
+):
   from jsonschema import Draft202012Validator, ValidationError
   import re
   schema = deepcopy(SCHEMA) if allow_origin_id else SCHEMA
@@ -130,6 +231,14 @@ def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
   except ValidationError as e:
     return False, e.message
 
+  if tag_prefix_pool is None and "tag_prefix_pool" in text:
+    tag_prefix_pool = text.get("tag_prefix_pool")
+    require_composite_tags = True
+  if tag_prefix_pool is not None:
+    pool_ok, pool_error = check_tag_prefix_pool(tag_prefix_pool)
+    if not pool_ok:
+      return False, pool_error
+
   # Step 2: Extract allowed dia_id from dialogue_text if provided
   allowed = set()
   if dialogue_text:
@@ -144,10 +253,20 @@ def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
 
     normalized_tags = []
     for tag_index, tag in enumerate(tags):
+      if not isinstance(tag, str):
+        return False, f"sentence[{i}].tag[{tag_index}] must be a string"
       clean_tag = re.sub(r"\s+", " ", tag).strip()
       if not clean_tag:
         return False, f"sentence[{i}].tag[{tag_index}] must be non-empty"
-      if len(clean_tag.split()) > 3:
+      if require_composite_tags:
+        tag_ok, tag_error = check_composite_tag(
+          clean_tag,
+          tag_prefix_pool=tag_prefix_pool,
+          enforce_source=True,
+        )
+        if not tag_ok:
+          return False, f"sentence[{i}].tag[{tag_index}] {tag_error}: {tag!r}"
+      elif len(clean_tag.split()) > 3:
         return False, (
           f"sentence[{i}].tag[{tag_index}] must contain no more than "
           f"three words: {tag!r}"
@@ -207,9 +326,22 @@ def check_rewrite_json(text, dialogue_text, allow_origin_id=False):
   return True, ""
 
 
-def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
+def check_child_window_rewrite_json(
+    text, child_window, turns, dialogue_text, tag_prefix_pool=None
+):
   """Validate exhaustive memories generated from one contiguous child window."""
-  flag, err = check_rewrite_json(text, dialogue_text, allow_origin_id=True)
+  pool_ok, pool_error = check_tag_prefix_pool(
+    tag_prefix_pool or [], require_nonempty=False
+  )
+  if not pool_ok:
+    return False, pool_error
+  flag, err = check_rewrite_json(
+    text,
+    dialogue_text,
+    allow_origin_id=True,
+    tag_prefix_pool=tag_prefix_pool,
+    require_composite_tags=True,
+  )
   if not flag:
     return flag, err
   sentences = text.get("sentence") or []

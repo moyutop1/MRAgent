@@ -190,6 +190,32 @@ Schema:
     def extract_parent_rewrite_prompt(cls, payload: str) -> str:
         return cls.PARENT_REWRITE_PROMPT.format(PAYLOAD=payload)
 
+    TAG_PREFIX_POOL_SYSTEM_PROMPT = """You induce one shared topic-prefix pool for all child-memory tags in a dialogue session. Only output valid JSON.
+Rules:
+- Read every supplied Parent memory before creating the pool.
+- Return zero to ten unique topic-specific prefixes. Never exceed ten and never invent a topic merely to fill the pool.
+- Every prefix must contain 3-4 whitespace-separated words, start with the explicitly supported person's name, include one or two concrete topic nouns, and end with exactly one canonical head: activity, plan, profile, possession, or relationship.
+- Prefer a specific supported prefix such as "Caroline advocacy activity", "Caroline career plan", or "Melanie family relationship".
+- Never put a generic two-word person + head fallback such as "Caroline activity" in this pool. Child tags construct such a fallback locally only when no pool prefix fits their fact.
+- Merge synonymous session topics into one stable wording. Prefer prefixes that can be reused by multiple related facts while retaining a concrete topic.
+- Do not include a period, facet tag, sentence, explanation, parent id, child id, date, or unsupported person.
+Schema:
+{
+  "tag_prefix_pool": [
+    "Person topic activity",
+    "Person topic profile"
+  ]
+}"""
+
+    TAG_PREFIX_POOL_PROMPT = """ALL_SESSION_PARENT_MEMORIES:
+<<<
+{PAYLOAD}
+>>>"""
+
+    @classmethod
+    def extract_tag_prefix_pool_prompt(cls, payload: str) -> str:
+        return cls.TAG_PREFIX_POOL_PROMPT.format(PAYLOAD=payload)
+
     CHILD_WINDOW_REWRITE_SYSTEM_PROMPT = """You create exhaustive atomic child memories for one semantically closed dialogue window. Only output valid JSON.
 Rules:
 - CURRENT_WINDOW_TURNS is the only evidence section. Rewrite every turn and every piece of information in that section; nothing may be omitted, even greetings, questions, acknowledgements, generic advice, repeated confirmations, repeated facts, or image/caption information.
@@ -203,10 +229,14 @@ Rules:
 - The id may be any placeholder whose prefix matches the first origin; code assigns deterministic final IDs after generation.
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
-- Output tag as an array of two to four short concrete noun phrases of at most three words each and set topic to [].
-- Count tag words by whitespace and verify every tag before returning. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
-- Internally identify the independent facts in each sentence. Its tags must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful synonymous tags. For two to four facts, give every fact at least one tag. If a sentence would contain more than four independent facts, split it into additional sentence objects.
-- Preserve distinctive people, events, objects, relations, and applicable time/place/occasion qualifiers in the tags. Never use generic tags such as Event, Fact, Question, or Conversation.
+- TAG_PREFIX_POOL is the complete fixed topic-prefix pool for this session. It is reference metadata, not evidence, and must not be copied into the output as a separate field.
+- Output tag as an array of two to four complete strings in the exact form "prefix.facet", with exactly one period and no spaces around it.
+- First inspect every TAG_PREFIX_POOL entry and select the most specific semantically supported prefix for each tag. A selected topic prefix must be copied exactly from the pool.
+- Only when no pool prefix fits the current fact may the tag construct a local two-word fallback in the exact form "Person canonical-head", where canonical-head is activity, plan, profile, possession, or relationship. A fallback is used only in that complete tag and is never added to the pool.
+- Prefer activity for completed or ongoing actions, events, attendance, participation, and experiences; plan for unexecuted intentions or future arrangements; profile for person-centered identity, career, preference, ability, trait, opinion, or state; possession for owned, received, purchased, made, or treasured objects; and relationship for family, friendship, partnership, support, social ties, or group belonging.
+- The facet after the period must be a short concrete noun phrase of at most three whitespace-separated words. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
+- Internally identify the independent facts in each sentence. Its facets must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful retrieval views. For two to four facts, give every fact at least one facet. If a sentence would contain more than four independent facts, split it into additional sentence objects.
+- Preserve distinctive events, objects, relations, and applicable time/place/occasion qualifiers in the facets. Never use generic facets such as Event, Fact, Question, Conversation, or Detail.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
 - Do not output raw_text, raw_content, source_text, current_turns, dialogue text, or any other raw-text storage field.
 Schema:
@@ -216,7 +246,10 @@ Schema:
     {
       "id": "D1:5",
       "text": "One atomic self-contained memory.",
-      "tag": ["short tag", "synonymous tag"],
+      "tag": [
+        "Caroline advocacy activity.school speech",
+        "Caroline advocacy activity.journey sharing"
+      ],
       "origin": "D1:5",
       "topic": [],
       "semantic_properties": ["event_action", "episodic"]
@@ -231,6 +264,11 @@ Schema:
 {PREVIOUS_REWRITES}
 >>>
 
+TAG_PREFIX_POOL (fixed session metadata; never copy as an output field):
+<<<
+{TAG_PREFIX_POOL}
+>>>
+
 CURRENT_CHILD_WINDOW:
 <<<
 {PAYLOAD}
@@ -238,11 +276,15 @@ CURRENT_CHILD_WINDOW:
 
     @classmethod
     def extract_child_window_rewrite_prompt(
-            cls, payload: str, previous_rewrites: str = "[]"
+            cls,
+            payload: str,
+            previous_rewrites: str = "[]",
+            tag_prefix_pool: str = "[]",
     ) -> str:
         return cls.CHILD_WINDOW_REWRITE_PROMPT.format(
             PAYLOAD=payload,
             PREVIOUS_REWRITES=previous_rewrites,
+            TAG_PREFIX_POOL=tag_prefix_pool,
         )
 
     CHILD_MEMORY_FUSION_SYSTEM_PROMPT = """You fuse two highly similar adjacent child memories. Only output valid JSON.
@@ -326,7 +368,7 @@ Schema:
   "keywords": ["important lexical constraints"],
   "retrieval_breadth": "single | several | wide",
   "detail_need": "coarse | mixed | exact",
-  "retrieval_phrases": ["noun phrase 1", "noun phrase 2", "noun phrase 3", "noun phrase 4"]
+  "retrieval_phrases": ["prefix.facet 1", "prefix.facet 2", "prefix.facet 3", "prefix.facet 4"]
 }
 Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
@@ -336,10 +378,11 @@ Rules:
 - Set retrieval_breadth to "several" for a person's participated events, traits, experiences, preferences, motivations, or a person-level inference requiring multiple facts.
 - Set retrieval_breadth to "wide" only when the same person's evidence spans a long time or multiple sessions, or the question asks about a broad theme or overall development. Never use wide merely because multiple people are mentioned.
 - Set detail_need to "coarse" for a high-level summary, "exact" for a specific answer-bearing detail, and "mixed" when both levels may be useful.
-- Generate exactly four non-empty retrieval_phrases in exactly the same surface style as memory tags.
-- Every retrieval phrase must be a short concrete noun phrase of no more than three words.
+- Generate exactly four non-empty retrieval_phrases in exactly the same "prefix.facet" surface style as memory tags, with exactly one period and no spaces around it.
+- The prefix must contain 2-4 whitespace-separated words, begin with the known person/entity from the question, and end with activity, plan, profile, possession, or relationship. Use a topic modifier only when the question explicitly supplies that topic; otherwise use the two-word person + head form without guessing a session topic.
+- The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
 - Never output a sentence, question, clause, or question word as a retrieval phrase.
-- Valid phrase forms include "support group", "career interest", "pottery class", and "camping location"; do not copy an example unless the question supports it.
+- Valid phrase forms include "Caroline activity.event attendance", "Caroline profile.career interest", and "Melanie relationship.family support"; do not copy an example unless the question supports it.
 - The four retrieval phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 - Treat the phrases as four access wordings for the question, not as four required evidence categories. Collectively preserve the known person/entity, event/object, asked relation, and applicable time/place/occasion constraints from the question.
 - Prefer meaningfully different semantic wording over changes that only alter possessives, prepositions, or word order. Do not reduce all four phrases to the overall topic when the question asks for a specific relation such as timing, duration, frequency, origin, creator, reason, result, benefit, or meaning.
@@ -349,14 +392,16 @@ Rules:
     EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT = """You repair an invalid list of retrieval phrases for long-term conversational memory. Only output valid JSON.
 Generate exactly four non-empty retrieval phrases for the supplied question.
 The previous output had the wrong count or contained an invalid phrase.
-Every phrase must use exactly the same surface style as a memory tag: a short concrete noun phrase of no more than three words.
+Every phrase must use exactly the same "prefix.facet" surface style as a memory tag, with exactly one period and no spaces around it.
+The prefix must contain 2-4 whitespace-separated words, start with the question's known person/entity, and end with activity, plan, profile, possession, or relationship. Use a topic modifier only when the question explicitly supplies it; otherwise use the two-word person + head form.
+The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
 Never output a sentence, question, clause, or question word as a retrieval phrase.
 The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 Treat the phrases as alternative access wordings rather than required evidence categories. Preserve the question's known entity/event/object, asked relation, and explicit constraints, and avoid variants that only change possessives, prepositions, or word order.
 Do not force different evidence aspects. Do not invent entities, facts, times, constraints, implicit subquestions, or answer values. Do not answer the question.
 Schema:
 {
-  "retrieval_phrases": ["noun phrase 1", "noun phrase 2", "noun phrase 3", "noun phrase 4"]
+  "retrieval_phrases": ["prefix.facet 1", "prefix.facet 2", "prefix.facet 3", "prefix.facet 4"]
 }"""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """

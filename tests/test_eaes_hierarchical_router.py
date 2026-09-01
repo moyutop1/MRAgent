@@ -125,10 +125,16 @@ class HierarchicalRouterTests(unittest.TestCase):
             note = _Note(index)
             store.eaes_notes[note.memory_id] = note
             store.episode_events[note.event_id] = types.SimpleNamespace(
-                tag_t=[f"tag {index}", f"detail {index}"]
+                tag_t=[
+                    f"Person activity.tag {index}",
+                    f"Person activity.detail {index}",
+                ]
             )
             controller._eaes_tag_embedding_cache[note.memory_id] = (
-                (f"tag {index}", f"detail {index}"),
+                (
+                    f"Person activity.tag {index}",
+                    f"Person activity.detail {index}",
+                ),
                 np.asarray([
                     [1.0 / index, 0.0],
                     [0.5 / index, 0.0],

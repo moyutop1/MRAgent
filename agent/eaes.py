@@ -6,6 +6,7 @@ from datetime import date
 from common import config
 from memory.system import EAESMemoryNote, EAESParentNode
 from prompts.prompts import Prompts
+from prompts.schema import check_composite_tag
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +429,8 @@ class EAESMixin:
             phrase = re.sub(r"\s+", " ", value).strip()
             if not phrase:
                 continue
-            if len(phrase.split()) > 3:
+            valid, _ = check_composite_tag(phrase)
+            if not valid:
                 return None
             phrases.append(phrase)
         if len(phrases) < expected_count:
@@ -449,11 +451,56 @@ class EAESMixin:
             "or", "the", "to", "was", "were", "what", "when",
             "where", "which", "who", "why", "will", "with", "would",
         }
+        entity = None
+        for word in words:
+            candidate = re.sub(r"['’]s$", "", word)
+            if (
+                candidate
+                and candidate[0].isupper()
+                and candidate.casefold() not in stopwords
+            ):
+                entity = candidate
+                break
+        if not entity:
+            entity = "Memory"
+
+        lowered_question = str(question or "").casefold()
+        if re.search(
+                r"\b(?:plan|plans|planned|planning|intend|intends|goal|goals|"
+                r"hope|hopes|future)\b",
+                lowered_question):
+            head = "plan"
+        elif re.search(
+                r"\b(?:own|owns|owned|possession|possessions|gift|gifts|"
+                r"receive|received|buy|bought|purchase|purchased|belong)\b",
+                lowered_question):
+            head = "possession"
+        elif re.search(
+                r"\b(?:relationship|relationships|friend|friends|friendship|"
+                r"family|parent|parents|mother|father|sibling|siblings|"
+                r"partner|spouse|mentor|mentee)\b",
+                lowered_question):
+            head = "relationship"
+        elif re.search(
+                r"\b(?:profile|trait|traits|personality|career|job|work|"
+                r"occupation|preference|preferences|prefer|prefers|like|likes|"
+                r"skill|skills|ability|abilities|age|person|characteristic|"
+                r"characteristics)\b",
+                lowered_question):
+            head = "profile"
+        else:
+            head = "activity"
+
         content_words = [
-            word for word in words if word.lower() not in stopwords
+            re.sub(r"['’]s$", "", word)
+            for word in words
+            if word.lower() not in stopwords
+            and re.sub(r"['’]s$", "", word).casefold()
+            != entity.casefold()
         ]
         selected = (content_words or words)[-3:]
-        return " ".join(selected) or "memory"
+        facet = " ".join(selected) or "memory"
+        return f"{entity} {head}.{facet}"
 
     def _regenerate_eaes_retrieval_phrases(
             self, query_question, invalid_phrases

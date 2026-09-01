@@ -79,6 +79,25 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
                 self.assertFalse(ok)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
+    def test_hierarchy_rewrite_requires_full_pool_or_fallback_tags(self):
+        payload = _valid_rewrite()
+        payload["tag_prefix_pool"] = ["Caroline pet possession"]
+        payload["sentence"][0]["tag"] = [
+            "Caroline pet possession.dog ownership",
+            "Caroline profile.counselor career",
+        ]
+
+        ok, error = check_rewrite_json(payload, self.dialogue)
+
+        self.assertTrue(ok, error)
+        payload["sentence"][0]["tag"][1] = (
+            "Caroline career profile.counselor career"
+        )
+        ok, error = check_rewrite_json(payload, self.dialogue)
+        self.assertFalse(ok)
+        self.assertIn("exact tag_prefix_pool member", error)
+
+    @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_legacy_labels_duplicates_and_invalid_axis_counts_are_rejected(self):
         cases = []
 
@@ -216,8 +235,10 @@ def _query_output():
         "answer_type": "fact",
         "keywords": ["dog"],
         "retrieval_phrases": [
-            "Caroline pet", "pet ownership",
-            "Caroline animal", "Caroline companion",
+            "Caroline possession.pet ownership",
+            "Caroline possession.owned animal",
+            "Caroline profile.animal companion",
+            "Caroline possession.dog ownership",
         ],
         "required_semantic_properties": [
             "personal_profile", "durable", "unknown", "personal_profile",

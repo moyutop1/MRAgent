@@ -210,6 +210,73 @@ def normalize_child_tag_cardinality(rewrite_out):
     return changed
 
 
+_TAG_PREFIX_HEAD_ALIASES = {
+    "collection": "possession",
+    "collections": "possession",
+    "belonging": "possession",
+    "belongings": "possession",
+    "ownership": "possession",
+    "goal": "plan",
+    "goals": "plan",
+    "intention": "plan",
+    "intentions": "plan",
+    "arrangement": "plan",
+    "arrangements": "plan",
+    "aspiration": "plan",
+    "aspirations": "plan",
+    "identity": "profile",
+    "preference": "profile",
+    "preferences": "profile",
+    "hobby": "profile",
+    "hobbies": "profile",
+    "career": "profile",
+    "occupation": "profile",
+    "trait": "profile",
+    "traits": "profile",
+    "friendship": "relationship",
+    "friendships": "relationship",
+    "partnership": "relationship",
+    "partnerships": "relationship",
+    "marriage": "relationship",
+    "family": "relationship",
+    "bond": "relationship",
+    "bonds": "relationship",
+    "event": "activity",
+    "events": "activity",
+    "experience": "activity",
+    "experiences": "activity",
+    "participation": "activity",
+}
+
+
+def normalize_tag_prefix_pool_heads(values):
+    """Append a canonical head to prefixes ending in a clear head synonym."""
+    if not isinstance(values, list):
+        return 0
+
+    changed = 0
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or "." in value:
+            continue
+        clean_value = re.sub(r"\s+", " ", value).strip()
+        words = clean_value.split()
+        if len(words) < 2:
+            continue
+        alias = re.sub(r"[^a-z]+$", "", words[-1].casefold())
+        canonical_head = _TAG_PREFIX_HEAD_ALIASES.get(alias)
+        if not canonical_head:
+            continue
+
+        normalized_words = words + [canonical_head]
+        while len(normalized_words) > 4:
+            normalized_words[1:3] = ["-".join(normalized_words[1:3])]
+        if len(normalized_words) < 3:
+            continue
+        values[index] = " ".join(normalized_words)
+        changed += 1
+    return changed
+
+
 _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
     "activity": "event_action",
     "plan": "event_action",
@@ -752,6 +819,12 @@ def _extract_session_tag_prefix_pool(llm, parents, logger=None):
             if isinstance(value, str) else value
             for value in raw_pool
         ]
+        normalized_head_count = normalize_tag_prefix_pool_heads(pool)
+        if normalized_head_count and logger:
+            logger.info(
+                "normalized %d tag-prefix synonym head(s)",
+                normalized_head_count,
+            )
         valid, last_error = json_scheme.check_tag_prefix_pool(pool)
         if valid:
             return pool

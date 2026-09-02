@@ -46,6 +46,7 @@ from agent.rewrite_memory import (
     normalize_child_tag_cardinality,
     normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
+    normalize_tag_prefix_pool_heads,
     rewrite_semantic_hierarchy_session,
 )
 from agent.semantic_segmentation import (
@@ -533,6 +534,32 @@ class SemanticHierarchyTests(unittest.TestCase):
         payload = llm.calls[0][1]["content"]
         self.assertIn("Caroline shared her journey.", payload)
         self.assertIn("Caroline joined mentoring.", payload)
+
+    def test_prefix_pool_normalizes_collection_to_possession_without_retry(self):
+        parents = [types.SimpleNamespace(
+            parent_id="1-1",
+            rewrite_content="Caroline owns a collection of children's books.",
+        )]
+        llm = SequenceLLM([{"tag_prefix_pool": [
+            "Caroline LGBTQ support activity",
+            "Caroline children's book collection",
+        ]}])
+
+        pool = _extract_session_tag_prefix_pool(llm, parents)
+
+        self.assertEqual(pool, [
+            "Caroline LGBTQ support activity",
+            "Caroline children's-book collection possession",
+        ])
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_prefix_pool_head_normalizer_leaves_unknown_head_for_retry(self):
+        pool = ["Caroline reading subject"]
+
+        changed = normalize_tag_prefix_pool_heads(pool)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(pool, ["Caroline reading subject"])
 
     def test_child_tags_use_exact_pool_prefix_or_two_word_fallback(self):
         turns = parse_session_turns(_dialogue(1))

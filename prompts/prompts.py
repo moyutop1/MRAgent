@@ -195,6 +195,7 @@ Rules:
 - Read every supplied Parent memory before creating the pool.
 - Return zero to ten unique topic-specific prefixes. Never exceed ten and never invent a topic merely to fill the pool.
 - Every prefix must contain 3-4 whitespace-separated words, start with the explicitly supported person's name, include one or two concrete topic nouns, and end with exactly one canonical head: activity, plan, profile, possession, or relationship.
+- The literal final whitespace-separated word must be one of those five canonical heads. Synonyms such as collection, hobby, goal, friendship, or event are topic words, not valid heads; retain the useful topic before a canonical head, for example "Caroline children's-book collection possession".
 - Prefer a specific supported prefix such as "Caroline advocacy activity", "Caroline career plan", or "Melanie family relationship".
 - Never put a generic two-word person + head fallback such as "Caroline activity" in this pool. Child tags construct such a fallback locally only when no pool prefix fits their fact.
 - Merge synonymous session topics into one stable wording. Prefer prefixes that can be reused by multiple related facts while retaining a concrete topic.

@@ -238,6 +238,7 @@ Rules:
 - Internally identify the independent facts in each sentence. Its facets must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful retrieval views. For two to four facts, give every fact at least one facet. If a sentence would contain more than four independent facts, split it into additional sentence objects.
 - Preserve distinctive events, objects, relations, and applicable time/place/occasion qualifiers in the facets. Never use generic facets such as Event, Fact, Question, Conversation, or Detail.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
+- The tag heads activity, plan, profile, possession, and relationship are tag-prefix vocabulary only and must never appear in semantic_properties. For a planned intention, use event_action as its content property plus the most appropriate allowed persistence property.
 - Do not output raw_text, raw_content, source_text, current_turns, dialogue text, or any other raw-text storage field.
 Schema:
 {

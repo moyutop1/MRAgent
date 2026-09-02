@@ -116,6 +116,49 @@ def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
     return changed
 
 
+_TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
+    "activity": "event_action",
+    "plan": "event_action",
+    "profile": "personal_profile",
+    "possession": "personal_profile",
+    "relationship": "relation_social",
+}
+
+
+def normalize_rewrite_semantic_properties(rewrite_out):
+    """Repair canonical tag heads leaked into ``semantic_properties``."""
+    if not isinstance(rewrite_out, dict):
+        return 0
+    sentences = rewrite_out.get("sentence")
+    if not isinstance(sentences, list):
+        return 0
+
+    changed = 0
+    for sentence in sentences:
+        if not isinstance(sentence, dict):
+            continue
+        properties = sentence.get("semantic_properties")
+        if not isinstance(properties, list):
+            continue
+        normalized = []
+        for value in properties:
+            if not isinstance(value, str):
+                normalized.append(value)
+                continue
+            clean_value = value.strip().lower()
+            mapped_value = _TAG_HEAD_SEMANTIC_PROPERTY_MAP.get(
+                clean_value, clean_value
+            )
+            if mapped_value != value:
+                changed += 1
+            if mapped_value in normalized:
+                changed += 1
+                continue
+            normalized.append(mapped_value)
+        sentence["semantic_properties"] = normalized
+    return changed
+
+
 def _as_list(value):
     if value is None:
         return []
@@ -438,6 +481,7 @@ def _rewrite_window(
     normalize_sentence_ids(rewrite_out)
     normalize_rewrite_temporal_granularity(rewrite_out, source_text)
     normalize_rewrite_tag_lengths(rewrite_out)
+    normalize_rewrite_semantic_properties(rewrite_out)
     flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
     if flag:
         flag, err = _filter_context_only_outputs(
@@ -460,6 +504,7 @@ def _rewrite_window(
             normalize_sentence_ids(rewrite_out)
             normalize_rewrite_temporal_granularity(rewrite_out, source_text)
             normalize_rewrite_tag_lengths(rewrite_out)
+            normalize_rewrite_semantic_properties(rewrite_out)
             flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
             if flag:
                 flag, err = _filter_context_only_outputs(
@@ -847,6 +892,17 @@ def _rewrite_child_window(
         )
         normalize_sentence_ids(output)
         normalize_rewrite_temporal_granularity(output, source_text)
+        normalized_property_count = normalize_rewrite_semantic_properties(
+            output
+        )
+        if normalized_property_count and logger:
+            logger.info(
+                "normalized %d leaked tag-head semantic property value(s) "
+                "for %s through %s",
+                normalized_property_count,
+                window.start_origin,
+                window.end_origin,
+            )
         normalized_tag_count = normalize_rewrite_tag_lengths(output)
         if normalized_tag_count and logger:
             logger.info(

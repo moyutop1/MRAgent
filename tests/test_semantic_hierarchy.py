@@ -42,6 +42,7 @@ from agent.rewrite_memory import (
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
+    normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
     rewrite_semantic_hierarchy_session,
 )
@@ -368,6 +369,40 @@ class SemanticHierarchyTests(unittest.TestCase):
             output["sentence"][0]["tag"],
             ["Speaker activity.valid tag", 123],
         )
+
+    def test_tag_heads_leaked_into_semantic_properties_are_normalized(self):
+        output = _rewrite_output(_sentence(
+            "D1:1",
+            "Caroline plans to attend a workshop.",
+            semantic_properties=["plan", "episodic", "activity"],
+        ))
+
+        changed = normalize_rewrite_semantic_properties(output)
+
+        self.assertEqual(changed, 3)
+        self.assertEqual(
+            output["sentence"][0]["semantic_properties"],
+            ["event_action", "episodic"],
+        )
+
+    def test_child_window_repairs_plan_property_without_llm_retry(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        llm = SequenceLLM([_rewrite_output(_sentence(
+            "D1:1",
+            "The speaker plans to attend a workshop.",
+            semantic_properties=["plan", "episodic"],
+        ))])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(
+            output["sentence"][0]["semantic_properties"],
+            ["event_action", "episodic"],
+        )
+        self.assertEqual(len(llm.calls), 1)
 
     def test_prefix_pool_retries_generic_prefix_and_reads_all_parents(self):
         parents = [

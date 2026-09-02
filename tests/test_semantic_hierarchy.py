@@ -43,6 +43,7 @@ from agent.rewrite_memory import (
     _previous_child_rewrite_context,
     _rewrite_child_window,
     inherit_adjacent_question_origins,
+    normalize_child_tag_cardinality,
     normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
     rewrite_semantic_hierarchy_session,
@@ -406,6 +407,63 @@ class SemanticHierarchyTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(llm.calls), 1)
+
+    def test_single_multiword_child_tag_is_expanded_without_retry(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        tag = "Caroline LGBTQ support activity.greeting inquiry"
+        llm = SequenceLLM([_rewrite_output(_sentence(
+            "D1:1",
+            "Caroline greeted Melanie and asked how she was doing.",
+            tag=[tag],
+        ))])
+
+        output = _rewrite_child_window(
+            llm,
+            window,
+            turns,
+            "2023-05-08",
+            tag_prefix_pool=["Caroline LGBTQ support activity"],
+        )
+
+        self.assertEqual(output["sentence"][0]["tag"], [
+            tag,
+            "Caroline LGBTQ support activity.inquiry",
+        ])
+        self.assertEqual(len(llm.calls), 1)
+
+    def test_single_generic_child_tag_is_left_for_precise_retry(self):
+        output = _rewrite_output(_sentence(
+            "D1:1", "A generic event was mentioned.",
+            tag=["Speaker activity.event"],
+        ))
+
+        changed = normalize_child_tag_cardinality(output)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(output["sentence"][0]["tag"], [
+            "Speaker activity.event",
+        ])
+
+    def test_single_unrepairable_child_tag_retry_names_tag_field(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        invalid = _rewrite_output(_sentence(
+            "D1:1", "A generic event was mentioned.",
+            tag=["Speaker activity.event"],
+        ))
+        valid = _rewrite_output(_sentence(
+            "D1:1", "A generic event was mentioned.",
+        ))
+        llm = SequenceLLM([invalid, valid])
+
+        _rewrite_child_window(llm, window, turns, "2023-05-08")
+
+        retry_system = llm.calls[1][0]["content"]
+        self.assertIn(
+            "sentence[0].tag must contain 2-4 unique composite tags; got 1",
+            retry_system,
+        )
 
     def test_tag_length_normalizer_leaves_non_string_for_validation(self):
         output = _rewrite_output(_sentence(

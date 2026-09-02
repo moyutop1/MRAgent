@@ -225,6 +225,20 @@ def check_rewrite_json(
   ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
   DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 
+  # jsonschema's default cardinality message (for example, ``[...] is too
+  # short``) does not identify the offending field.  Report this common model
+  # error explicitly so a retry can repair the right sentence and property.
+  if isinstance(text, dict) and isinstance(text.get("sentence"), list):
+    for index, sentence in enumerate(text["sentence"]):
+      if not isinstance(sentence, dict):
+        continue
+      tags = sentence.get("tag")
+      if isinstance(tags, list) and not 2 <= len(tags) <= 4:
+        return False, (
+          f"sentence[{index}].tag must contain 2-4 unique composite tags; "
+          f"got {len(tags)}"
+        )
+
   # Step 1: Schema validation
   try:
     validator.validate(text)

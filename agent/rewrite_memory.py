@@ -153,6 +153,63 @@ def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
     return changed
 
 
+def normalize_child_tag_cardinality(rewrite_out):
+    """Add a second retrieval view when one composite tag already contains it.
+
+    Child memories require at least two tags.  Some models nevertheless return
+    a single multi-word facet repeatedly, even after retries.  Reusing one
+    concrete word from that facet (or the concrete topic in its prefix) is a
+    lossless local repair: it does not add a fact that was absent from the
+    model output and keeps the original, more specific tag intact.
+    """
+    if not isinstance(rewrite_out, dict):
+        return 0
+    sentences = rewrite_out.get("sentence")
+    if not isinstance(sentences, list):
+        return 0
+
+    changed = 0
+    generic_facets = {
+        "event", "fact", "question", "conversation", "detail",
+    }
+    for sentence in sentences:
+        if not isinstance(sentence, dict):
+            continue
+        tags = sentence.get("tag")
+        if not isinstance(tags, list) or len(tags) != 1:
+            continue
+        tag = tags[0]
+        if not isinstance(tag, str):
+            continue
+        clean_tag = re.sub(r"\s+", " ", tag).strip()
+        if clean_tag.count(".") != 1:
+            continue
+        raw_prefix, raw_facet = clean_tag.split(".", 1)
+        prefix = raw_prefix.strip()
+        facet = raw_facet.strip()
+        if not prefix or not facet:
+            continue
+
+        facet_words = facet.split()
+        candidates = list(reversed(facet_words)) if len(facet_words) > 1 else []
+        prefix_words = prefix.split()
+        if len(prefix_words) >= 3:
+            candidates.append(" ".join(prefix_words[1:-1]))
+
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if (
+                    not candidate
+                    or candidate.casefold() in generic_facets
+                    or candidate.casefold() == facet.casefold()
+                    or len(candidate.split()) > 3):
+                continue
+            sentence["tag"] = [clean_tag, f"{prefix}.{candidate}"]
+            changed += 1
+            break
+    return changed
+
+
 _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
     "activity": "event_action",
     "plan": "event_action",
@@ -966,6 +1023,17 @@ def _rewrite_child_window(
             logger.info(
                 "normalized %d overlong child tag(s) for %s through %s",
                 normalized_tag_count,
+                window.start_origin,
+                window.end_origin,
+            )
+        normalized_tag_cardinality_count = normalize_child_tag_cardinality(
+            output
+        )
+        if normalized_tag_cardinality_count and logger:
+            logger.info(
+                "expanded %d single-tag child memory/memories for %s "
+                "through %s",
+                normalized_tag_cardinality_count,
                 window.start_origin,
                 window.end_origin,
             )

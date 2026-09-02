@@ -74,6 +74,43 @@ def normalize_sentence_ids(rewrite_out):
         sentence["id"] = f"{primary}-{cnt[primary]}"
 
 
+def inherit_adjacent_question_origins(rewrite_out, turns):
+    """Attach an immediately preceding question to its answer memories."""
+    if not isinstance(rewrite_out, dict):
+        return 0
+    sentences = rewrite_out.get("sentence")
+    ordered_turns = list(turns or [])
+    if not isinstance(sentences, list) or len(ordered_turns) < 2:
+        return 0
+
+    positions = {
+        getattr(turn, "origin", None): index
+        for index, turn in enumerate(ordered_turns)
+    }
+    changed = 0
+    for index, question_turn in enumerate(ordered_turns[:-1]):
+        if "?" not in str(getattr(question_turn, "line", "") or ""):
+            continue
+        question_origin = getattr(question_turn, "origin", None)
+        answer_origin = getattr(ordered_turns[index + 1], "origin", None)
+        if not question_origin or not answer_origin:
+            continue
+        for sentence in sentences:
+            if not isinstance(sentence, dict):
+                continue
+            ids = origin_ids(sentence.get("origin"))
+            if answer_origin not in ids or question_origin in ids:
+                continue
+            ids.append(question_origin)
+            ids = sorted(
+                dict.fromkeys(ids),
+                key=lambda origin: positions.get(origin, len(positions)),
+            )
+            sentence["origin"] = ",".join(ids)
+            changed += 1
+    return changed
+
+
 def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
     """Fold only an overlong tag/facet suffix into one compound token."""
     if not isinstance(rewrite_out, dict) or max_words < 1:
@@ -875,21 +912,42 @@ def _rewrite_child_window(
         window, turns, conversation_time
     )
     last_error = ""
+    last_output = None
     for attempt in range(4):
         system_prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
+        request_prompt = user_prompt
         if attempt:
             system_prompt += (
                 "\nThe previous window rewrite was invalid. Return the complete "
                 "window rewrite again. "
                 f"Validation error: {last_error}"
             )
+            request_prompt += (
+                "\n\nPREVIOUS_INVALID_WINDOW_REWRITE:\n<<<\n"
+                f"{json.dumps(last_output, ensure_ascii=False)}\n"
+                ">>>\nRepair the exact validation error without dropping any "
+                "previously represented current-window information. If an origin "
+                "is missing, incorporate that turn into the appropriate memory or "
+                "add a valid memory for it. Return the complete repaired object."
+            )
         output = llm.chat_text(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": request_prompt},
             ],
             temperature=0.0 if attempt == 0 else 0.7,
         )
+        last_output = output
+        inherited_question_count = inherit_adjacent_question_origins(
+            output, current_turns
+        )
+        if inherited_question_count and logger:
+            logger.info(
+                "inherited %d adjacent question origin(s) for %s through %s",
+                inherited_question_count,
+                window.start_origin,
+                window.end_origin,
+            )
         normalize_sentence_ids(output)
         normalize_rewrite_temporal_granularity(output, source_text)
         normalized_property_count = normalize_rewrite_semantic_properties(

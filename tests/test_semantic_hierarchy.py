@@ -42,6 +42,7 @@ from agent.rewrite_memory import (
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
+    inherit_adjacent_question_origins,
     normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
     rewrite_semantic_hierarchy_session,
@@ -332,6 +333,55 @@ class SemanticHierarchyTests(unittest.TestCase):
             window, turns, "2023-05-08"
         ))
 
+    def test_adjacent_question_origins_are_inherited_by_answer_memories(self):
+        turns = parse_session_turns("\n".join([
+            "time:2023-05-08",
+            "dia_id:D1:6 Melanie: What's it done for you?",
+            "dia_id:D1:7 Caroline: It made me feel accepted.",
+            "dia_id:D1:8 Melanie: What now?",
+            "dia_id:D1:9 Caroline: I will continue my education.",
+        ]))
+        output = _rewrite_output(
+            _sentence("D1:7", "The group made Caroline feel accepted."),
+            _sentence("D1:9", "Caroline will continue her education."),
+        )
+
+        changed = inherit_adjacent_question_origins(output, turns)
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(
+            [item["origin"] for item in output["sentence"]],
+            ["D1:6,D1:7", "D1:8,D1:9"],
+        )
+
+    def test_child_window_accepts_answer_memories_missing_question_origins(self):
+        turns = parse_session_turns("\n".join([
+            "time:2023-05-08",
+            "dia_id:D1:6 Melanie: What's it done for you?",
+            "dia_id:D1:7 Caroline: It made me feel accepted.",
+            "dia_id:D1:8 Melanie: What now?",
+            "dia_id:D1:9 Caroline: I will continue my education.",
+        ]))
+        window = ChildWindow("D1:6", "D1:9")
+        llm = SequenceLLM([_rewrite_output(
+            _sentence("D1:7", "The group made Caroline feel accepted."),
+            _sentence("D1:9", "Caroline will continue her education."),
+        )])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(
+            [item["origin"] for item in output["sentence"]],
+            ["D1:6,D1:7", "D1:8,D1:9"],
+        )
+        self.assertEqual(
+            [item["id"] for item in output["sentence"]],
+            ["D1:6-1", "D1:8-1"],
+        )
+
     def test_overlong_child_tag_is_compounded_without_regenerating_window(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
@@ -521,7 +571,10 @@ class SemanticHierarchyTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("directly answers the immediately preceding", prompt)
-        self.assertIn("Include both the question and answer origins", prompt)
+        self.assertIn(
+            "origin must begin with the question origin followed by the answer origin",
+            prompt,
+        )
 
     def test_threshold_one_bypasses_child_similarity_embeddings(self):
         retained = [_sentence("D1:1", "previous", "D1:1-1")]

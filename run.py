@@ -24,6 +24,7 @@ from data.get_data import get_data
 import numpy as np
 import logging
 from common.logging_utils import per_sample_log
+from common.cache_utils import load_jsonl_records, validate_rewrite_cache_prefix
 from data.embed_rewrite import embed_sample
 from eval.retrieval_metrics import retrieval_metrics as _retrieval_metrics
 
@@ -322,18 +323,79 @@ def main():
         with per_sample_log(sample_id=sample_id, dataset=dataset):
             logging.info(f"=== Start processing sample {sample_id} ===")
             rewrite_path = config.rewrite_template.format(dataset=dataset, sample_id=sample_id)
-            if not os.path.exists(rewrite_path):
-                agent.rewrite_sample(sample, rewrite_path)
+            expected_session_ids = list(sample)
+            rewrite_records = load_jsonl_records(rewrite_path)
+            validate_rewrite_cache_prefix(
+                rewrite_records, expected_session_ids, rewrite_path
+            )
+            rewrite_updated = len(rewrite_records) < len(expected_session_ids)
+            if rewrite_updated:
+                logging.info(
+                    "Resuming rewrite for sample %s at session %d/%d.",
+                    sample_id,
+                    len(rewrite_records) + 1,
+                    len(expected_session_ids),
+                )
+                agent.rewrite_sample(
+                    sample,
+                    rewrite_path,
+                    session_id_ref=len(rewrite_records) + 1,
+                )
+                rewrite_records = load_jsonl_records(rewrite_path)
+                validate_rewrite_cache_prefix(
+                    rewrite_records, expected_session_ids, rewrite_path
+                )
+                if len(rewrite_records) != len(expected_session_ids):
+                    raise ValueError(
+                        f"rewrite cache {rewrite_path} remains incomplete: "
+                        f"{len(rewrite_records)}/{len(expected_session_ids)} sessions"
+                    )
             else:
                 logging.info(f"Rewrite for sample {sample_id} already exists, skipping.")
 
             keyword_path = config.keyword_template.format(dataset=dataset, sample_id=sample_id)
-            if not os.path.exists(keyword_path):
-                agent.extract_keyword_sample(keyword_path, rewrite_path)
+            embedding_path = config.embedding_template.format(dataset=dataset, sample_id=sample_id)
+            if rewrite_updated:
+                # A keyword/embedding cache beside an incomplete rewrite came
+                # from a different generation and cannot be aligned safely.
+                for dependent_path in (keyword_path, embedding_path):
+                    if os.path.exists(dependent_path):
+                        logging.warning(
+                            "Removing stale derived cache after rewrite resume: %s",
+                            dependent_path,
+                        )
+                        os.remove(dependent_path)
+
+            keyword_records = load_jsonl_records(keyword_path)
+            if len(keyword_records) > len(rewrite_records):
+                logging.warning(
+                    "Keyword cache has %d records for %d rewrite records; "
+                    "rebuilding %s.",
+                    len(keyword_records),
+                    len(rewrite_records),
+                    keyword_path,
+                )
+                os.remove(keyword_path)
+                keyword_records = []
+            if len(keyword_records) < len(rewrite_records):
+                logging.info(
+                    "Resuming keyword extraction at record %d/%d.",
+                    len(keyword_records) + 1,
+                    len(rewrite_records),
+                )
+                agent.extract_keyword_sample(
+                    keyword_path, rewrite_path, ref_id=len(keyword_records)
+                )
+                keyword_records = load_jsonl_records(keyword_path)
+                if len(keyword_records) != len(rewrite_records):
+                    raise ValueError(
+                        f"keyword cache {keyword_path} remains misaligned: "
+                        f"{len(keyword_records)} keyword records for "
+                        f"{len(rewrite_records)} rewrite records"
+                    )
             else:
                 logging.info(f"Keyword for sample {sample_id} already exists, skipping.")
 
-            embedding_path = config.embedding_template.format(dataset=dataset, sample_id=sample_id)
             if not os.path.exists(embedding_path):
                 embed_sample(question_list[sample_id], rewrite_path, embedding_path)
             else:

@@ -9,6 +9,7 @@ from prompts import schema as json_scheme
 from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
 from common import config
+from common.cache_utils import index_keyword_sentences
 from llm.controller import LLM
 from memory.controller import MemoryController
 from memory.system import MemorySystem, EpisodeEvent
@@ -400,12 +401,30 @@ class Agent(EAESMixin, RetrievalMixin):
                 record = json.loads(line.strip())
                 records_key.append(record)
 
-        for i in range(len(records_key)):
-            # a rewrite record key may be session_i or session_first-session_last,
-            # take the record's single value (equivalent to .get(session_{i+1}) for plain-key files, no breakage).
-            ev = records_event[i]
-            events = next(iter(ev.values())) if ev else None
-            self.store_event_new(events, records_key[i], i+1)
+        # Keyword extraction is model-generated and its JSONL cache may be
+        # partial or contain stale extra lines after an interrupted rewrite.
+        # Bind keywords to events by the deterministic sentence ID, never by
+        # the two files' line positions.
+        keyword_by_id = index_keyword_sentences(records_key)
+        for index, event_record in enumerate(records_event, start=1):
+            if not isinstance(event_record, dict) or not event_record:
+                continue
+            session_label, events = next(iter(event_record.items()))
+            event_ids = [
+                sentence.get("id")
+                for sentence in (events or {}).get("sentence") or []
+                if isinstance(sentence, dict) and sentence.get("id")
+            ] if isinstance(events, dict) else []
+            session_keywords = {
+                "sentence": [
+                    keyword_by_id[event_id]
+                    for event_id in event_ids
+                    if event_id in keyword_by_id
+                ]
+            }
+            session_match = re.fullmatch(r"session_(\d+)", str(session_label))
+            session_id = int(session_match.group(1)) if session_match else index
+            self.store_event_new(events, session_keywords, session_id)
 
 
     def store_event_new(self, events, keys,  session_id):
@@ -448,13 +467,17 @@ class Agent(EAESMixin, RetrievalMixin):
 
                 first_origin = self._first_origin(origin)
                 prefix = first_origin.split(":")[0]  # "D1"
-                ids = [x.strip() for x in origin.split(",")]
+                # Origin is provenance, not an event ID.  Extract every raw
+                # dialogue origin in order and ignore any accidental event-ID
+                # suffixes when reading legacy caches.
+                ids = list(dict.fromkeys(self._origin_ids(origin)))
                 embedding = self.memory.embeddings[id]
                 if len(ids) != 1:
-                    raw_context = ""
                     raw_session = self.memory.raw_text.get(prefix, {})
-                    for i in ids:
-                        raw_context = raw_context + (raw_session.get(i) or "")
+                    raw_context = "\n".join(
+                        raw_session.get(origin_id) or ""
+                        for origin_id in ids
+                    )
                 else:
                     raw_context = self.memory.raw_text.get(prefix, {}).get(first_origin)
                 text = ee.get("text") or raw_context

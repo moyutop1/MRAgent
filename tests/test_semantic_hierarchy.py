@@ -819,6 +819,25 @@ class SemanticHierarchyTests(unittest.TestCase):
             ["1-1", "1-1", "1-2"],
         )
 
+    def test_session_ids_suffix_shared_first_origin_and_preserve_all_origins(self):
+        output = _rewrite_output(
+            _sentence("D1:1,D1:2", "first supported memory", "placeholder"),
+            _sentence("D1:1,D1:3", "second supported memory", "placeholder"),
+            _sentence("D1:2", "different first origin", "placeholder"),
+        )
+
+        from agent.rewrite_memory import normalize_sentence_ids
+        normalize_sentence_ids(output)
+
+        self.assertEqual(
+            [sentence["id"] for sentence in output["sentence"]],
+            ["D1:1-1", "D1:1-2", "D1:2-1"],
+        )
+        self.assertEqual(
+            [sentence["origin"] for sentence in output["sentence"]],
+            ["D1:1,D1:2", "D1:1,D1:3", "D1:2"],
+        )
+
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):
         memory = MemorySystem()
         note = EAESMemoryNote(

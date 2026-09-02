@@ -1183,6 +1183,11 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         output["sentence"] = kept_sentences
         window_outputs.append(output)
 
+    # Assign IDs once more across the complete session after question-origin
+    # inheritance and adjacent-memory fusion.  ``origin`` retains every real
+    # supporting dialogue ID; only ``id`` receives the -1/-2/... collision
+    # suffix based on its first origin.
+    normalize_sentence_ids({"sentence": generated_memories})
     rewritten_parents = attach_child_memory_ids_to_parents(
         rewritten_parents, generated_memories
     )

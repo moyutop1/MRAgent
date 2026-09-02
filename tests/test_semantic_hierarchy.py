@@ -42,11 +42,11 @@ from agent.rewrite_memory import (
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
+    finalize_child_memory_ids,
     inherit_adjacent_question_origins,
     normalize_child_tag_cardinality,
     normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
-    normalize_tag_prefix_pool_heads,
     rewrite_semantic_hierarchy_session,
 )
 from agent.semantic_segmentation import (
@@ -59,6 +59,7 @@ from agent.semantic_segmentation import (
 )
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
 from prompts.prompts import Prompts
+from prompts.schema import check_composite_tag, check_tag_prefix_pool
 
 
 class SequenceLLM:
@@ -530,36 +531,141 @@ class SemanticHierarchyTests(unittest.TestCase):
         pool = _extract_session_tag_prefix_pool(llm, parents)
 
         self.assertEqual(pool, ["Caroline advocacy activity"])
-        self.assertIn("must contain a person", llm.calls[1][0]["content"])
+        self.assertIn("must not store", llm.calls[1][0]["content"])
         payload = llm.calls[0][1]["content"]
         self.assertIn("Caroline shared her journey.", payload)
         self.assertIn("Caroline joined mentoring.", payload)
 
-    def test_prefix_pool_normalizes_collection_to_possession_without_retry(self):
+    def test_prefix_pool_retries_noncanonical_head_once(self):
         parents = [types.SimpleNamespace(
             parent_id="1-1",
             rewrite_content="Caroline owns a collection of children's books.",
         )]
-        llm = SequenceLLM([{"tag_prefix_pool": [
-            "Caroline LGBTQ support activity",
-            "Caroline children's book collection",
-        ]}])
+        llm = SequenceLLM([
+            {"tag_prefix_pool": [
+                "Caroline LGBTQ support activity",
+                "Caroline children's book collection",
+            ]},
+            {"tag_prefix_pool": [
+                "Caroline LGBTQ support activity",
+                "Caroline book collection possession",
+            ]},
+        ])
 
         pool = _extract_session_tag_prefix_pool(llm, parents)
 
         self.assertEqual(pool, [
             "Caroline LGBTQ support activity",
-            "Caroline children's-book collection possession",
+            "Caroline book collection possession",
         ])
-        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn(
+            "must end with one of",
+            llm.calls[1][0]["content"],
+        )
 
-    def test_prefix_pool_head_normalizer_leaves_unknown_head_for_retry(self):
-        pool = ["Caroline reading subject"]
+    def test_prefix_pool_has_no_word_limit_but_still_has_ten_item_limit(self):
+        long_prefix = (
+            "Caroline local children's literature reading collection possession"
+        )
 
-        changed = normalize_tag_prefix_pool_heads(pool)
+        valid, error = check_tag_prefix_pool([long_prefix])
 
-        self.assertEqual(changed, 0)
-        self.assertEqual(pool, ["Caroline reading subject"])
+        self.assertTrue(valid, error)
+        valid_tag, tag_error = check_composite_tag(
+            f"{long_prefix}.favorite books",
+            tag_prefix_pool=[long_prefix],
+            enforce_source=True,
+        )
+        self.assertTrue(valid_tag, tag_error)
+        too_many = [f"Caroline topic-{index} activity" for index in range(11)]
+        valid, error = check_tag_prefix_pool(too_many)
+        self.assertFalse(valid)
+        self.assertIn("no more than 10", error)
+
+    def test_person_head_fallback_is_valid_for_tag_but_never_pool_member(self):
+        valid, error = check_tag_prefix_pool(["Caroline activity"])
+        self.assertFalse(valid)
+        self.assertIn("must not store", error)
+
+        valid, error = check_composite_tag(
+            "Caroline activity.school speech",
+            tag_prefix_pool=["Caroline school advocacy activity"],
+            enforce_source=True,
+        )
+        self.assertTrue(valid, error)
+
+    def test_prefix_prompts_explicitly_remove_prefix_word_limit(self):
+        self.assertIn(
+            "There is no prefix word-count limit",
+            Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT,
+        )
+        self.assertNotIn(
+            "3-4 whitespace-separated words",
+            Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT,
+        )
+
+    def test_prefix_pool_raises_after_exactly_one_failed_retry(self):
+        parents = [types.SimpleNamespace(
+            parent_id="1-1",
+            rewrite_content="Caroline owns a collection of children's books.",
+        )]
+        invalid = {"tag_prefix_pool": [
+            "Caroline children's book collection",
+        ]}
+        llm = SequenceLLM([invalid, invalid])
+
+        with self.assertRaisesRegex(ValueError, "must end with one of"):
+            _extract_session_tag_prefix_pool(llm, parents)
+
+        self.assertEqual(len(llm.calls), 2)
+
+    def test_invalid_child_fallback_prefix_gets_one_repair_attempt(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        invalid = _rewrite_output(_sentence(
+            "D1:1",
+            "Caroline owns a collection of books.",
+            tag=[
+                "Caroline collection.children's books",
+                "Caroline collection.book ownership",
+            ],
+        ))
+        valid = _rewrite_output(_sentence(
+            "D1:1",
+            "Caroline owns a collection of books.",
+            tag=[
+                "Caroline possession.children's books",
+                "Caroline possession.book ownership",
+            ],
+        ))
+        llm = SequenceLLM([invalid, valid])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(output["sentence"][0]["tag"], valid["sentence"][0]["tag"])
+        self.assertIn("tag prefix must end", llm.calls[1][0]["content"])
+
+    def test_invalid_child_prefix_raises_after_one_failed_repair(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        invalid = _rewrite_output(_sentence(
+            "D1:1",
+            "Caroline owns a collection of books.",
+            tag=[
+                "Caroline collection.children's books",
+                "Caroline collection.book ownership",
+            ],
+        ))
+        llm = SequenceLLM([invalid, invalid])
+
+        with self.assertRaisesRegex(ValueError, "tag prefix must end"):
+            _rewrite_child_window(llm, window, turns, "2023-05-08")
+
+        self.assertEqual(len(llm.calls), 2)
 
     def test_child_tags_use_exact_pool_prefix_or_two_word_fallback(self):
         turns = parse_session_turns(_dialogue(1))
@@ -836,6 +942,24 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertEqual(
             [sentence["origin"] for sentence in output["sentence"]],
             ["D1:1,D1:2", "D1:1,D1:3", "D1:2"],
+        )
+
+    def test_final_child_ids_use_real_turn_order_not_origin_string_order(self):
+        turns = parse_session_turns(_dialogue(10))
+        memories = [
+            _sentence("D1:10,D1:2", "first memory", "placeholder"),
+            _sentence("D1:2,D1:9", "second memory", "placeholder"),
+        ]
+
+        finalize_child_memory_ids(memories, turns)
+
+        self.assertEqual(
+            [memory["origin"] for memory in memories],
+            ["D1:2,D1:10", "D1:2,D1:9"],
+        )
+        self.assertEqual(
+            [memory["id"] for memory in memories],
+            ["D1:2-1", "D1:2-2"],
         )
 
     def test_parent_reader_payload_hides_child_attributes_and_support_expands(self):

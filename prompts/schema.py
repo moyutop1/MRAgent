@@ -139,12 +139,14 @@ def check_tag_prefix_pool(values, require_nonempty=False):
       return False, f"tag_prefix_pool[{index}] must be a string"
     prefix = _normalized_phrase(value)
     words = prefix.split()
+    if not prefix:
+      return False, f"tag_prefix_pool[{index}] must be non-empty"
     if "." in prefix:
       return False, f"tag_prefix_pool[{index}] must not contain '.'"
-    if not 3 <= len(words) <= 4:
+    if len(words) == 2 and words[-1].casefold() in TAG_PREFIX_HEADS:
       return False, (
-        f"tag_prefix_pool[{index}] must contain a person, an explicit "
-        f"topic, and a canonical head in 3-4 words: {value!r}"
+        f"tag_prefix_pool[{index}] must not store a person + canonical-head "
+        f"fallback prefix: {value!r}"
       )
     if not words[0][0].isupper():
       return False, (
@@ -178,8 +180,6 @@ def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
   facet_words = facet.split()
   if not prefix or not facet:
     return False, "tag prefix and facet must both be non-empty"
-  if not 2 <= len(prefix_words) <= 4:
-    return False, "tag prefix must contain 2-4 words"
   if not prefix_words[0][0].isupper():
     return False, "tag prefix must start with a capitalized person/entity"
   if prefix_words[-1].casefold() not in TAG_PREFIX_HEADS:

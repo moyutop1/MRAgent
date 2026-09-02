@@ -417,93 +417,38 @@ class EAESMixin:
         return plan
 
     @staticmethod
-    def _normalize_eaes_retrieval_phrases(values, expected_count=4):
+    def _validate_eaes_retrieval_phrases(values, expected_count=4):
         if not isinstance(values, list):
-            return None
+            return None, "retrieval_phrases must be an array"
         phrases = []
-        for value in values:
+        for index, value in enumerate(values):
             if len(phrases) >= expected_count:
                 break
             if not isinstance(value, str):
-                continue
+                return None, f"retrieval_phrases[{index}] must be a string"
             phrase = re.sub(r"\s+", " ", value).strip()
             if not phrase:
-                continue
-            valid, _ = check_composite_tag(phrase)
+                return None, f"retrieval_phrases[{index}] must be non-empty"
+            valid, error = check_composite_tag(phrase)
             if not valid:
-                return None
+                return None, f"retrieval_phrases[{index}] {error}: {value!r}"
             phrases.append(phrase)
         if len(phrases) < expected_count:
-            return None
-        return phrases[:expected_count]
+            return None, (
+                f"retrieval_phrases must contain at least {expected_count} "
+                f"valid phrases; got {len(phrases)}"
+            )
+        return phrases[:expected_count], ""
 
     @staticmethod
-    def _eaes_question_phrase_fallback(question):
-        words = re.findall(
-            r"[^\W_]+(?:[-'][^\W_]+)*",
-            str(question or ""),
-            flags=re.UNICODE,
+    def _normalize_eaes_retrieval_phrases(values, expected_count=4):
+        phrases, _ = EAESMixin._validate_eaes_retrieval_phrases(
+            values, expected_count=expected_count
         )
-        stopwords = {
-            "a", "an", "and", "are", "at", "be", "been", "being",
-            "can", "could", "did", "do", "does", "for", "from",
-            "had", "has", "have", "how", "in", "is", "of", "on",
-            "or", "the", "to", "was", "were", "what", "when",
-            "where", "which", "who", "why", "will", "with", "would",
-        }
-        entity = None
-        for word in words:
-            candidate = re.sub(r"['’]s$", "", word)
-            if (
-                candidate
-                and candidate[0].isupper()
-                and candidate.casefold() not in stopwords
-            ):
-                entity = candidate
-                break
-        if not entity:
-            entity = "Memory"
-
-        lowered_question = str(question or "").casefold()
-        if re.search(
-                r"\b(?:plan|plans|planned|planning|intend|intends|goal|goals|"
-                r"hope|hopes|future)\b",
-                lowered_question):
-            head = "plan"
-        elif re.search(
-                r"\b(?:own|owns|owned|possession|possessions|gift|gifts|"
-                r"receive|received|buy|bought|purchase|purchased|belong)\b",
-                lowered_question):
-            head = "possession"
-        elif re.search(
-                r"\b(?:relationship|relationships|friend|friends|friendship|"
-                r"family|parent|parents|mother|father|sibling|siblings|"
-                r"partner|spouse|mentor|mentee)\b",
-                lowered_question):
-            head = "relationship"
-        elif re.search(
-                r"\b(?:profile|trait|traits|personality|career|job|work|"
-                r"occupation|preference|preferences|prefer|prefers|like|likes|"
-                r"skill|skills|ability|abilities|age|person|characteristic|"
-                r"characteristics)\b",
-                lowered_question):
-            head = "profile"
-        else:
-            head = "activity"
-
-        content_words = [
-            re.sub(r"['’]s$", "", word)
-            for word in words
-            if word.lower() not in stopwords
-            and re.sub(r"['’]s$", "", word).casefold()
-            != entity.casefold()
-        ]
-        selected = (content_words or words)[-3:]
-        facet = " ".join(selected) or "memory"
-        return f"{entity} {head}.{facet}"
+        return phrases
 
     def _regenerate_eaes_retrieval_phrases(
-            self, query_question, invalid_phrases
+            self, query_question, invalid_phrases, validation_error
     ):
         return self.llm.chat_text(
             messages=[
@@ -516,6 +461,7 @@ class EAESMixin:
                     "content": json.dumps({
                         "question": query_question,
                         "previous_invalid_output": invalid_phrases,
+                        "validation_error": validation_error,
                     }, ensure_ascii=False),
                 },
             ],
@@ -606,29 +552,33 @@ class EAESMixin:
                 parsed_plan["required_semantic_properties"] = []
 
         phrase_count = getattr(config, "EAES_PHRASE_COUNT", 4)
-        phrases = self._normalize_eaes_retrieval_phrases(
-            parsed_plan.get("retrieval_phrases"),
+        raw_retrieval_phrases = (
+            query_out.get("retrieval_phrases")
+            if isinstance(query_out, dict)
+            else parsed_plan.get("retrieval_phrases")
+        )
+        phrases, phrase_error = self._validate_eaes_retrieval_phrases(
+            raw_retrieval_phrases,
             expected_count=phrase_count,
         )
         phrase_source = "initial"
         if phrases is None:
             repair_out = self._regenerate_eaes_retrieval_phrases(
                 query_question,
-                query_out.get("retrieval_phrases")
-                if isinstance(query_out, dict) else None,
+                raw_retrieval_phrases,
+                phrase_error,
             )
-            phrases = self._normalize_eaes_retrieval_phrases(
+            phrases, phrase_error = self._validate_eaes_retrieval_phrases(
                 repair_out.get("retrieval_phrases")
                 if isinstance(repair_out, dict) else None,
                 expected_count=phrase_count,
             )
             phrase_source = "regenerated"
         if phrases is None:
-            fallback_phrase = self._eaes_question_phrase_fallback(
-                query_question
+            raise ValueError(
+                "EAES retrieval phrase generation failed after exactly one "
+                f"repair attempt: {phrase_error}"
             )
-            phrases = [fallback_phrase] * phrase_count
-            phrase_source = "question_fallback"
         parsed_plan["retrieval_phrases"] = phrases
         parsed_plan["retrieval_phrase_source"] = phrase_source
         return parsed_plan

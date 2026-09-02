@@ -74,6 +74,36 @@ def normalize_sentence_ids(rewrite_out):
         sentence["id"] = f"{primary}-{cnt[primary]}"
 
 
+def finalize_child_memory_ids(memories, turns):
+    """Assign session-global IDs from each node's earliest supporting turn."""
+    ordered_origins = [
+        getattr(turn, "origin", None)
+        for turn in turns or []
+        if getattr(turn, "origin", None)
+    ]
+    origin_positions = {
+        origin: position for position, origin in enumerate(ordered_origins)
+    }
+    counters = defaultdict(int)
+    for index, memory in enumerate(memories or []):
+        if not isinstance(memory, dict):
+            raise ValueError(f"child memory[{index}] must be an object")
+        ids = list(dict.fromkeys(origin_ids(memory.get("origin"))))
+        if not ids:
+            raise ValueError(f"child memory[{index}] must use at least one origin")
+        unknown = [origin for origin in ids if origin not in origin_positions]
+        if unknown:
+            raise ValueError(
+                f"child memory[{index}] uses unknown origins: {unknown!r}"
+            )
+        ids.sort(key=origin_positions.__getitem__)
+        memory["origin"] = ",".join(ids)
+        primary = ids[0]
+        counters[primary] += 1
+        memory["id"] = f"{primary}-{counters[primary]}"
+    return list(memories or [])
+
+
 def inherit_adjacent_question_origins(rewrite_out, turns):
     """Attach an immediately preceding question to its answer memories."""
     if not isinstance(rewrite_out, dict):
@@ -207,73 +237,6 @@ def normalize_child_tag_cardinality(rewrite_out):
             sentence["tag"] = [clean_tag, f"{prefix}.{candidate}"]
             changed += 1
             break
-    return changed
-
-
-_TAG_PREFIX_HEAD_ALIASES = {
-    "collection": "possession",
-    "collections": "possession",
-    "belonging": "possession",
-    "belongings": "possession",
-    "ownership": "possession",
-    "goal": "plan",
-    "goals": "plan",
-    "intention": "plan",
-    "intentions": "plan",
-    "arrangement": "plan",
-    "arrangements": "plan",
-    "aspiration": "plan",
-    "aspirations": "plan",
-    "identity": "profile",
-    "preference": "profile",
-    "preferences": "profile",
-    "hobby": "profile",
-    "hobbies": "profile",
-    "career": "profile",
-    "occupation": "profile",
-    "trait": "profile",
-    "traits": "profile",
-    "friendship": "relationship",
-    "friendships": "relationship",
-    "partnership": "relationship",
-    "partnerships": "relationship",
-    "marriage": "relationship",
-    "family": "relationship",
-    "bond": "relationship",
-    "bonds": "relationship",
-    "event": "activity",
-    "events": "activity",
-    "experience": "activity",
-    "experiences": "activity",
-    "participation": "activity",
-}
-
-
-def normalize_tag_prefix_pool_heads(values):
-    """Append a canonical head to prefixes ending in a clear head synonym."""
-    if not isinstance(values, list):
-        return 0
-
-    changed = 0
-    for index, value in enumerate(values):
-        if not isinstance(value, str) or "." in value:
-            continue
-        clean_value = re.sub(r"\s+", " ", value).strip()
-        words = clean_value.split()
-        if len(words) < 2:
-            continue
-        alias = re.sub(r"[^a-z]+$", "", words[-1].casefold())
-        canonical_head = _TAG_PREFIX_HEAD_ALIASES.get(alias)
-        if not canonical_head:
-            continue
-
-        normalized_words = words + [canonical_head]
-        while len(normalized_words) > 4:
-            normalized_words[1:3] = ["-".join(normalized_words[1:3])]
-        if len(normalized_words) < 3:
-            continue
-        values[index] = " ".join(normalized_words)
-        changed += 1
     return changed
 
 
@@ -792,7 +755,10 @@ def _extract_session_tag_prefix_pool(llm, parents, logger=None):
         json.dumps(payload, ensure_ascii=False)
     )
     last_error = ""
-    for attempt in range(4):
+    # Prefix generation gets exactly one repair attempt.  Do not silently map
+    # synonyms onto canonical heads: the model must return the requested
+    # prefix vocabulary itself, or the session fails explicitly.
+    for attempt in range(2):
         system_prompt = Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT
         if attempt:
             system_prompt += (
@@ -819,12 +785,6 @@ def _extract_session_tag_prefix_pool(llm, parents, logger=None):
             if isinstance(value, str) else value
             for value in raw_pool
         ]
-        normalized_head_count = normalize_tag_prefix_pool_heads(pool)
-        if normalized_head_count and logger:
-            logger.info(
-                "normalized %d tag-prefix synonym head(s)",
-                normalized_head_count,
-            )
         valid, last_error = json_scheme.check_tag_prefix_pool(pool)
         if valid:
             return pool
@@ -1043,7 +1003,10 @@ def _rewrite_child_window(
     )
     last_error = ""
     last_output = None
-    for attempt in range(4):
+    attempt = 0
+    general_retries_used = 0
+    retrying_prefix_error = False
+    while True:
         system_prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
         request_prompt = user_prompt
         if attempt:
@@ -1122,6 +1085,21 @@ def _rewrite_child_window(
                 "conversation_time"
             )
             return output
+        is_prefix_error = (
+            "tag prefix" in str(last_error).casefold()
+            or "tag_prefix" in str(last_error).casefold()
+        )
+        if retrying_prefix_error:
+            # This output was the single retry for a prefix validation error.
+            # Any remaining validation failure ends the child rewrite.
+            break
+        if is_prefix_error:
+            retrying_prefix_error = True
+        else:
+            if general_retries_used >= 3:
+                break
+            general_retries_used += 1
+        attempt += 1
     if logger:
         logger.error(
             "child window rewrite failed after retries for %s through %s: %s",
@@ -1187,7 +1165,7 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
     # inheritance and adjacent-memory fusion.  ``origin`` retains every real
     # supporting dialogue ID; only ``id`` receives the -1/-2/... collision
     # suffix based on its first origin.
-    normalize_sentence_ids({"sentence": generated_memories})
+    finalize_child_memory_ids(generated_memories, turns)
     rewritten_parents = attach_child_memory_ids_to_parents(
         rewritten_parents, generated_memories
     )

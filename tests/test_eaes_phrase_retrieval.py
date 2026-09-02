@@ -144,7 +144,23 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertEqual(plan["retrieval_phrase_source"], "regenerated")
         self.assertEqual(len(mixin.llm.inputs), 2)
 
-    def test_parse_repairs_only_once_then_uses_question_fallback(self):
+    def test_retrieval_phrase_prefix_has_no_word_limit(self):
+        prefix = (
+            "Caroline local children's literature reading collection possession"
+        )
+        phrases = [
+            f"{prefix}.favorite books",
+            f"{prefix}.book ownership",
+            f"{prefix}.reading collection",
+            f"{prefix}.children's literature",
+        ]
+
+        self.assertEqual(
+            EAESMixin._normalize_eaes_retrieval_phrases(phrases),
+            phrases,
+        )
+
+    def test_parse_repairs_only_once_then_raises_with_validation_error(self):
         question = "What event did Caroline attend?"
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([
@@ -152,27 +168,14 @@ class PhrasePlanTests(unittest.TestCase):
             {"retrieval_phrases": ["one", "two", "three"]},
         ])
 
-        plan = mixin.parse_eaes_query(question)
+        with self.assertRaisesRegex(
+                ValueError, "failed after exactly one repair attempt"):
+            mixin.parse_eaes_query(question)
 
-        self.assertEqual(
-            plan["retrieval_phrases"],
-            ["Caroline activity.event attend"] * 4,
-        )
-        self.assertEqual(plan["retrieval_phrase_source"], "question_fallback")
         self.assertEqual(len(mixin.llm.inputs), 2)
-
-    def test_question_fallback_keeps_entity_head_and_detail(self):
-        self.assertEqual(
-            EAESMixin._eaes_question_phrase_fallback(
-                "How long ago was Caroline's 18th birthday?"
-            ),
-            "Caroline activity.ago 18th birthday",
-        )
-        self.assertEqual(
-            EAESMixin._eaes_question_phrase_fallback(
-                "What pet does Caroline own?"
-            ),
-            "Caroline possession.pet own",
+        self.assertIn(
+            "must contain exactly one '.'",
+            mixin.llm.inputs[1]["user"]["validation_error"],
         )
 
     def test_deprecated_temporal_fields_are_never_kept_in_query_plan(self):
@@ -202,6 +205,7 @@ class PhrasePlanTests(unittest.TestCase):
                 Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT):
             self.assertIn("short concrete noun phrase", prompt)
             self.assertIn("prefix.facet", prompt)
+            self.assertIn("no word-count limit", prompt)
             self.assertIn("no more than three whitespace-separated words", prompt)
             self.assertIn("access wording", prompt)
 
@@ -328,7 +332,10 @@ class PhraseFusionTests(unittest.TestCase):
             "Caroline activity.beta query": np.array([0.0, 1.0]),
         }
 
+        embedding_inputs = []
+
         def fake_embedding(texts):
+            embedding_inputs.append(list(texts))
             return np.vstack([vectors[text] for text in texts])
 
         controller = MemoryController(store)
@@ -355,6 +362,12 @@ class PhraseFusionTests(unittest.TestCase):
         )
         self.assertEqual(rankings[2][0]["memory_id"], "M_1")
         self.assertEqual(rankings[3][0]["memory_id"], "M_2")
+        self.assertEqual(embedding_inputs[0], [
+            "Caroline profile.unrelated",
+            "Caroline profile.alpha",
+            "Caroline activity.other topic",
+            "Caroline activity.beta",
+        ])
 
 
 class PhraseRerankerTests(unittest.TestCase):

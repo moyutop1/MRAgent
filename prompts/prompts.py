@@ -194,8 +194,8 @@ Schema:
 Rules:
 - Read every supplied Parent memory before creating the pool.
 - Return zero to ten unique topic-specific prefixes. Never exceed ten and never invent a topic merely to fill the pool.
-- Every prefix must contain 3-4 whitespace-separated words, start with the explicitly supported person's name, include one or two concrete topic nouns, and end with exactly one canonical head: activity, plan, profile, possession, or relationship.
-- The literal final whitespace-separated word must be one of those five canonical heads. Synonyms such as collection, hobby, goal, friendship, or event are topic words, not valid heads; retain the useful topic before a canonical head, for example "Caroline children's-book collection possession".
+- Every prefix must start with the explicitly supported person's name, contain a concrete topic description, and end with exactly one canonical head: activity, plan, profile, possession, or relationship. There is no prefix word-count limit.
+- The literal final whitespace-separated word must be one of those five canonical heads. Synonyms such as collection, hobby, goal, friendship, or event are topic words, not valid heads; retain the useful topic before a canonical head, for example "Caroline children's book collection possession".
 - Prefer a specific supported prefix such as "Caroline advocacy activity", "Caroline career plan", or "Melanie family relationship".
 - Never put a generic two-word person + head fallback such as "Caroline activity" in this pool. Child tags construct such a fallback locally only when no pool prefix fits their fact.
 - Merge synonymous session topics into one stable wording. Prefer prefixes that can be reused by multiple related facts while retaining a concrete topic.
@@ -381,7 +381,7 @@ Rules:
 - Set retrieval_breadth to "wide" only when the same person's evidence spans a long time or multiple sessions, or the question asks about a broad theme or overall development. Never use wide merely because multiple people are mentioned.
 - Set detail_need to "coarse" for a high-level summary, "exact" for a specific answer-bearing detail, and "mixed" when both levels may be useful.
 - Generate exactly four non-empty retrieval_phrases in exactly the same "prefix.facet" surface style as memory tags, with exactly one period and no spaces around it.
-- The prefix must contain 2-4 whitespace-separated words, begin with the known person/entity from the question, and end with activity, plan, profile, possession, or relationship. Use a topic modifier only when the question explicitly supplies that topic; otherwise use the two-word person + head form without guessing a session topic.
+- The prefix has no word-count limit. It must begin with the known person/entity from the question and end with activity, plan, profile, possession, or relationship. Use topic modifiers only when the question explicitly supplies them; otherwise use the person + head form without guessing a session topic.
 - The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
 - Never output a sentence, question, clause, or question word as a retrieval phrase.
 - Valid phrase forms include "Caroline activity.event attendance", "Caroline profile.career interest", and "Melanie relationship.family support"; do not copy an example unless the question supports it.
@@ -394,8 +394,9 @@ Rules:
     EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT = """You repair an invalid list of retrieval phrases for long-term conversational memory. Only output valid JSON.
 Generate exactly four non-empty retrieval phrases for the supplied question.
 The previous output had the wrong count or contained an invalid phrase.
+Read the supplied validation_error and repair that exact error once.
 Every phrase must use exactly the same "prefix.facet" surface style as a memory tag, with exactly one period and no spaces around it.
-The prefix must contain 2-4 whitespace-separated words, start with the question's known person/entity, and end with activity, plan, profile, possession, or relationship. Use a topic modifier only when the question explicitly supplies it; otherwise use the two-word person + head form.
+The prefix has no word-count limit. It must start with the question's known person/entity and end with activity, plan, profile, possession, or relationship. Use topic modifiers only when the question explicitly supplies them; otherwise use the person + head form.
 The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
 Never output a sentence, question, clause, or question word as a retrieval phrase.
 The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.

@@ -531,7 +531,7 @@ class SemanticHierarchyTests(unittest.TestCase):
         pool = _extract_session_tag_prefix_pool(llm, parents)
 
         self.assertEqual(pool, ["Caroline advocacy activity"])
-        self.assertIn("must not store", llm.calls[1][0]["content"])
+        self.assertIn("must not be stored", llm.calls[1][0]["content"])
         payload = llm.calls[0][1]["content"]
         self.assertIn("Caroline shared her journey.", payload)
         self.assertIn("Caroline joined mentoring.", payload)
@@ -583,17 +583,31 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertIn("no more than 10", error)
 
-    def test_person_head_fallback_is_valid_for_tag_but_never_pool_member(self):
+    def test_local_fallback_has_no_word_limit_and_is_never_added_to_pool(self):
         valid, error = check_tag_prefix_pool(["Caroline activity"])
         self.assertFalse(valid)
-        self.assertIn("must not store", error)
+        self.assertIn("must not be stored", error)
+
+        for tag in (
+            "Caroline activity.school speech",
+            "Caroline caring profile.positive impact",
+            "Caroline community volunteer support activity.positive impact",
+        ):
+            with self.subTest(tag=tag):
+                valid, error = check_composite_tag(
+                    tag,
+                    tag_prefix_pool=["Caroline school advocacy activity"],
+                    enforce_source=True,
+                )
+                self.assertTrue(valid, error)
 
         valid, error = check_composite_tag(
-            "Caroline activity.school speech",
-            tag_prefix_pool=["Caroline school advocacy activity"],
+            "Profile.positive impact",
+            tag_prefix_pool=[],
             enforce_source=True,
         )
-        self.assertTrue(valid, error)
+        self.assertFalse(valid)
+        self.assertIn("person/entity", error)
 
     def test_prefix_prompts_explicitly_remove_prefix_word_limit(self):
         self.assertIn(
@@ -667,7 +681,7 @@ class SemanticHierarchyTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 2)
 
-    def test_child_tags_use_exact_pool_prefix_or_two_word_fallback(self):
+    def test_child_tags_use_exact_pool_prefix_or_local_fallback(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         llm = SequenceLLM([_rewrite_output(_sentence(
@@ -675,7 +689,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             "Caroline delivered a school speech.",
             tag=[
                 "Caroline advocacy activity.school speech",
-                "Caroline advocacy activity.journey sharing",
+                "Caroline caring profile.positive impact",
             ],
         ))])
 
@@ -691,6 +705,11 @@ class SemanticHierarchyTests(unittest.TestCase):
             output["sentence"][0]["tag"][0],
             "Caroline advocacy activity.school speech",
         )
+        self.assertEqual(
+            output["sentence"][0]["tag"][1],
+            "Caroline caring profile.positive impact",
+        )
+        self.assertEqual(len(llm.calls), 1)
         self.assertIn(
             '"Caroline advocacy activity"', llm.calls[0][1]["content"]
         )

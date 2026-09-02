@@ -143,10 +143,11 @@ def check_tag_prefix_pool(values, require_nonempty=False):
       return False, f"tag_prefix_pool[{index}] must be non-empty"
     if "." in prefix:
       return False, f"tag_prefix_pool[{index}] must not contain '.'"
-    if len(words) == 2 and words[-1].casefold() in TAG_PREFIX_HEADS:
+    if len(words) < 3:
       return False, (
-        f"tag_prefix_pool[{index}] must not store a person + canonical-head "
-        f"fallback prefix: {value!r}"
+        f"tag_prefix_pool[{index}] must contain a person/entity, a concrete "
+        f"topic description, and a canonical head; local fallback prefixes "
+        f"must not be stored in the pool: {value!r}"
       )
     if not words[0][0].isupper():
       return False, (
@@ -180,6 +181,8 @@ def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
   facet_words = facet.split()
   if not prefix or not facet:
     return False, "tag prefix and facet must both be non-empty"
+  if len(prefix_words) < 2:
+    return False, "tag prefix must contain a person/entity and canonical head"
   if not prefix_words[0][0].isupper():
     return False, "tag prefix must start with a capitalized person/entity"
   if prefix_words[-1].casefold() not in TAG_PREFIX_HEADS:
@@ -188,19 +191,10 @@ def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
     )
   if len(facet_words) > 3:
     return False, "tag facet must contain no more than three words"
-  if enforce_source:
-    normalized_pool = {
-      _normalized_phrase(value)
-      for value in tag_prefix_pool or []
-      if isinstance(value, str)
-    }
-    in_pool = prefix in normalized_pool
-    is_base_fallback = len(prefix_words) == 2
-    if not in_pool and not is_base_fallback:
-      return False, (
-        "tag prefix must be an exact tag_prefix_pool member or a two-word "
-        "person + canonical-head fallback"
-      )
+  # Pool membership is intentionally advisory here. A miss is a node-local
+  # fallback whose semantic suitability cannot be decided structurally. Both
+  # pool members and fallbacks obey the same general prefix rules above, and
+  # child generation never mutates the session prefix pool.
   return True, ""
 
 

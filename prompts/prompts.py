@@ -197,7 +197,7 @@ Rules:
 - Every prefix must start with the explicitly supported person's name, contain a concrete topic description, and end with exactly one canonical head: activity, plan, profile, possession, or relationship. There is no prefix word-count limit.
 - The literal final whitespace-separated word must be one of those five canonical heads. Synonyms such as collection, hobby, goal, friendship, or event are topic words, not valid heads; retain the useful topic before a canonical head, for example "Caroline children's book collection possession".
 - Prefer a specific supported prefix such as "Caroline advocacy activity", "Caroline career plan", or "Melanie family relationship".
-- Never put a generic two-word person + head fallback such as "Caroline activity" in this pool. Child tags construct such a fallback locally only when no pool prefix fits their fact.
+- Never put a generic person + head fallback such as "Caroline activity" in this pool. Child tags construct a fallback locally only when no pool prefix fits their fact.
 - Merge synonymous session topics into one stable wording. Prefer prefixes that can be reused by multiple related facts while retaining a concrete topic.
 - Do not include a period, facet tag, sentence, explanation, parent id, child id, date, or unsupported person.
 Schema:
@@ -233,7 +233,7 @@ Rules:
 - TAG_PREFIX_POOL is the complete fixed topic-prefix pool for this session. It is reference metadata, not evidence, and must not be copied into the output as a separate field.
 - Output tag as an array of two to four complete strings in the exact form "prefix.facet", with exactly one period and no spaces around it.
 - First inspect every TAG_PREFIX_POOL entry and select the most specific semantically supported prefix for each tag. A selected topic prefix must be copied exactly from the pool.
-- Only when no pool prefix fits the current fact may the tag construct a local two-word fallback in the exact form "Person canonical-head", where canonical-head is activity, plan, profile, possession, or relationship. A fallback is used only in that complete tag and is never added to the pool.
+- Only when no pool prefix fits the current fact may the tag construct a local fallback in the form "Person [optional topic description] canonical-head", where canonical-head is activity, plan, profile, possession, or relationship. The fallback prefix has no word-count limit; for example, "Caroline caring profile" is valid. A fallback is used only in that complete tag and is never added to the pool.
 - Prefer activity for completed or ongoing actions, events, attendance, participation, and experiences; plan for unexecuted intentions or future arrangements; profile for person-centered identity, career, preference, ability, trait, opinion, or state; possession for owned, received, purchased, made, or treasured objects; and relationship for family, friendship, partnership, support, social ties, or group belonging.
 - The facet after the period must be a short concrete noun phrase of at most three whitespace-separated words. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Internally identify the independent facts in each sentence. Its facets must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful retrieval views. For two to four facts, give every fact at least one facet. If a sentence would contain more than four independent facts, split it into additional sentence objects.

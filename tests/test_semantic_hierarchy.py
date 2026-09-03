@@ -42,6 +42,7 @@ from agent.rewrite_memory import (
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
+    fallback_invalid_persistence_to_unknown,
     finalize_child_memory_ids,
     inherit_adjacent_question_origins,
     normalize_child_tag_cardinality,
@@ -513,6 +514,41 @@ class SemanticHierarchyTests(unittest.TestCase):
             ["event_action", "episodic"],
         )
         self.assertEqual(len(llm.calls), 1)
+
+    def test_invalid_persistence_falls_back_to_unknown_after_retries(self):
+        turns = parse_session_turns(_dialogue(1))
+        window = ChildWindow("D1:1", "D1:1")
+        invalid = _rewrite_output(_sentence(
+            "D1:1",
+            "The speaker attended a workshop.",
+            semantic_properties=["event_action"],
+        ))
+        llm = SequenceLLM([invalid, invalid, invalid, invalid])
+
+        output = _rewrite_child_window(
+            llm, window, turns, "2023-05-08"
+        )
+
+        self.assertEqual(len(llm.calls), 4)
+        self.assertEqual(
+            output["sentence"][0]["semantic_properties"],
+            ["event_action", "unknown"],
+        )
+
+    def test_unknown_fallback_replaces_conflicting_persistence_values(self):
+        output = _rewrite_output(_sentence(
+            "D1:1",
+            "The speaker attended a workshop.",
+            semantic_properties=["event_action", "episodic", "durable"],
+        ))
+
+        changed = fallback_invalid_persistence_to_unknown(output)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(
+            output["sentence"][0]["semantic_properties"],
+            ["event_action", "unknown"],
+        )
 
     def test_prefix_pool_retries_generic_prefix_and_reads_all_parents(self):
         parents = [

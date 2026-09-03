@@ -248,6 +248,10 @@ _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
     "relationship": "relation_social",
 }
 
+_PERSISTENCE_SEMANTIC_PROPERTIES = frozenset({
+    "transient", "episodic", "durable", "unknown",
+})
+
 
 def normalize_rewrite_semantic_properties(rewrite_out):
     """Repair canonical tag heads leaked into ``semantic_properties``."""
@@ -280,6 +284,35 @@ def normalize_rewrite_semantic_properties(rewrite_out):
                 continue
             normalized.append(mapped_value)
         sentence["semantic_properties"] = normalized
+    return changed
+
+
+def fallback_invalid_persistence_to_unknown(rewrite_out):
+    """Replace an invalid persistence selection with one neutral fallback."""
+    if not isinstance(rewrite_out, dict):
+        return 0
+    sentences = rewrite_out.get("sentence")
+    if not isinstance(sentences, list):
+        return 0
+
+    changed = 0
+    for sentence in sentences:
+        if not isinstance(sentence, dict):
+            continue
+        properties = sentence.get("semantic_properties")
+        if not isinstance(properties, list):
+            continue
+        persistence_count = sum(
+            value in _PERSISTENCE_SEMANTIC_PROPERTIES
+            for value in properties
+        )
+        if persistence_count == 1:
+            continue
+        sentence["semantic_properties"] = [
+            value for value in properties
+            if value not in _PERSISTENCE_SEMANTIC_PROPERTIES
+        ] + ["unknown"]
+        changed += 1
     return changed
 
 
@@ -1100,6 +1133,36 @@ def _rewrite_child_window(
                 break
             general_retries_used += 1
         attempt += 1
+
+    persistence_error = (
+        ".semantic_properties must contain exactly one persistence property"
+        in str(last_error)
+    )
+    if persistence_error:
+        fallback_count = fallback_invalid_persistence_to_unknown(last_output)
+        if fallback_count:
+            valid, fallback_error = json_scheme.check_child_window_rewrite_json(
+                last_output,
+                window,
+                list(turns),
+                source_text,
+                tag_prefix_pool=tag_prefix_pool or [],
+            )
+            if valid:
+                if logger:
+                    logger.warning(
+                        "used unknown persistence fallback for %d child "
+                        "memory/memories after rewrite retries for %s through %s",
+                        fallback_count,
+                        window.start_origin,
+                        window.end_origin,
+                    )
+                last_output["conversation_time"] = (
+                    conversation_time
+                    or last_output.get("conversation_time")
+                )
+                return last_output
+            last_error = fallback_error
     if logger:
         logger.error(
             "child window rewrite failed after retries for %s through %s: %s",

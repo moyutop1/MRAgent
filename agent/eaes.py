@@ -6,7 +6,6 @@ from datetime import date
 from common import config
 from memory.system import EAESMemoryNote, EAESParentNode
 from prompts.prompts import Prompts
-from prompts.schema import check_composite_tag
 
 logger = logging.getLogger(__name__)
 
@@ -429,9 +428,11 @@ class EAESMixin:
             phrase = re.sub(r"\s+", " ", value).strip()
             if not phrase:
                 return None, f"retrieval_phrases[{index}] must be non-empty"
-            valid, error = check_composite_tag(phrase)
-            if not valid:
-                return None, f"retrieval_phrases[{index}] {error}: {value!r}"
+            if len(phrase.split()) > 3:
+                return None, (
+                    f"retrieval_phrases[{index}] must contain no more than "
+                    f"3 whitespace-separated words: {value!r}"
+                )
             phrases.append(phrase)
         if len(phrases) < expected_count:
             return None, (

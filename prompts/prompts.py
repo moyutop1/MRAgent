@@ -370,7 +370,7 @@ Schema:
   "keywords": ["important lexical constraints"],
   "retrieval_breadth": "single | several | wide",
   "detail_need": "coarse | mixed | exact",
-  "retrieval_phrases": ["prefix.facet 1", "prefix.facet 2", "prefix.facet 3", "prefix.facet 4"]
+  "retrieval_phrases": ["short phrase 1", "short phrase 2", "short phrase 3", "short phrase 4"]
 }
 Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
@@ -380,11 +380,11 @@ Rules:
 - Set retrieval_breadth to "several" for a person's participated events, traits, experiences, preferences, motivations, or a person-level inference requiring multiple facts.
 - Set retrieval_breadth to "wide" only when the same person's evidence spans a long time or multiple sessions, or the question asks about a broad theme or overall development. Never use wide merely because multiple people are mentioned.
 - Set detail_need to "coarse" for a high-level summary, "exact" for a specific answer-bearing detail, and "mixed" when both levels may be useful.
-- Generate exactly four non-empty retrieval_phrases in exactly the same "prefix.facet" surface style as memory tags, with exactly one period and no spaces around it.
-- The prefix has no word-count limit. It must begin with the known person/entity from the question and end with activity, plan, profile, possession, or relationship. Use topic modifiers only when the question explicitly supplies them; otherwise use the person + head form without guessing a session topic.
-- The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
+- Generate exactly four non-empty retrieval_phrases. Each phrase must be a normal short retrieval expression containing no more than three whitespace-separated words.
+- Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
+- Keep a known person/entity, event/object, or asked relation when it is useful for retrieval. Across the four phrases, preserve the important constraints from the question.
 - Never output a sentence, question, clause, or question word as a retrieval phrase.
-- Valid phrase forms include "Caroline activity.event attendance", "Caroline profile.career interest", and "Melanie relationship.family support"; do not copy an example unless the question supports it.
+- Valid phrase forms include "Caroline event attendance", "career interest", and "Melanie family support"; do not copy an example unless the question supports it.
 - The four retrieval phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 - Treat the phrases as four access wordings for the question, not as four required evidence categories. Collectively preserve the known person/entity, event/object, asked relation, and applicable time/place/occasion constraints from the question.
 - Prefer meaningfully different semantic wording over changes that only alter possessives, prepositions, or word order. Do not reduce all four phrases to the overall topic when the question asks for a specific relation such as timing, duration, frequency, origin, creator, reason, result, benefit, or meaning.
@@ -395,16 +395,16 @@ Rules:
 Generate exactly four non-empty retrieval phrases for the supplied question.
 The previous output had the wrong count or contained an invalid phrase.
 Read the supplied validation_error and repair that exact error once.
-Every phrase must use exactly the same "prefix.facet" surface style as a memory tag, with exactly one period and no spaces around it.
-The prefix has no word-count limit. It must start with the question's known person/entity and end with activity, plan, profile, possession, or relationship. Use topic modifiers only when the question explicitly supplies them; otherwise use the person + head form.
-The facet must be a short concrete noun phrase of no more than three whitespace-separated words.
+Every phrase must be a normal short retrieval expression containing no more than three whitespace-separated words.
+Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
+Keep the question's useful known person/entity, event/object, asked relation, or explicit constraint across the four phrases.
 Never output a sentence, question, clause, or question word as a retrieval phrase.
 The phrases may be paraphrases of the same retrieval intent when one kind of evidence is sufficient.
 Treat the phrases as alternative access wordings rather than required evidence categories. Preserve the question's known entity/event/object, asked relation, and explicit constraints, and avoid variants that only change possessives, prepositions, or word order.
 Do not force different evidence aspects. Do not invent entities, facts, times, constraints, implicit subquestions, or answer values. Do not answer the question.
 Schema:
 {
-  "retrieval_phrases": ["prefix.facet 1", "prefix.facet 2", "prefix.facet 3", "prefix.facet 4"]
+  "retrieval_phrases": ["short phrase 1", "short phrase 2", "short phrase 3", "short phrase 4"]
 }"""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """

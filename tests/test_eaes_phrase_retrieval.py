@@ -66,48 +66,40 @@ class PhrasePlanTests(unittest.TestCase):
     def test_normalizer_requires_four_but_does_not_deduplicate(self):
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases([
-                "Caroline activity.a", "Caroline activity.b",
-                "Caroline activity.c",
+                "Caroline event", "event attendance", "joined event",
             ])
         )
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases(
                 [
-                    "Caroline activity.a", "Caroline activity.b",
-                    None, "Caroline activity.d",
+                    "Caroline event", "event attendance",
+                    None, "joined event",
                 ]
             )
         )
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases(
                 [
-                    "Caroline activity.one", "Caroline activity.two",
-                    "Caroline activity.three",
-                    "Caroline activity.four word phrase invalid",
+                    "Caroline event", "event attendance",
+                    "joined event", "four word phrase invalid",
                 ]
             )
-        )
-        self.assertIsNone(
-            EAESMixin._normalize_eaes_retrieval_phrases([
-                "support group", "Caroline topic.unknown head",
-                "Caroline activity.valid", "Caroline activity.valid two",
-            ])
         )
         self.assertEqual(
             EAESMixin._normalize_eaes_retrieval_phrases(
                 [
-                    "Caroline relationship.support group",
-                    "Caroline relationship.support group",
-                    "Caroline profile.career interest",
-                    "Caroline activity.pottery class",
-                    "Caroline activity.ignored phrase",
+                    "Caroline support group",
+                    "Caroline support group",
+                    "career interest",
+                    "pottery class",
+                    "ignored fifth phrase",
                 ]
             ),
             [
-                "Caroline relationship.support group",
-                "Caroline relationship.support group",
-                "Caroline profile.career interest",
-                "Caroline activity.pottery class",
+                "Caroline support group",
+                "Caroline support group",
+                "career interest",
+                "pottery class",
             ],
         )
 
@@ -115,17 +107,17 @@ class PhrasePlanTests(unittest.TestCase):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([
             _query_output([
-                "Caroline relationship.support group",
-                "Caroline profile.career interest",
-                "Caroline activity.pottery class",
-                "Caroline activity.four word phrase invalid",
+                "Caroline support group",
+                "career interest",
+                "pottery class",
+                "four word phrase invalid",
             ]),
             {
                 "retrieval_phrases": [
-                    "Caroline relationship.support group",
-                    "Caroline profile.career interest",
-                    "Caroline activity.pottery class",
-                    "Caroline activity.camping location",
+                    "Caroline support group",
+                    "career interest",
+                    "pottery class",
+                    "camping location",
                 ]
             },
         ])
@@ -135,30 +127,33 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertEqual(
             plan["retrieval_phrases"],
             [
-                "Caroline relationship.support group",
-                "Caroline profile.career interest",
-                "Caroline activity.pottery class",
-                "Caroline activity.camping location",
+                "Caroline support group",
+                "career interest",
+                "pottery class",
+                "camping location",
             ],
         )
         self.assertEqual(plan["retrieval_phrase_source"], "regenerated")
         self.assertEqual(len(mixin.llm.inputs), 2)
 
-    def test_retrieval_phrase_prefix_has_no_word_limit(self):
-        prefix = (
-            "Caroline local children's literature reading collection possession"
-        )
+    def test_plain_retrieval_phrases_have_three_word_limit(self):
         phrases = [
-            f"{prefix}.favorite books",
-            f"{prefix}.book ownership",
-            f"{prefix}.reading collection",
-            f"{prefix}.children's literature",
+            "Caroline favorite books",
+            "book ownership",
+            "reading collection",
+            "children's literature",
         ]
 
         self.assertEqual(
             EAESMixin._normalize_eaes_retrieval_phrases(phrases),
             phrases,
         )
+        self.assertIsNone(EAESMixin._normalize_eaes_retrieval_phrases([
+            "Caroline favorite books",
+            "book ownership",
+            "reading collection",
+            "Caroline children's literature collection",
+        ]))
 
     def test_parse_repairs_only_once_then_raises_with_validation_error(self):
         question = "What event did Caroline attend?"
@@ -174,16 +169,16 @@ class PhrasePlanTests(unittest.TestCase):
 
         self.assertEqual(len(mixin.llm.inputs), 2)
         self.assertIn(
-            "must contain exactly one '.'",
+            "must contain at least 4",
             mixin.llm.inputs[1]["user"]["validation_error"],
         )
 
     def test_deprecated_temporal_fields_are_never_kept_in_query_plan(self):
         output = _query_output([
-            "Caroline relationship.support group",
-            "Caroline profile.career interest",
-            "Caroline activity.pottery class",
-            "Caroline activity.camping location",
+            "Caroline support group",
+            "career interest",
+            "pottery class",
+            "camping location",
         ])
         output.update({
             "temporal_intent": "historical_event",
@@ -199,23 +194,25 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertNotIn("required_lifecycle", plan)
         self.assertNotIn("no_time_limit", plan)
 
-    def test_query_prompts_require_composite_tag_style_phrases(self):
+    def test_query_prompts_require_plain_three_word_phrases(self):
         for prompt in (
                 Prompts.EAES_QUERY_SYSTEM_PROMPT,
                 Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT):
-            self.assertIn("short concrete noun phrase", prompt)
-            self.assertIn("prefix.facet", prompt)
-            self.assertIn("no word-count limit", prompt)
+            self.assertIn("normal short retrieval expression", prompt)
+            self.assertIn(
+                'do not use the child-memory "prefix.facet" format',
+                prompt,
+            )
             self.assertIn("no more than three whitespace-separated words", prompt)
             self.assertIn("access wording", prompt)
 
     def test_breadth_and_detail_labels_are_normalized_for_routing_only(self):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([_query_output([
-            "Caroline relationship.support group",
-            "Caroline profile.career interest",
-            "Caroline activity.pottery class",
-            "Caroline activity.camping location",
+            "Caroline support group",
+            "career interest",
+            "pottery class",
+            "camping location",
         ])])
 
         plan = mixin.parse_eaes_query("What events did Caroline join?")

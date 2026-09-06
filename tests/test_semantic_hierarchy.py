@@ -409,7 +409,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             "The family admired a lake sunrise last year.",
             tag=[
                 "Caroline activity.lake sunrise",
-                "Caroline activity.lake sunrise last year",
+                "Caroline activity.lake sunrise during last summer holiday",
             ],
         ))
         valid = _rewrite_output(_sentence(
@@ -417,7 +417,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             "The family admired a lake sunrise last year.",
             tag=[
                 "Caroline activity.lake sunrise",
-                "Caroline activity.lake sunrise last-year",
+                "Caroline activity.lake sunrise during last-summer holiday",
             ],
         ))
         llm = SequenceLLM([invalid, valid])
@@ -430,12 +430,12 @@ class SemanticHierarchyTests(unittest.TestCase):
             output["sentence"][0]["tag"],
             [
                 "Caroline activity.lake sunrise",
-                "Caroline activity.lake sunrise last-year",
+                "Caroline activity.lake sunrise during last-summer holiday",
             ],
         )
         self.assertEqual(len(llm.calls), 2)
         self.assertIn(
-            "tag facet must contain no more than three words",
+            "tag facet must contain no more than five words",
             llm.calls[1][0]["content"],
         )
 
@@ -628,9 +628,11 @@ class SemanticHierarchyTests(unittest.TestCase):
         )
         self.assertFalse(valid)
         self.assertIn("explicit person name", error)
-        valid, error = check_tag_facet("one two three four")
+        valid, error = check_tag_facet("one two three four five")
+        self.assertTrue(valid, error)
+        valid, error = check_tag_facet("one two three four five six")
         self.assertFalse(valid)
-        self.assertIn("three words", error)
+        self.assertIn("five words", error)
 
     def test_child_prompt_generates_each_prefix_without_a_pool(self):
         self.assertIn(

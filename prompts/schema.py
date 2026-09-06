@@ -148,8 +148,8 @@ def check_tag_facet(facet):
     return False, "tag facet must be non-empty"
   if "." in clean_facet:
     return False, "tag facet must not contain '.'"
-  if len(clean_facet.split()) > 3:
-    return False, "tag facet must contain no more than three words"
+  if len(clean_facet.split()) > 5:
+    return False, "tag facet must contain no more than five words"
   return True, ""
 
 
@@ -240,10 +240,10 @@ def check_rewrite_json(
         tag_ok, tag_error = check_composite_tag(clean_tag)
         if not tag_ok:
           return False, f"sentence[{i}].tag[{tag_index}] {tag_error}: {tag!r}"
-      elif len(clean_tag.split()) > 3:
+      elif len(clean_tag.split()) > 5:
         return False, (
           f"sentence[{i}].tag[{tag_index}] must contain no more than "
-          f"three words: {tag!r}"
+          f"five words: {tag!r}"
         )
       normalized_tags.append(clean_tag.casefold())
     if len(normalized_tags) != len(set(normalized_tags)):

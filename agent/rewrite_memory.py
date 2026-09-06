@@ -142,7 +142,7 @@ def inherit_adjacent_question_origins(rewrite_out, turns):
     return changed
 
 
-def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
+def normalize_rewrite_tag_lengths(rewrite_out, max_words=5):
     """Fold only an overlong tag/facet suffix into one compound token."""
     if not isinstance(rewrite_out, dict) or max_words < 1:
         return 0

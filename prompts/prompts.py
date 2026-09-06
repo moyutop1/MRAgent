@@ -23,8 +23,8 @@ TASK:
 - PREVIOUS_DIALOGUE_CONTEXT contains the tail of the preceding raw-dialogue window. Use it to resolve cross-window questions and answers, ellipsis, pronouns, entities, and qualifiers such as time and place.
 - Create a memory only when CURRENT_DIALOGUE_WINDOW adds answer-bearing information. Never create a memory supported only by PREVIOUS_DIALOGUE_CONTEXT.
 - Use "origin" as a comma-separated list of every source dia_id that contributes information to the memory, from either dialogue section. A cross-window question carrying a time/place/entity constraint and its answer must both be included, e.g. "D1:40,D1:41". Do not invent source ids.
-- Output "tag" as an array of two to four short concrete noun phrases, each with no more than three words.
-- Count tag words by whitespace and verify every tag before returning. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
+- Output "tag" as an array of two to four short concrete noun phrases, each with no more than five words.
+- Count tag words by whitespace and verify every tag before returning. If a useful compound or qualifier would exceed five words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Before writing tags, internally identify every independent fact in the memory. The tags must collectively cover all independent facts rather than only the overall topic.
 - If the memory contains one independent fact, use two to four meaningfully different synonymous tags for that same fact. If it contains two to four independent facts, give every fact at least one tag and use any remaining slots for useful synonymous wording.
 - If more than four independent facts would be needed, split the content into additional sentence objects instead of omitting a fact or exceeding four tags.
@@ -208,7 +208,7 @@ Rules:
 - Never use generic placeholders such as Person, Speaker, User, Assistant, Entity, or Someone as the person name.
 - Do not include a period in either prefix or facet. Code joins each valid pair into the final stored string "prefix.facet".
 - Prefer activity for completed or ongoing actions, events, attendance, participation, and experiences; plan for unexecuted intentions or future arrangements; profile for person-centered identity, career, preference, ability, trait, opinion, or state; possession for owned, received, purchased, made, or treasured objects; and relationship for family, friendship, partnership, support, social ties, or group belonging.
-- Every facet must be a short concrete noun phrase of at most three whitespace-separated words. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
+- Every facet must be a short concrete noun phrase of at most five whitespace-separated words. If a useful compound or qualifier would exceed five words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Internally identify the independent facts in each sentence. Its facets must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful retrieval views. For two to four facts, give every fact at least one facet. If a sentence would contain more than four independent facts, split it into additional sentence objects.
 - Preserve distinctive events, objects, relations, and applicable time/place/occasion qualifiers in the facets. Never use generic facets such as Event, Fact, Question, Conversation, or Detail.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.

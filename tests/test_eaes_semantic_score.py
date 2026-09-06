@@ -86,7 +86,7 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
             "Personal Profile",
             ["only one"],
             ["one", "two", "three", "four", "five"],
-            ["valid tag", "four word tag is invalid"],
+            ["valid tag", "six word tag is definitely invalid"],
             ["Personal Profile", " personal   profile "],
         ]
         for tags in invalid_tags:

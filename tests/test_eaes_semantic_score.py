@@ -123,8 +123,7 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
         ok, error = check_rewrite_json(
             payload, self.dialogue, require_composite_tags=True
         )
-        self.assertFalse(ok)
-        self.assertIn("tag prefix must end", error)
+        self.assertTrue(ok, error)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_legacy_labels_duplicates_and_invalid_axis_counts_are_rejected(self):

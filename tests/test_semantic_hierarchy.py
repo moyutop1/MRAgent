@@ -606,7 +606,7 @@ class SemanticHierarchyTests(unittest.TestCase):
         )
         self.assertTrue(valid_tag, tag_error)
 
-    def test_composite_tag_reuses_prefix_and_facet_validators(self):
+    def test_composite_tag_keeps_person_checks_without_prefix_vocabulary(self):
         for tag in (
             "Caroline activity.school speech",
             "Caroline caring profile.positive impact",
@@ -616,9 +616,13 @@ class SemanticHierarchyTests(unittest.TestCase):
                 valid, error = check_composite_tag(tag)
                 self.assertTrue(valid, error)
 
+        valid, error = check_composite_tag(
+            "Caroline career identity.counselor career"
+        )
+        self.assertTrue(valid, error)
         valid, error = check_composite_tag("Profile.positive impact")
         self.assertFalse(valid)
-        self.assertIn("person", error)
+        self.assertIn("person name and description", error)
         valid, error = check_composite_tag(
             "Speaker activity.positive impact"
         )
@@ -637,7 +641,7 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertNotIn("TAG_PREFIX_POOL", prompt)
         self.assertNotIn("tag_prefix_pool", prompt)
 
-    def test_invalid_generated_prefix_gets_one_repair_attempt(self):
+    def test_noncanonical_generated_prefix_is_accepted_without_repair(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         invalid = _rewrite_output(_sentence(
@@ -648,46 +652,38 @@ class SemanticHierarchyTests(unittest.TestCase):
                 "Caroline collection.book ownership",
             ],
         ))
-        valid = _rewrite_output(_sentence(
-            "D1:1",
-            "Caroline owns a collection of books.",
-            tag=[
-                "Caroline possession.children's books",
-                "Caroline possession.book ownership",
-            ],
-        ))
-        llm = SequenceLLM([invalid, valid])
+        llm = SequenceLLM([invalid])
 
         output = _rewrite_child_window(
             llm, window, turns, "2023-05-08"
         )
 
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(len(llm.calls), 1)
         self.assertEqual(output["sentence"][0]["tag"], [
-            "Caroline possession.children's books",
-            "Caroline possession.book ownership",
+            "Caroline collection.children's books",
+            "Caroline collection.book ownership",
         ])
-        self.assertIn("tag prefix must end", llm.calls[1][0]["content"])
-        self.assertIn(
-            "PREVIOUS_INVALID_WINDOW_REWRITE",
-            llm.calls[1][1]["content"],
-        )
-        self.assertIn("Caroline collection", llm.calls[1][1]["content"])
 
-    def test_invalid_child_prefix_raises_after_one_failed_repair(self):
+    def test_prefix_period_still_raises_after_one_failed_repair(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         invalid = _rewrite_output(_sentence(
             "D1:1",
             "Caroline owns a collection of books.",
-            tag=[
-                "Caroline collection.children's books",
-                "Caroline collection.book ownership",
-            ],
         ))
+        invalid["sentence"][0]["tag"] = [
+            {
+                "prefix": "Caroline.collection",
+                "facet": "children's books",
+            },
+            {
+                "prefix": "Caroline.collection",
+                "facet": "book ownership",
+            },
+        ]
         llm = SequenceLLM([invalid, invalid])
 
-        with self.assertRaisesRegex(ValueError, "tag prefix must end"):
+        with self.assertRaisesRegex(ValueError, "must not contain '\\.'"):
             _rewrite_child_window(llm, window, turns, "2023-05-08")
 
         self.assertEqual(len(llm.calls), 2)

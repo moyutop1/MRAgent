@@ -107,9 +107,6 @@ from typing import List, Dict, Any, Tuple, Set
 ID_RE = re.compile(r'^D\d+:\d+-\d+$')
 ORIGIN_RE = re.compile(r'^D\d+:\d+(,\s*D\d+:\d+)*$')
 DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
-TAG_PREFIX_HEADS = frozenset({
-  "activity", "plan", "profile", "possession", "relationship"
-})
 TAG_PREFIX_PERSON_PLACEHOLDERS = frozenset({
   "assistant", "entity", "person", "someone", "speaker", "user"
 })
@@ -120,7 +117,11 @@ def _normalized_phrase(value):
 
 
 def check_generated_tag_prefix(prefix):
-  """Validate a model-generated child-tag prefix."""
+  """Validate a child-tag prefix without enforcing its final vocabulary.
+
+  The canonical final word remains prompt guidance, but model deviations from
+  that vocabulary do not invalidate an otherwise well-formed prefix.
+  """
   if not isinstance(prefix, str):
     return False, "tag prefix must be a string"
   clean_prefix = _normalized_phrase(prefix)
@@ -130,15 +131,11 @@ def check_generated_tag_prefix(prefix):
     return False, "tag prefix must not contain '.'"
   words = clean_prefix.split()
   if len(words) < 2:
-    return False, "tag prefix must contain a person and canonical head"
+    return False, "tag prefix must contain a person name and description"
   if not words[0][0].isupper():
     return False, "tag prefix must start with a capitalized person name"
   if words[0].casefold() in TAG_PREFIX_PERSON_PLACEHOLDERS:
     return False, "tag prefix must start with an explicit person name"
-  if words[-1].casefold() not in TAG_PREFIX_HEADS:
-    return False, (
-      f"tag prefix must end with one of {sorted(TAG_PREFIX_HEADS)!r}"
-    )
   return True, ""
 
 

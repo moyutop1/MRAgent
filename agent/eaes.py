@@ -1374,7 +1374,7 @@ class EAESMixin:
     def _retrieve_eaes_first_pass(self, question, question_emb=None):
         """Shared dynamic first pass for normal answering and retrieval-only."""
         query_plan = self.parse_eaes_query(question, question_emb)
-        global_children, phrase_retrieval = (
+        prefilter_children, phrase_retrieval = (
             self.memory_controller.retrieve_eaes_phrase_candidates(
                 query_plan["retrieval_phrases"],
                 include_diagnostics=True,
@@ -1393,61 +1393,49 @@ class EAESMixin:
             "selected_parent_k": 0,
             "parent_candidates": [],
         }
-        local_children = []
-        local_retrieval = {"per_parent_k": 0, "parents": []}
         if getattr(config, "SEMANTIC_HIERARCHY", False):
             selected_parents, routing = (
                 self.memory_controller.route_eaes_parent_candidates(
-                    query_plan, global_children, question_emb
+                    query_plan, prefilter_children, question_emb
                 )
             )
-            local_children, local_retrieval = (
-                self.memory_controller.retrieve_eaes_parent_local_children(
-                    query_plan["retrieval_phrases"],
-                    selected_parents,
-                    query_plan.get("detail_value", 0.5),
-                )
-            )
-        prefilter_children, merge_retrieval = (
-            self.memory_controller.merge_eaes_hierarchical_candidates(
-                global_children,
-                local_children,
-                selected_parents,
-                limit=getattr(config, "EAES_PHRASE_UNION_LIMIT", 60),
-            )
-        )
+        initial_limit = getattr(config, "EAES_PHRASE_UNION_LIMIT", 60)
+        initial_children = prefilter_children[:initial_limit]
+        initial_retrieval = {
+            "prefilter_candidate_ids": [
+                item.get("memory_id") for item in prefilter_children
+            ],
+            "initial_candidate_ids": [
+                item.get("memory_id") for item in initial_children
+            ],
+            "dropped_by_pool_limit_ids": [
+                item.get("memory_id")
+                for item in prefilter_children[initial_limit:]
+            ],
+        }
         final_children = self.rerank_eaes_phrase_candidates(
             question,
-            prefilter_children,
+            initial_children,
             top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
-        ) if prefilter_children else []
+        ) if initial_children else []
         return {
             "query_plan": query_plan,
-            "global_children": global_children,
-            "local_children": local_children,
             "prefilter_children": prefilter_children,
+            "initial_children": initial_children,
             "final_children": final_children,
             "selected_parents": selected_parents,
             "routing": routing,
             "phrase_retrieval": phrase_retrieval,
-            "local_retrieval": local_retrieval,
-            "merge_retrieval": merge_retrieval,
+            "initial_retrieval": initial_retrieval,
             "counts": {
                 "phrase_selected_k": [
                     item.get("selected_k")
                     for item in phrase_retrieval.get("phrases", [])
                 ],
-                "global_pool_k": len(global_children),
-                "local_candidate_k": len(local_children),
-                "local_unique_added_k": len(
-                    merge_retrieval.get("local_added_ids", [])
-                ),
-                "global_plus_local_k": len(
-                    merge_retrieval.get("global_plus_local_ids", [])
-                ),
-                "prefilter_k": len(prefilter_children),
+                "prefilter_child_k": len(prefilter_children),
+                "initial_child_k": len(initial_children),
                 "dropped_by_pool_limit_k": len(
-                    merge_retrieval.get("dropped_by_pool_limit_ids", [])
+                    initial_retrieval.get("dropped_by_pool_limit_ids", [])
                 ),
                 "final_child_k": len(final_children),
                 "final_parent_k": len(selected_parents),

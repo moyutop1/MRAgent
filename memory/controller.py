@@ -346,7 +346,7 @@ class MemoryController:
             item["prefilter_rank"] = rank
 
         diagnostics = {
-            "global_candidate_ids": [item.get("memory_id") for item in fused],
+            "prefilter_candidate_ids": [item.get("memory_id") for item in fused],
         }
         return fused, diagnostics
 
@@ -471,7 +471,7 @@ class MemoryController:
         candidates = self._rescore_eaes_global_phrase_pool(
             candidates, retrieval_phrases
         )
-        diagnostics["global_candidate_ids"] = [
+        diagnostics["prefilter_candidate_ids"] = [
             candidate.get("memory_id") for candidate in candidates
         ]
         diagnostics["phrases"] = phrase_diagnostics
@@ -706,7 +706,7 @@ class MemoryController:
         return scored
 
     def route_eaes_parent_candidates(
-            self, query_plan, global_children, question_emb=None,
+            self, query_plan, prefilter_children, question_emb=None,
     ):
         """Combine parent similarity and direct child support, then select 0-6."""
         parents = self.score_eaes_parent_candidates(query_plan, question_emb)
@@ -734,7 +734,7 @@ class MemoryController:
         }
         child_support = np.zeros(len(parents), dtype=np.float64)
         child_mass = np.zeros(len(parents), dtype=np.float64)
-        for child in global_children or []:
+        for child in prefilter_children or []:
             index = parent_index.get(child.get("parent_id"))
             if index is None:
                 continue
@@ -816,152 +816,6 @@ class MemoryController:
             "selected_parent_mass": selected_mass,
             "selected_parent_k": len(selected),
             "parent_candidates": rows,
-        }
-
-    def retrieve_eaes_parent_local_children(
-            self, retrieval_phrases, selected_parents, detail_value,
-    ):
-        """Add a small tag-only child scan inside every selected parent."""
-        if not selected_parents or not retrieval_phrases:
-            return [], {"per_parent_k": 0, "parents": []}
-        self._prepare_eaes_tag_embeddings()
-        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
-        local_k = 2 + int(round(2 * min(1.0, max(0.0, float(detail_value)))))
-        local_candidates = []
-        diagnostics = []
-        seen = set()
-        for selected_parent in selected_parents:
-            parent_id = selected_parent.get("parent_id")
-            notes = sorted(
-                (
-                    note for note in self.memory.eaes_notes.values()
-                    if note.parent_id == parent_id
-                ),
-                key=lambda note: note.memory_id,
-            )
-            scored = []
-            for note in notes:
-                tags, tag_vectors = self._eaes_tag_embedding_cache[
-                    note.memory_id
-                ]
-                similarities = np.dot(phrase_vectors, tag_vectors.T)
-                best_flat_index = int(np.argmax(similarities))
-                _, best_tag_index = np.unravel_index(
-                    best_flat_index, similarities.shape
-                )
-                scored.append((
-                    float(np.max(similarities)),
-                    note,
-                    tags[int(best_tag_index)],
-                ))
-            scored.sort(key=lambda item: (-item[0], item[1].memory_id))
-            parent_ids = []
-            for similarity, note, matched_tag in scored[:local_k]:
-                parent_ids.append(note.memory_id)
-                if note.memory_id in seen:
-                    continue
-                seen.add(note.memory_id)
-                local_candidates.append({
-                    **note.to_dict(include_raw=False),
-                    "tag": self._eaes_child_tags(note),
-                    "matched_tag": matched_tag,
-                    "max_phrase_similarity": similarity,
-                    "rrf_score": 0.0,
-                    "candidate_sources": ["parent_local"],
-                })
-            diagnostics.append({
-                "parent_id": parent_id,
-                "selected_memory_ids": parent_ids,
-            })
-        return local_candidates, {"per_parent_k": local_k, "parents": diagnostics}
-
-    @staticmethod
-    def merge_eaes_hierarchical_candidates(
-            global_candidates, local_candidates, selected_parents, limit=None,
-    ):
-        """Union global/local children, rescore once, and cap the reranker pool."""
-        limit = limit or config.EAES_PHRASE_UNION_LIMIT
-        merged = {}
-        global_ids = []
-        for candidate in global_candidates or []:
-            item = dict(candidate)
-            memory_id = item.get("memory_id")
-            if not memory_id:
-                continue
-            global_ids.append(memory_id)
-            item["candidate_sources"] = list(dict.fromkeys(
-                item.get("candidate_sources") or ["global_phrase"]
-            ))
-            merged[memory_id] = item
-        local_ids = []
-        local_added_ids = []
-        for candidate in local_candidates or []:
-            memory_id = candidate.get("memory_id")
-            if not memory_id:
-                continue
-            local_ids.append(memory_id)
-            if memory_id in merged:
-                item = merged[memory_id]
-                item["candidate_sources"] = list(dict.fromkeys(
-                    list(item.get("candidate_sources") or []) + ["parent_local"]
-                ))
-                item["max_phrase_similarity"] = max(
-                    float(item.get("max_phrase_similarity") or 0.0),
-                    float(candidate.get("max_phrase_similarity") or 0.0),
-                )
-            else:
-                item = dict(candidate)
-                item["rrf_score"] = 0.0
-                item["candidate_sources"] = ["parent_local"]
-                merged[memory_id] = item
-                local_added_ids.append(memory_id)
-
-        items = list(merged.values())
-        similarities = np.asarray([
-            float(item.get("max_phrase_similarity") or 0.0) for item in items
-        ], dtype=np.float64)
-        rrf_scores = np.asarray([
-            float(item.get("rrf_score") or 0.0) for item in items
-        ], dtype=np.float64)
-
-        def minmax(values):
-            if len(values) == 0:
-                return values
-            low, high = float(np.min(values)), float(np.max(values))
-            if high - low <= 1e-12:
-                return np.ones_like(values) if high > 0 else np.zeros_like(values)
-            return (values - low) / (high - low)
-
-        parent_scores = {
-            item.get("parent_id"): float(item.get("posterior_score") or 0.0)
-            for item in selected_parents or []
-        }
-        for item, sim_norm, rrf_norm in zip(
-                items, minmax(similarities), minmax(rrf_scores)):
-            base_score = 0.75 * float(sim_norm) + 0.25 * float(rrf_norm)
-            parent_boost = 0.1 * parent_scores.get(item.get("parent_id"), 0.0)
-            candidate_score = base_score + parent_boost
-            item["base_score"] = base_score
-            item["parent_boost"] = parent_boost
-            item["candidate_score"] = candidate_score
-            item["_candidate_score"] = candidate_score
-        items.sort(key=lambda item: (
-            -float(item.get("candidate_score") or 0.0),
-            -float(item.get("max_phrase_similarity") or 0.0),
-            str(item.get("memory_id") or ""),
-        ))
-        prefilter = items[:limit]
-        for rank, item in enumerate(prefilter, start=1):
-            item["prefilter_rank"] = rank
-        return prefilter, {
-            "global_candidate_ids": global_ids,
-            "local_candidate_ids": local_ids,
-            "local_added_ids": local_added_ids,
-            "global_plus_local_ids": [item.get("memory_id") for item in items],
-            "prefilter_candidate_ids": [item.get("memory_id") for item in prefilter],
-            "dropped_by_pool_limit_ids": [
-                item.get("memory_id") for item in items[limit:]
-            ],
         }
 
     def retrieve_eaes_parent_candidates(

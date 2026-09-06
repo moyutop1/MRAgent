@@ -221,9 +221,8 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             f.write(json.dumps(row, ensure_ascii=False, default=list) + "\n")
 
     count_fields = {
-        "global_child": "global_pool_k",
-        "global_plus_local": "global_plus_local_k",
-        "prefilter_child": "prefilter_k",
+        "prefilter_child": "prefilter_child_k",
+        "initial_child": "initial_child_k",
         "final_child": "final_child_k",
         "selected_parent": "final_parent_k",
         "final_combined": "final_total_k",

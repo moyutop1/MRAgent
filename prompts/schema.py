@@ -67,15 +67,6 @@ SCHEMA = {
     "personal_sentences": {
       "type": "array",
 
-    },
-    "tag_prefix_pool": {
-      "type": "array",
-      "maxItems": 10,
-      "uniqueItems": True,
-      "items": {
-        "type": "string",
-        "minLength": 1
-      }
     }
   }
 }
@@ -119,53 +110,53 @@ DIA_EXTRACT_RE = re.compile(r'dia_id\s*:\s*(D\d+:\d+)', re.IGNORECASE)
 TAG_PREFIX_HEADS = frozenset({
   "activity", "plan", "profile", "possession", "relationship"
 })
+TAG_PREFIX_PERSON_PLACEHOLDERS = frozenset({
+  "assistant", "entity", "person", "someone", "speaker", "user"
+})
 
 
 def _normalized_phrase(value):
   return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def check_tag_prefix_pool(values, require_nonempty=False):
-  """Validate a session's topic-specific, Parent-induced prefix pool."""
-  if not isinstance(values, list):
-    return False, "tag_prefix_pool must be an array"
-  if require_nonempty and not values:
-    return False, "tag_prefix_pool must contain at least one topic prefix"
-  if len(values) > 10:
-    return False, "tag_prefix_pool must contain no more than 10 prefixes"
-  normalized = []
-  for index, value in enumerate(values):
-    if not isinstance(value, str):
-      return False, f"tag_prefix_pool[{index}] must be a string"
-    prefix = _normalized_phrase(value)
-    words = prefix.split()
-    if not prefix:
-      return False, f"tag_prefix_pool[{index}] must be non-empty"
-    if "." in prefix:
-      return False, f"tag_prefix_pool[{index}] must not contain '.'"
-    if len(words) < 3:
-      return False, (
-        f"tag_prefix_pool[{index}] must contain a person/entity, a concrete "
-        f"topic description, and a canonical head; local fallback prefixes "
-        f"must not be stored in the pool: {value!r}"
-      )
-    if not words[0][0].isupper():
-      return False, (
-        f"tag_prefix_pool[{index}] must start with an explicit capitalized "
-        f"person/entity: {value!r}"
-      )
-    if words[-1].casefold() not in TAG_PREFIX_HEADS:
-      return False, (
-        f"tag_prefix_pool[{index}] must end with one of "
-        f"{sorted(TAG_PREFIX_HEADS)!r}: {value!r}"
-      )
-    normalized.append(prefix.casefold())
-  if len(normalized) != len(set(normalized)):
-    return False, "tag_prefix_pool values must be unique after normalization"
+def check_generated_tag_prefix(prefix):
+  """Validate a model-generated child-tag prefix."""
+  if not isinstance(prefix, str):
+    return False, "tag prefix must be a string"
+  clean_prefix = _normalized_phrase(prefix)
+  if not clean_prefix:
+    return False, "tag prefix must be non-empty"
+  if "." in clean_prefix:
+    return False, "tag prefix must not contain '.'"
+  words = clean_prefix.split()
+  if len(words) < 2:
+    return False, "tag prefix must contain a person and canonical head"
+  if not words[0][0].isupper():
+    return False, "tag prefix must start with a capitalized person name"
+  if words[0].casefold() in TAG_PREFIX_PERSON_PLACEHOLDERS:
+    return False, "tag prefix must start with an explicit person name"
+  if words[-1].casefold() not in TAG_PREFIX_HEADS:
+    return False, (
+      f"tag prefix must end with one of {sorted(TAG_PREFIX_HEADS)!r}"
+    )
   return True, ""
 
 
-def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
+def check_tag_facet(facet):
+  """Validate the facet portion of a complete child tag."""
+  if not isinstance(facet, str):
+    return False, "tag facet must be a string"
+  clean_facet = _normalized_phrase(facet)
+  if not clean_facet:
+    return False, "tag facet must be non-empty"
+  if "." in clean_facet:
+    return False, "tag facet must not contain '.'"
+  if len(clean_facet.split()) > 3:
+    return False, "tag facet must contain no more than three words"
+  return True, ""
+
+
+def check_composite_tag(tag):
   """Validate one complete ``prefix.facet`` tag."""
   if not isinstance(tag, str):
     return False, "tag must be a string"
@@ -177,41 +168,31 @@ def check_composite_tag(tag, tag_prefix_pool=None, enforce_source=False):
   raw_prefix, raw_facet = clean_tag.split(".", 1)
   prefix = _normalized_phrase(raw_prefix)
   facet = _normalized_phrase(raw_facet)
-  prefix_words = prefix.split()
-  facet_words = facet.split()
-  if not prefix or not facet:
-    return False, "tag prefix and facet must both be non-empty"
-  if len(prefix_words) < 2:
-    return False, "tag prefix must contain a person/entity and canonical head"
-  if not prefix_words[0][0].isupper():
-    return False, "tag prefix must start with a capitalized person/entity"
-  if prefix_words[-1].casefold() not in TAG_PREFIX_HEADS:
-    return False, (
-      f"tag prefix must end with one of {sorted(TAG_PREFIX_HEADS)!r}"
-    )
-  if len(facet_words) > 3:
-    return False, "tag facet must contain no more than three words"
-  # Pool membership is intentionally advisory here. A miss is a node-local
-  # fallback whose semantic suitability cannot be decided structurally. Both
-  # pool members and fallbacks obey the same general prefix rules above, and
-  # child generation never mutates the session prefix pool.
-  return True, ""
+  prefix_ok, prefix_error = check_generated_tag_prefix(prefix)
+  if not prefix_ok:
+    return False, prefix_error
+  return check_tag_facet(facet)
 
 
 def check_rewrite_json(
     text,
     dialogue_text,
     allow_origin_id=False,
-    tag_prefix_pool=None,
     require_composite_tags=False,
+    require_topics=True,
 ):
   from jsonschema import Draft202012Validator, ValidationError
   import re
-  schema = deepcopy(SCHEMA) if allow_origin_id else SCHEMA
+  schema = deepcopy(SCHEMA)
   if allow_origin_id:
     schema["properties"]["sentence"]["items"]["properties"]["id"]["pattern"] = (
       "^D\\d+:\\d+(?:-\\d+)?$"
     )
+  if not require_topics:
+    schema["required"] = [
+      field for field in schema["required"] if field != "topics"
+    ]
+    schema["properties"].pop("topics", None)
 
   validator = Draft202012Validator(schema)
   id_pattern = r'^D\d+:\d+(?:-\d+)?$' if allow_origin_id else r'^D\d+:\d+-\d+$'
@@ -239,14 +220,6 @@ def check_rewrite_json(
   except ValidationError as e:
     return False, e.message
 
-  if tag_prefix_pool is None and "tag_prefix_pool" in text:
-    tag_prefix_pool = text.get("tag_prefix_pool")
-    require_composite_tags = True
-  if tag_prefix_pool is not None:
-    pool_ok, pool_error = check_tag_prefix_pool(tag_prefix_pool)
-    if not pool_ok:
-      return False, pool_error
-
   # Step 2: Extract allowed dia_id from dialogue_text if provided
   allowed = set()
   if dialogue_text:
@@ -267,11 +240,7 @@ def check_rewrite_json(
       if not clean_tag:
         return False, f"sentence[{i}].tag[{tag_index}] must be non-empty"
       if require_composite_tags:
-        tag_ok, tag_error = check_composite_tag(
-          clean_tag,
-          tag_prefix_pool=tag_prefix_pool,
-          enforce_source=True,
-        )
+        tag_ok, tag_error = check_composite_tag(clean_tag)
         if not tag_ok:
           return False, f"sentence[{i}].tag[{tag_index}] {tag_error}: {tag!r}"
       elif len(clean_tag.split()) > 3:
@@ -334,39 +303,20 @@ def check_rewrite_json(
   return True, ""
 
 
-def check_child_window_rewrite_json(
-    text, child_window, turns, dialogue_text, tag_prefix_pool=None
-):
+def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
   """Validate exhaustive memories generated from one contiguous child window."""
-  pool_ok, pool_error = check_tag_prefix_pool(
-    tag_prefix_pool or [], require_nonempty=False
-  )
-  if not pool_ok:
-    return False, pool_error
   flag, err = check_rewrite_json(
     text,
     dialogue_text,
     allow_origin_id=True,
-    tag_prefix_pool=tag_prefix_pool,
     require_composite_tags=True,
+    require_topics=False,
   )
   if not flag:
     return flag, err
   sentences = text.get("sentence") or []
   if not sentences:
     return False, "a child window must produce at least one memory sentence"
-  if text.get("topics") not in ({}, None):
-    return False, "hierarchical child rewrite topics must be empty"
-  forbidden_fields = {
-    "raw", "raw_text", "raw_content", "source_text", "turns",
-    "current_turns", "current_window_turns", "current_dialogue_window",
-    "dialogue", "dialogue_text", "previous_dialogue_context",
-    "reference_previous_child_rewrites",
-  }
-  top_forbidden = forbidden_fields.intersection(text)
-  if top_forbidden:
-    return False, f"child rewrite stores forbidden raw fields: {sorted(top_forbidden)!r}"
-
   origin_to_position = {
     getattr(turn, "origin", None): position
     for position, turn in enumerate(turns)
@@ -390,12 +340,6 @@ def check_child_window_rewrite_json(
   for index, sentence in enumerate(sentences):
     if not isinstance(sentence, dict):
       return False, f"sentence[{index}] must be an object"
-    sentence_forbidden = forbidden_fields.intersection(sentence)
-    if sentence_forbidden:
-      return False, (
-        f"sentence[{index}] stores forbidden raw fields: "
-        f"{sorted(sentence_forbidden)!r}"
-      )
     sentence_id = sentence.get("id")
     if sentence_id in seen_sentence_ids:
       return False, f"duplicate child memory id: {sentence_id!r}"
@@ -413,16 +357,6 @@ def check_child_window_rewrite_json(
     if used_positions != sorted(used_positions):
       return False, f"sentence[{index}] origins must follow dialogue order"
     covered_ids.update(used_order)
-
-  for index, personal in enumerate(text.get("personal_sentences") or []):
-    if not isinstance(personal, dict):
-      continue
-    personal_forbidden = forbidden_fields.intersection(personal)
-    if personal_forbidden:
-      return False, (
-        f"personal_sentences[{index}] stores forbidden raw fields: "
-        f"{sorted(personal_forbidden)!r}"
-      )
 
   missing = [origin for origin in ordered_window_origins if origin not in covered_ids]
   if missing:

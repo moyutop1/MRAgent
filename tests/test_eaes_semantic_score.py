@@ -63,6 +63,24 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
         self.assertTrue(ok, error)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
+    def test_hierarchy_schema_does_not_require_topics(self):
+        payload = _valid_rewrite()
+        payload.pop("topics")
+        payload["sentence"][0]["tag"] = [
+            "Caroline pet possession.dog ownership",
+            "Caroline profile.counselor career",
+        ]
+
+        ok, error = check_rewrite_json(
+            payload,
+            self.dialogue,
+            require_composite_tags=True,
+            require_topics=False,
+        )
+
+        self.assertTrue(ok, error)
+
+    @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_tags_require_strict_two_to_four_short_phrase_array(self):
         invalid_tags = [
             "Personal Profile",
@@ -79,27 +97,32 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
                 self.assertFalse(ok)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
-    def test_hierarchy_rewrite_accepts_pool_and_expanded_local_fallback_tags(self):
+    def test_hierarchy_rewrite_accepts_generated_composite_tags(self):
         payload = _valid_rewrite()
-        payload["tag_prefix_pool"] = ["Caroline pet possession"]
         payload["sentence"][0]["tag"] = [
             "Caroline pet possession.dog ownership",
             "Caroline profile.counselor career",
         ]
 
-        ok, error = check_rewrite_json(payload, self.dialogue)
+        ok, error = check_rewrite_json(
+            payload, self.dialogue, require_composite_tags=True
+        )
 
         self.assertTrue(ok, error)
         payload["sentence"][0]["tag"][1] = (
             "Caroline career profile.counselor career"
         )
-        ok, error = check_rewrite_json(payload, self.dialogue)
+        ok, error = check_rewrite_json(
+            payload, self.dialogue, require_composite_tags=True
+        )
         self.assertTrue(ok, error)
 
         payload["sentence"][0]["tag"][1] = (
             "Caroline career identity.counselor career"
         )
-        ok, error = check_rewrite_json(payload, self.dialogue)
+        ok, error = check_rewrite_json(
+            payload, self.dialogue, require_composite_tags=True
+        )
         self.assertFalse(ok)
         self.assertIn("tag prefix must end", error)
 

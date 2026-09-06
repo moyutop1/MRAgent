@@ -118,75 +118,38 @@ class HierarchicalRouterTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(diagnostics["selected_parent_k"], 0)
 
-    def test_parent_local_tag_scan_uses_detail_budget_two_three_four(self):
-        store = _Store()
-        controller = MemoryController(store)
-        for index in range(1, 6):
-            note = _Note(index)
-            store.eaes_notes[note.memory_id] = note
-            store.episode_events[note.event_id] = types.SimpleNamespace(
-                tag_t=[
-                    f"Person activity.tag {index}",
-                    f"Person activity.detail {index}",
-                ]
-            )
-            controller._eaes_tag_embedding_cache[note.memory_id] = (
-                (
-                    f"Person activity.tag {index}",
-                    f"Person activity.detail {index}",
-                ),
-                np.asarray([
-                    [1.0 / index, 0.0],
-                    [0.5 / index, 0.0],
-                ]),
-            )
-        parent = [{"parent_id": "1-1", "posterior_score": 1.0}]
-        with (
-            patch.object(controller, "_prepare_eaes_tag_embeddings"),
-            patch.object(
-                controller, "_eaes_phrase_embeddings",
-                return_value=np.asarray([[1.0, 0.0]]),
-            ),
-        ):
-            sizes = []
-            for detail in (0.0, 0.5, 1.0):
-                candidates, diagnostics = (
-                    controller.retrieve_eaes_parent_local_children(
-                        ["topic"], parent, detail
-                    )
-                )
-                sizes.append((len(candidates), diagnostics["per_parent_k"]))
+    def test_parent_local_child_retrieval_has_been_removed(self):
+        controller = MemoryController(_Store())
 
-        self.assertEqual(sizes, [(2, 2), (3, 3), (4, 4)])
+        self.assertFalse(hasattr(
+            controller, "retrieve_eaes_parent_local_children"
+        ))
+        self.assertFalse(hasattr(
+            controller, "merge_eaes_hierarchical_candidates"
+        ))
 
-    def test_local_children_are_additive_and_use_zero_rrf(self):
-        global_children = [{
+    def test_parent_routing_does_not_mutate_child_scores(self):
+        controller = MemoryController(_Store())
+        children = [{
             "memory_id": "G",
             "parent_id": "1-1",
-            "max_phrase_similarity": 0.8,
-            "rrf_score": 0.2,
-            "candidate_sources": ["global_phrase"],
+            "base_score": 0.75,
+            "candidate_score": 0.75,
         }]
-        local_children = [{
-            "memory_id": "L",
-            "parent_id": "1-1",
-            "max_phrase_similarity": 0.7,
-            "candidate_sources": ["parent_local"],
-        }]
-        merged, diagnostics = (
-            MemoryController.merge_eaes_hierarchical_candidates(
-                global_children,
-                local_children,
-                [{"parent_id": "1-1", "posterior_score": 0.8}],
-                limit=60,
+        with (
+            patch.object(
+                controller, "score_eaes_parent_candidates",
+                return_value=_parent_rows(count=1, raw_similarity=0.8),
+            ),
+            patch.object(config, "PARENT_RELEVANCE_FLOOR", -1.0),
+            patch.object(config, "PARENT_TOP_K", 1),
+        ):
+            controller.route_eaes_parent_candidates(
+                {"breadth_value": 0.5, "detail_value": 0.5}, children
             )
-        )
-        by_id = {item["memory_id"]: item for item in merged}
 
-        self.assertEqual(set(by_id), {"G", "L"})
-        self.assertEqual(by_id["L"]["rrf_score"], 0.0)
-        self.assertEqual(diagnostics["local_added_ids"], ["L"])
-        self.assertGreater(by_id["G"]["parent_boost"], 0.0)
+        self.assertEqual(children[0]["candidate_score"], 0.75)
+        self.assertNotIn("parent_boost", children[0])
 
 
 if __name__ == "__main__":

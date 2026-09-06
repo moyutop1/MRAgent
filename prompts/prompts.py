@@ -190,33 +190,6 @@ Schema:
     def extract_parent_rewrite_prompt(cls, payload: str) -> str:
         return cls.PARENT_REWRITE_PROMPT.format(PAYLOAD=payload)
 
-    TAG_PREFIX_POOL_SYSTEM_PROMPT = """You induce one shared topic-prefix pool for all child-memory tags in a dialogue session. Only output valid JSON.
-Rules:
-- Read every supplied Parent memory before creating the pool.
-- Return zero to ten unique topic-specific prefixes. Never exceed ten and never invent a topic merely to fill the pool.
-- Every prefix must start with the explicitly supported person's name, contain a concrete topic description, and end with exactly one canonical head: activity, plan, profile, possession, or relationship. There is no prefix word-count limit.
-- The literal final whitespace-separated word must be one of those five canonical heads. Synonyms such as collection, hobby, goal, friendship, or event are topic words, not valid heads; retain the useful topic before a canonical head, for example "Caroline children's book collection possession".
-- Prefer a specific supported prefix such as "Caroline advocacy activity", "Caroline career plan", or "Melanie family relationship".
-- Never put a generic person + head fallback such as "Caroline activity" in this pool. Child tags construct a fallback locally only when no pool prefix fits their fact.
-- Merge synonymous session topics into one stable wording. Prefer prefixes that can be reused by multiple related facts while retaining a concrete topic.
-- Do not include a period, facet tag, sentence, explanation, parent id, child id, date, or unsupported person.
-Schema:
-{
-  "tag_prefix_pool": [
-    "Person topic activity",
-    "Person topic profile"
-  ]
-}"""
-
-    TAG_PREFIX_POOL_PROMPT = """ALL_SESSION_PARENT_MEMORIES:
-<<<
-{PAYLOAD}
->>>"""
-
-    @classmethod
-    def extract_tag_prefix_pool_prompt(cls, payload: str) -> str:
-        return cls.TAG_PREFIX_POOL_PROMPT.format(PAYLOAD=payload)
-
     CHILD_WINDOW_REWRITE_SYSTEM_PROMPT = """You create exhaustive atomic child memories for one semantically closed dialogue window. Only output valid JSON.
 Rules:
 - CURRENT_WINDOW_TURNS is the only evidence section. Rewrite every turn and every piece of information in that section; nothing may be omitted, even greetings, questions, acknowledgements, generic advice, repeated confirmations, repeated facts, or image/caption information.
@@ -230,12 +203,12 @@ Rules:
 - The id may be any placeholder whose prefix matches the first origin; code assigns deterministic final IDs after generation.
 - Keep conversation_time equal to the supplied session date; it is not automatically an event occurrence date.
 - Preserve source-supported temporal information directly in text using the same precision as the dialogue.
-- TAG_PREFIX_POOL is the complete fixed topic-prefix pool for this session. It is reference metadata, not evidence, and must not be copied into the output as a separate field.
-- Output tag as an array of two to four complete strings in the exact form "prefix.facet", with exactly one period and no spaces around it.
-- First inspect every TAG_PREFIX_POOL entry and select the most specific semantically supported prefix for each tag. A selected topic prefix must be copied exactly from the pool.
-- Only when no pool prefix fits the current fact may the tag construct a local fallback in the form "Person [optional topic description] canonical-head", where canonical-head is activity, plan, profile, possession, or relationship. The fallback prefix has no word-count limit; for example, "Caroline caring profile" is valid. A fallback is used only in that complete tag and is never added to the pool.
+- Output tag as an array of two to four objects. Every object must generate its own prefix and facet together, using exactly the keys prefix and facet.
+- Every prefix must start with the explicitly supported person's name and end with exactly one canonical head: activity, plan, profile, possession, or relationship. Optional concrete descriptive words may appear between the person and canonical head, with no prefix word-count limit. For example, "Caroline caring profile" is valid.
+- Never use generic placeholders such as Person, Speaker, User, Assistant, Entity, or Someone as the person name.
+- Do not include a period in either prefix or facet. Code joins each valid pair into the final stored string "prefix.facet".
 - Prefer activity for completed or ongoing actions, events, attendance, participation, and experiences; plan for unexecuted intentions or future arrangements; profile for person-centered identity, career, preference, ability, trait, opinion, or state; possession for owned, received, purchased, made, or treasured objects; and relationship for family, friendship, partnership, support, social ties, or group belonging.
-- The facet after the period must be a short concrete noun phrase of at most three whitespace-separated words. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
+- Every facet must be a short concrete noun phrase of at most three whitespace-separated words. If a useful compound or qualifier would exceed three words, rephrase it or use a natural hyphenated compound without dropping the fact.
 - Internally identify the independent facts in each sentence. Its facets must collectively cover every fact, not only the most salient topic. For one fact, produce multiple meaningful retrieval views. For two to four facts, give every fact at least one facet. If a sentence would contain more than four independent facts, split it into additional sentence objects.
 - Preserve distinctive events, objects, relations, and applicable time/place/occasion qualifiers in the facets. Never use generic facets such as Event, Fact, Question, Conversation, or Detail.
 - semantic_properties may contain zero to three content labels from event_action, state_opinion, personal_profile, relation_social and exactly one persistence label from transient, episodic, durable, unknown.
@@ -249,26 +222,26 @@ Schema:
       "id": "D1:5",
       "text": "One atomic self-contained memory.",
       "tag": [
-        "Caroline advocacy activity.school speech",
-        "Caroline advocacy activity.journey sharing"
+        {
+          "prefix": "Caroline advocacy activity",
+          "facet": "school speech"
+        },
+        {
+          "prefix": "Caroline advocacy activity",
+          "facet": "journey sharing"
+        }
       ],
       "origin": "D1:5",
       "topic": [],
       "semantic_properties": ["event_action", "episodic"]
     }
   ],
-  "topics": {},
   "personal_sentences": []
 }"""
 
     CHILD_WINDOW_REWRITE_PROMPT = """REFERENCE_PREVIOUS_CHILD_REWRITES (reference only; never use as origin):
 <<<
 {PREVIOUS_REWRITES}
->>>
-
-TAG_PREFIX_POOL (fixed session metadata; never copy as an output field):
-<<<
-{TAG_PREFIX_POOL}
 >>>
 
 CURRENT_CHILD_WINDOW:
@@ -281,12 +254,10 @@ CURRENT_CHILD_WINDOW:
             cls,
             payload: str,
             previous_rewrites: str = "[]",
-            tag_prefix_pool: str = "[]",
     ) -> str:
         return cls.CHILD_WINDOW_REWRITE_PROMPT.format(
             PAYLOAD=payload,
             PREVIOUS_REWRITES=previous_rewrites,
-            TAG_PREFIX_POOL=tag_prefix_pool,
         )
 
     CHILD_MEMORY_FUSION_SYSTEM_PROMPT = """You fuse two highly similar adjacent child memories. Only output valid JSON.

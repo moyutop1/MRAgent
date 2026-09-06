@@ -38,14 +38,13 @@ sys.modules.setdefault("jsonschema", jsonschema_module)
 
 from agent.rewrite_memory import (
     _child_window_source_text,
-    _extract_session_tag_prefix_pool,
+    _compose_child_tag_components,
     _fuse_adjacent_duplicate_child_memories,
     _previous_child_rewrite_context,
     _rewrite_child_window,
     fallback_invalid_persistence_to_unknown,
     finalize_child_memory_ids,
     inherit_adjacent_question_origins,
-    normalize_child_tag_cardinality,
     normalize_rewrite_semantic_properties,
     normalize_rewrite_tag_lengths,
     rewrite_semantic_hierarchy_session,
@@ -60,7 +59,11 @@ from agent.semantic_segmentation import (
 )
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
 from prompts.prompts import Prompts
-from prompts.schema import check_composite_tag, check_tag_prefix_pool
+from prompts.schema import (
+    check_composite_tag,
+    check_generated_tag_prefix,
+    check_tag_facet,
+)
 
 
 class SequenceLLM:
@@ -94,8 +97,8 @@ def _sentence(origin, text, sentence_id=None, **extra):
         "id": sentence_id or origin.split(",", 1)[0],
         "text": text,
         "tag": [
-            "Speaker activity.turn memory",
-            "Speaker activity.dialogue detail",
+            "Caroline activity.turn memory",
+            "Caroline activity.dialogue detail",
         ],
         "origin": origin,
         "topic": [],
@@ -106,10 +109,22 @@ def _sentence(origin, text, sentence_id=None, **extra):
 
 
 def _rewrite_output(*sentences):
+    generated_sentences = copy.deepcopy(list(sentences))
+    for sentence in generated_sentences:
+        if not isinstance(sentence, dict) or not isinstance(
+                sentence.get("tag"), list):
+            continue
+        components = []
+        for tag in sentence["tag"]:
+            if isinstance(tag, str) and tag.count(".") == 1:
+                prefix, facet = tag.split(".", 1)
+                components.append({"prefix": prefix, "facet": facet})
+            else:
+                components.append(tag)
+        sentence["tag"] = components
     return {
         "conversation_time": "2023-05-08",
-        "sentence": list(sentences),
-        "topics": {},
+        "sentence": generated_sentences,
         "personal_sentences": [],
     }
 
@@ -386,17 +401,26 @@ class SemanticHierarchyTests(unittest.TestCase):
             ["D1:6-1", "D1:8-1"],
         )
 
-    def test_overlong_child_tag_is_compounded_without_regenerating_window(self):
+    def test_overlong_child_facet_gets_one_repair_attempt(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
-        llm = SequenceLLM([_rewrite_output(_sentence(
+        invalid = _rewrite_output(_sentence(
             "D1:1",
             "The family admired a lake sunrise last year.",
             tag=[
-                "Speaker activity.lake sunrise",
-                "Speaker activity.lake sunrise last year",
+                "Caroline activity.lake sunrise",
+                "Caroline activity.lake sunrise last year",
             ],
-        ))])
+        ))
+        valid = _rewrite_output(_sentence(
+            "D1:1",
+            "The family admired a lake sunrise last year.",
+            tag=[
+                "Caroline activity.lake sunrise",
+                "Caroline activity.lake sunrise last-year",
+            ],
+        ))
+        llm = SequenceLLM([invalid, valid])
 
         output = _rewrite_child_window(
             llm, window, turns, "2023-05-08"
@@ -405,80 +429,100 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertEqual(
             output["sentence"][0]["tag"],
             [
-                "Speaker activity.lake sunrise",
-                "Speaker activity.lake sunrise last-year",
+                "Caroline activity.lake sunrise",
+                "Caroline activity.lake sunrise last-year",
             ],
         )
-        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn(
+            "tag facet must contain no more than three words",
+            llm.calls[1][0]["content"],
+        )
 
-    def test_single_multiword_child_tag_is_expanded_without_retry(self):
+    def test_single_child_tag_gets_one_repair_attempt(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         tag = "Caroline LGBTQ support activity.greeting inquiry"
-        llm = SequenceLLM([_rewrite_output(_sentence(
+        invalid = _rewrite_output(_sentence(
             "D1:1",
             "Caroline greeted Melanie and asked how she was doing.",
             tag=[tag],
-        ))])
+        ))
+        valid = _rewrite_output(_sentence(
+            "D1:1",
+            "Caroline greeted Melanie and asked how she was doing.",
+            tag=[
+                tag,
+                "Caroline LGBTQ support activity.wellbeing question",
+            ],
+        ))
+        llm = SequenceLLM([invalid, valid])
 
         output = _rewrite_child_window(
             llm,
             window,
             turns,
             "2023-05-08",
-            tag_prefix_pool=["Caroline LGBTQ support activity"],
         )
 
         self.assertEqual(output["sentence"][0]["tag"], [
             tag,
-            "Caroline LGBTQ support activity.inquiry",
+            "Caroline LGBTQ support activity.wellbeing question",
         ])
-        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(len(llm.calls), 2)
 
-    def test_single_generic_child_tag_is_left_for_precise_retry(self):
+    def test_compose_child_tag_components_joins_prefix_and_facet(self):
         output = _rewrite_output(_sentence(
-            "D1:1", "A generic event was mentioned.",
-            tag=["Speaker activity.event"],
+            "D1:1",
+            "Caroline described a positive impact.",
+            tag=[
+                "Caroline caring profile.positive impact",
+                "Caroline support activity.community work",
+            ],
         ))
 
-        changed = normalize_child_tag_cardinality(output)
+        valid, composed, error_kind, error = _compose_child_tag_components(
+            output
+        )
 
-        self.assertEqual(changed, 0)
-        self.assertEqual(output["sentence"][0]["tag"], [
-            "Speaker activity.event",
+        self.assertTrue(valid, error)
+        self.assertEqual(error_kind, "")
+        self.assertEqual(composed["sentence"][0]["tag"], [
+            "Caroline caring profile.positive impact",
+            "Caroline support activity.community work",
         ])
 
-    def test_single_unrepairable_child_tag_retry_names_tag_field(self):
+    def test_single_child_tag_raises_after_one_failed_repair(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         invalid = _rewrite_output(_sentence(
             "D1:1", "A generic event was mentioned.",
-            tag=["Speaker activity.event"],
+            tag=["Caroline activity.event"],
         ))
-        valid = _rewrite_output(_sentence(
-            "D1:1", "A generic event was mentioned.",
-        ))
-        llm = SequenceLLM([invalid, valid])
+        llm = SequenceLLM([invalid, invalid])
 
-        _rewrite_child_window(llm, window, turns, "2023-05-08")
+        with self.assertRaisesRegex(ValueError, "must contain 2-4"):
+            _rewrite_child_window(llm, window, turns, "2023-05-08")
 
         retry_system = llm.calls[1][0]["content"]
         self.assertIn(
-            "sentence[0].tag must contain 2-4 unique composite tags; got 1",
+            "sentence[0].tag must contain 2-4 unique prefix/facet objects; got 1",
             retry_system,
         )
 
     def test_tag_length_normalizer_leaves_non_string_for_validation(self):
-        output = _rewrite_output(_sentence(
-            "D1:1", "memory", tag=["Speaker activity.valid tag", 123]
-        ))
+        output = {
+            "sentence": [_sentence(
+                "D1:1", "memory", tag=["Caroline activity.valid tag", 123]
+            )]
+        }
 
         changed = normalize_rewrite_tag_lengths(output)
 
         self.assertEqual(changed, 0)
         self.assertEqual(
             output["sentence"][0]["tag"],
-            ["Speaker activity.valid tag", 123],
+            ["Caroline activity.valid tag", 123],
         )
 
     def test_tag_heads_leaked_into_semantic_properties_are_normalized(self):
@@ -550,127 +594,50 @@ class SemanticHierarchyTests(unittest.TestCase):
             ["event_action", "unknown"],
         )
 
-    def test_prefix_pool_retries_generic_prefix_and_reads_all_parents(self):
-        parents = [
-            types.SimpleNamespace(
-                parent_id="1-1", rewrite_content="Caroline shared her journey."
-            ),
-            types.SimpleNamespace(
-                parent_id="1-2", rewrite_content="Caroline joined mentoring."
-            ),
-        ]
-        llm = SequenceLLM([
-            {"tag_prefix_pool": ["Caroline activity"]},
-            {"tag_prefix_pool": ["Caroline advocacy activity"]},
-        ])
-
-        pool = _extract_session_tag_prefix_pool(llm, parents)
-
-        self.assertEqual(pool, ["Caroline advocacy activity"])
-        self.assertIn("must not be stored", llm.calls[1][0]["content"])
-        payload = llm.calls[0][1]["content"]
-        self.assertIn("Caroline shared her journey.", payload)
-        self.assertIn("Caroline joined mentoring.", payload)
-
-    def test_prefix_pool_retries_noncanonical_head_once(self):
-        parents = [types.SimpleNamespace(
-            parent_id="1-1",
-            rewrite_content="Caroline owns a collection of children's books.",
-        )]
-        llm = SequenceLLM([
-            {"tag_prefix_pool": [
-                "Caroline LGBTQ support activity",
-                "Caroline children's book collection",
-            ]},
-            {"tag_prefix_pool": [
-                "Caroline LGBTQ support activity",
-                "Caroline book collection possession",
-            ]},
-        ])
-
-        pool = _extract_session_tag_prefix_pool(llm, parents)
-
-        self.assertEqual(pool, [
-            "Caroline LGBTQ support activity",
-            "Caroline book collection possession",
-        ])
-        self.assertEqual(len(llm.calls), 2)
-        self.assertIn(
-            "must end with one of",
-            llm.calls[1][0]["content"],
-        )
-
-    def test_prefix_pool_has_no_word_limit_but_still_has_ten_item_limit(self):
+    def test_generated_prefix_has_no_word_limit(self):
         long_prefix = (
             "Caroline local children's literature reading collection possession"
         )
 
-        valid, error = check_tag_prefix_pool([long_prefix])
-
+        valid, error = check_generated_tag_prefix(long_prefix)
         self.assertTrue(valid, error)
         valid_tag, tag_error = check_composite_tag(
             f"{long_prefix}.favorite books",
-            tag_prefix_pool=[long_prefix],
-            enforce_source=True,
         )
         self.assertTrue(valid_tag, tag_error)
-        too_many = [f"Caroline topic-{index} activity" for index in range(11)]
-        valid, error = check_tag_prefix_pool(too_many)
-        self.assertFalse(valid)
-        self.assertIn("no more than 10", error)
 
-    def test_local_fallback_has_no_word_limit_and_is_never_added_to_pool(self):
-        valid, error = check_tag_prefix_pool(["Caroline activity"])
-        self.assertFalse(valid)
-        self.assertIn("must not be stored", error)
-
+    def test_composite_tag_reuses_prefix_and_facet_validators(self):
         for tag in (
             "Caroline activity.school speech",
             "Caroline caring profile.positive impact",
             "Caroline community volunteer support activity.positive impact",
         ):
             with self.subTest(tag=tag):
-                valid, error = check_composite_tag(
-                    tag,
-                    tag_prefix_pool=["Caroline school advocacy activity"],
-                    enforce_source=True,
-                )
+                valid, error = check_composite_tag(tag)
                 self.assertTrue(valid, error)
 
+        valid, error = check_composite_tag("Profile.positive impact")
+        self.assertFalse(valid)
+        self.assertIn("person", error)
         valid, error = check_composite_tag(
-            "Profile.positive impact",
-            tag_prefix_pool=[],
-            enforce_source=True,
+            "Speaker activity.positive impact"
         )
         self.assertFalse(valid)
-        self.assertIn("person/entity", error)
+        self.assertIn("explicit person name", error)
+        valid, error = check_tag_facet("one two three four")
+        self.assertFalse(valid)
+        self.assertIn("three words", error)
 
-    def test_prefix_prompts_explicitly_remove_prefix_word_limit(self):
+    def test_child_prompt_generates_each_prefix_without_a_pool(self):
         self.assertIn(
-            "There is no prefix word-count limit",
-            Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT,
+            "Every object must generate its own prefix and facet together",
+            Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT,
         )
-        self.assertNotIn(
-            "3-4 whitespace-separated words",
-            Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT,
-        )
+        prompt = Prompts.extract_child_window_rewrite_prompt("{}", "[]")
+        self.assertNotIn("TAG_PREFIX_POOL", prompt)
+        self.assertNotIn("tag_prefix_pool", prompt)
 
-    def test_prefix_pool_raises_after_exactly_one_failed_retry(self):
-        parents = [types.SimpleNamespace(
-            parent_id="1-1",
-            rewrite_content="Caroline owns a collection of children's books.",
-        )]
-        invalid = {"tag_prefix_pool": [
-            "Caroline children's book collection",
-        ]}
-        llm = SequenceLLM([invalid, invalid])
-
-        with self.assertRaisesRegex(ValueError, "must end with one of"):
-            _extract_session_tag_prefix_pool(llm, parents)
-
-        self.assertEqual(len(llm.calls), 2)
-
-    def test_invalid_child_fallback_prefix_gets_one_repair_attempt(self):
+    def test_invalid_generated_prefix_gets_one_repair_attempt(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         invalid = _rewrite_output(_sentence(
@@ -696,8 +663,16 @@ class SemanticHierarchyTests(unittest.TestCase):
         )
 
         self.assertEqual(len(llm.calls), 2)
-        self.assertEqual(output["sentence"][0]["tag"], valid["sentence"][0]["tag"])
+        self.assertEqual(output["sentence"][0]["tag"], [
+            "Caroline possession.children's books",
+            "Caroline possession.book ownership",
+        ])
         self.assertIn("tag prefix must end", llm.calls[1][0]["content"])
+        self.assertIn(
+            "PREVIOUS_INVALID_WINDOW_REWRITE",
+            llm.calls[1][1]["content"],
+        )
+        self.assertIn("Caroline collection", llm.calls[1][1]["content"])
 
     def test_invalid_child_prefix_raises_after_one_failed_repair(self):
         turns = parse_session_turns(_dialogue(1))
@@ -717,7 +692,7 @@ class SemanticHierarchyTests(unittest.TestCase):
 
         self.assertEqual(len(llm.calls), 2)
 
-    def test_child_tags_use_exact_pool_prefix_or_local_fallback(self):
+    def test_child_tags_compose_independently_generated_prefixes(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         llm = SequenceLLM([_rewrite_output(_sentence(
@@ -734,7 +709,6 @@ class SemanticHierarchyTests(unittest.TestCase):
             window,
             turns,
             "2023-05-08",
-            tag_prefix_pool=["Caroline advocacy activity"],
         )
 
         self.assertEqual(
@@ -746,9 +720,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             "Caroline caring profile.positive impact",
         )
         self.assertEqual(len(llm.calls), 1)
-        self.assertIn(
-            '"Caroline advocacy activity"', llm.calls[0][1]["content"]
-        )
+        self.assertNotIn("TAG_PREFIX_POOL", llm.calls[0][1]["content"])
 
     def test_duplicate_model_outputs_are_fused_after_window_validation(self):
         turns = parse_session_turns(_dialogue(1))
@@ -838,21 +810,24 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertEqual(retained[-1], current)
         self.assertIsNone(last_embedding)
 
-    def test_child_window_rewrite_rejects_raw_storage_fields(self):
+    def test_child_window_allows_extra_raw_fields_and_drops_topics(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
-        invalid = _rewrite_output(_sentence(
+        generated = _rewrite_output(_sentence(
             "D1:1", "turn one", raw_content="speaker:turn 1"
         ))
-        valid = _rewrite_output(_sentence("D1:1", "turn one"))
-        llm = SequenceLLM([invalid, valid])
+        generated["topics"] = {"obsolete": "ignored"}
+        llm = SequenceLLM([generated])
 
         output = _rewrite_child_window(
             llm, window, turns, "2023-05-08"
         )
 
-        self.assertNotIn("raw_content", output["sentence"][0])
-        self.assertIn("forbidden raw fields", llm.calls[1][0]["content"])
+        self.assertEqual(
+            output["sentence"][0]["raw_content"], "speaker:turn 1"
+        )
+        self.assertNotIn("topics", output)
+        self.assertEqual(len(llm.calls), 1)
 
     def test_hierarchical_rewrite_is_sequential_and_links_final_memory_ids(self):
         first_window = _rewrite_output(
@@ -867,8 +842,8 @@ class SemanticHierarchyTests(unittest.TestCase):
                 "D1:5",
                 "repeated information",
                 tag=[
-                    "Speaker activity.different tag",
-                    "Speaker activity.alternate detail",
+                    "Caroline activity.different tag",
+                    "Caroline activity.alternate detail",
                 ],
                 semantic_properties=["state_opinion", "transient"],
             ),
@@ -885,7 +860,6 @@ class SemanticHierarchyTests(unittest.TestCase):
                 "parent_id": "1-1",
                 "rewrite_content": "A coarse parent memory.",
             },
-            {"tag_prefix_pool": ["Speaker conversation activity"]},
             first_window,
             second_window,
             {
@@ -921,9 +895,8 @@ class SemanticHierarchyTests(unittest.TestCase):
             "rewrite_content": "A coarse parent memory.",
             "child_ids": expected_ids,
         }])
-        self.assertEqual(
-            output["tag_prefix_pool"], ["Speaker conversation activity"]
-        )
+        self.assertNotIn("tag_prefix_pool", output)
+        self.assertNotIn("topics", output)
         self.assertTrue(all(
             item["parent_id"] == "1-1" for item in output["sentence"]
         ))
@@ -931,26 +904,24 @@ class SemanticHierarchyTests(unittest.TestCase):
         self.assertEqual(fused["text"], "The repeated information was stated once.")
         self.assertEqual(fused["origin"], "D1:4,D1:5")
         self.assertEqual(fused["tag"], [
-            "Speaker activity.turn memory",
-            "Speaker activity.dialogue detail",
+            "Caroline activity.turn memory",
+            "Caroline activity.dialogue detail",
         ])
         self.assertEqual(
             fused["semantic_properties"], ["event_action", "episodic"]
         )
-        self.assertEqual(len(llm.calls), 7)
+        self.assertEqual(len(llm.calls), 6)
         parent_rewrite_call = llm.calls[2]
         self.assertIn("PERSON PROFILE MEMORY", parent_rewrite_call[0]["content"])
-        prefix_pool_call = llm.calls[3]
-        self.assertIn("topic-prefix pool", prefix_pool_call[0]["content"])
-        second_prompt = llm.calls[5][1]["content"]
+        second_prompt = llm.calls[4][1]["content"]
         reference_section = second_prompt.split("CURRENT_CHILD_WINDOW:", 1)[0]
         self.assertIn("second fact in turn two", reference_section)
         self.assertIn("third turn", reference_section)
         self.assertNotIn("first fact in turn two", reference_section)
         self.assertNotIn(
-            "every repeated occurrence", llm.calls[5][0]["content"]
+            "every repeated occurrence", llm.calls[4][0]["content"]
         )
-        fusion_call = llm.calls[6]
+        fusion_call = llm.calls[5]
         self.assertIn(
             "highly similar adjacent child memories",
             fusion_call[0]["content"],

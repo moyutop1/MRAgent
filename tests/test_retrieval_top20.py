@@ -66,7 +66,7 @@ class _Controller:
         candidates = _children()
         diagnostics = {
             "phrases": [{"selected_k": len(candidates)}] * 4,
-            "global_candidate_ids": [item["memory_id"] for item in candidates],
+            "prefilter_candidate_ids": [item["memory_id"] for item in candidates],
         }
         return (candidates, diagnostics) if include_diagnostics else candidates
 
@@ -85,21 +85,6 @@ class _Controller:
             "detail_value": 0.5,
             "parent_candidates": parents,
         }
-
-    @staticmethod
-    def retrieve_eaes_parent_local_children(*_args, **_kwargs):
-        return [], {"per_parent_k": 3, "parents": []}
-
-    @staticmethod
-    def merge_eaes_hierarchical_candidates(children, _local, _parents, limit=60):
-        children = list(children)[:limit]
-        ids = [child["memory_id"] for child in children]
-        return children, {
-            "local_added_ids": [],
-            "global_plus_local_ids": ids,
-            "dropped_by_pool_limit_ids": [],
-        }
-
 
 class _RetrievalAgent(EAESMixin, RetrievalMixin):
     def __init__(self):
@@ -178,6 +163,34 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         )
         self.assertEqual(len(agent.memory_controller.child_plans[0]), 4)
         self.assertIn("D2:1", result["parent_origins"])
+        self.assertEqual(set(result["stage_origins"]), {
+            "prefilter_child", "initial_child", "final_child",
+            "selected_parent", "final_combined",
+        })
+        self.assertEqual(result["counts"]["prefilter_child_k"], 24)
+        self.assertEqual(result["counts"]["initial_child_k"], 24)
+        self.assertNotIn("global_child", result["stage_origins"])
+
+    def test_prefilter_initial_final_names_keep_existing_stage_logic(self):
+        agent = _RetrievalAgent()
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
+            patch.object(config, "EAES_PHRASE_UNION_LIMIT", 10),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 5),
+        ):
+            result = agent.retrieve_question_evidence(
+                "What pet does Caroline own?"
+            )
+
+        self.assertEqual(len(result["prefilter_candidates"]), 24)
+        self.assertEqual(len(result["initial_candidates"]), 10)
+        self.assertEqual(len(result["candidates"]), 5)
+        self.assertEqual(result["counts"]["prefilter_child_k"], 24)
+        self.assertEqual(result["counts"]["initial_child_k"], 10)
+        self.assertEqual(result["counts"]["final_child_k"], 5)
 
     def test_retrieval_only_runs_enabled_rollback_check(self):
         agent = _RetrievalAgent()
@@ -202,10 +215,10 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             ]
         )
         self.assertEqual(
-            len(result["rollback_check"]["first_prefilter"]["child_ids"]), 24
+            len(result["rollback_check"]["first_initial"]["child_ids"]), 24
         )
         self.assertEqual(
-            len(result["rollback_check"]["first_prefilter"]["parent_ids"]), 4
+            len(result["rollback_check"]["first_initial"]["parent_ids"]), 4
         )
 
     def test_retrieval_only_discards_normal_internal_answer_and_skips_rollback(self):
@@ -285,9 +298,8 @@ class RetrievalTopTwentyTests(unittest.TestCase):
 
         self.assertEqual(set(compact), {
             "mode", "query_plan", "routing", "phrase_retrieval",
-            "parent_local_retrieval", "parent_candidates",
-            "child_candidates", "final_child_ids", "counts",
-            "rollback_check",
+            "parent_candidates", "child_candidates", "final_child_ids",
+            "counts", "rollback_check",
         })
         self.assertNotIn("retrieved_origins", compact)
         self.assertNotIn("prefilter_candidates", compact)

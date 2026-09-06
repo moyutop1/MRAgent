@@ -16,7 +16,7 @@ def compact_eaes_retrieval(retrieval):
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
         "rewrite_content", "max_phrase_similarity", "rrf_score",
-        "base_score", "parent_boost", "candidate_score",
+        "base_score", "candidate_score",
         "candidate_sources", "prefilter_rank", "rerank_rank",
         "rerank_source", "matched_tag", "phrase_matches",
     )
@@ -48,14 +48,13 @@ def compact_eaes_retrieval(retrieval):
                 "phrases", []
             ),
         },
-        "parent_local_retrieval": retrieval.get("parent_local_retrieval"),
         "parent_candidates": [
             {key: item.get(key) for key in parent_fields if key in item}
             for item in retrieval.get("parent_candidate_scores") or []
         ],
         "child_candidates": [
             {key: item.get(key) for key in child_fields if key in item}
-            for item in retrieval.get("prefilter_candidates") or []
+            for item in retrieval.get("initial_candidates") or []
         ],
         "final_child_ids": retrieval.get("final_child_ids") or [],
         "counts": retrieval.get("counts") or {},
@@ -119,9 +118,10 @@ class RetrievalMixin:
             return None
         phrase_retrieval = retrieval.get("phrase_retrieval") or {}
         prefilter_candidates = self._as_list(retrieval.get("prefilter_candidates"))
+        initial_candidates = self._as_list(retrieval.get("initial_candidates"))
         ranked = sorted(
             (
-                item for item in prefilter_candidates
+                item for item in initial_candidates
                 if isinstance(item, dict) and item.get("memory_id")
             ),
             key=lambda item: (
@@ -146,23 +146,13 @@ class RetrievalMixin:
         prefilter_memory_ids = {
             item.get("memory_id") for item in prefilter_candidates if isinstance(item, dict)
         }
-        global_memory_ids = {
+        initial_memory_ids = {
             item.get("memory_id")
-            for item in self._as_list(retrieval.get("global_candidates"))
+            for item in initial_candidates
             if isinstance(item, dict)
         }
-        local_memory_ids = {
-            item.get("memory_id")
-            for item in self._as_list(retrieval.get("local_candidates"))
-            if isinstance(item, dict)
-        }
-        merged_memory_ids = set(
-            (retrieval.get("merge_retrieval") or {}).get(
-                "global_plus_local_ids", []
-            )
-        )
         pool_dropped_ids = set(
-            (retrieval.get("merge_retrieval") or {}).get(
+            (retrieval.get("initial_retrieval") or {}).get(
                 "dropped_by_pool_limit_ids", []
             )
         )
@@ -180,7 +170,7 @@ class RetrievalMixin:
         )
 
         diagnostics = {
-            "prefilter_limit": getattr(config, "EAES_PHRASE_UNION_LIMIT", 60),
+            "initial_limit": getattr(config, "EAES_PHRASE_UNION_LIMIT", 60),
             "rerank_limit": getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             "total_scored_memories": len(self.memory.eaes_notes),
             "gold_origins": [],
@@ -199,9 +189,8 @@ class RetrievalMixin:
                     "memory_id": None,
                     "parent_id": None,
                     "indexed": False,
-                    "in_global_child": False,
-                    "in_parent_local": False,
-                    "in_prefilter": False,
+                    "in_prefilter_child": False,
+                    "in_initial_child": False,
                     "in_final_child": False,
                     "prefilter_rank": None,
                     "rerank_rank": None,
@@ -226,11 +215,9 @@ class RetrievalMixin:
                 elif covered_by_selected_parent:
                     drop_reason = "inside_dynamic_parent"
                 elif memory_id in pool_dropped_ids:
-                    drop_reason = "dropped_by_merged_pool_limit"
-                elif memory_id in prefilter_memory_ids:
+                    drop_reason = "dropped_by_initial_pool_limit"
+                elif memory_id in initial_memory_ids:
                     drop_reason = "dropped_by_llm_reranker"
-                elif memory_id in local_memory_ids:
-                    drop_reason = "added_by_parent_local"
                 else:
                     drop_reason = "not_in_any_dynamic_phrase_topk"
                 memory_entries.append({
@@ -238,10 +225,8 @@ class RetrievalMixin:
                     "memory_id": memory_id,
                     "parent_id": note.parent_id if note is not None else None,
                     "indexed": note is not None,
-                    "in_global_child": memory_id in global_memory_ids,
-                    "in_parent_local": memory_id in local_memory_ids,
-                    "in_merged_pool": memory_id in merged_memory_ids,
-                    "in_prefilter": memory_id in prefilter_memory_ids,
+                    "in_prefilter_child": memory_id in prefilter_memory_ids,
+                    "in_initial_child": memory_id in initial_memory_ids,
                     "in_final_child": memory_id in retrieved_memory_ids,
                     "prefilter_rank": rank,
                     "rerank_rank": rerank_rank,
@@ -280,9 +265,7 @@ class RetrievalMixin:
             elif rank_values:
                 origin_drop_reason = "dropped_by_llm_reranker"
             elif any(memory_id in pool_dropped_ids for memory_id in memory_ids):
-                origin_drop_reason = "dropped_by_merged_pool_limit"
-            elif any(memory_id in local_memory_ids for memory_id in memory_ids):
-                origin_drop_reason = "added_by_parent_local"
+                origin_drop_reason = "dropped_by_initial_pool_limit"
             else:
                 origin_drop_reason = "not_in_any_dynamic_phrase_topk"
 
@@ -325,8 +308,8 @@ class RetrievalMixin:
             first_pass = self._retrieve_eaes_first_pass(question, question_emb)
             query_plan = first_pass["query_plan"]
             child_query_plan = self._eaes_child_query_plan(query_plan)
-            global_candidates = first_pass["global_children"]
             prefilter_candidates = first_pass["prefilter_children"]
+            initial_candidates = first_pass["initial_children"]
             candidates = first_pass["final_children"]
             parent_candidates = first_pass["selected_parents"]
             rollback_metadata = {"enabled": False}
@@ -376,10 +359,10 @@ class RetrievalMixin:
                             returned_no_information
                         ),
                     }
-                    rollback_metadata["first_prefilter"] = {
+                    rollback_metadata["first_initial"] = {
                         "child_ids": [
                             candidate.get("memory_id")
-                            for candidate in prefilter_candidates
+                            for candidate in initial_candidates
                         ],
                         "parent_ids": [
                             candidate.get("parent_id")
@@ -395,10 +378,10 @@ class RetrievalMixin:
                     rollback_metadata = {
                         "enabled": True,
                         "first_query_plan": query_plan,
-                        "first_prefilter": {
+                        "first_initial": {
                             "child_ids": [
                                 candidate.get("memory_id")
-                                for candidate in prefilter_candidates
+                                for candidate in initial_candidates
                             ],
                             "parent_ids": [
                                 candidate.get("parent_id")
@@ -440,23 +423,11 @@ class RetrievalMixin:
             final_groups = child_groups + parent_origin_groups
             final_origins = origins_from_groups(final_groups)
 
-            global_groups = child_origin_groups(global_candidates)
-            global_plus_local_ids = first_pass["merge_retrieval"].get(
-                "global_plus_local_ids", []
-            )
-            global_plus_local_candidates = []
-            for memory_id in global_plus_local_ids:
-                note = self.memory.get_eaes_note(memory_id)
-                if note is not None:
-                    global_plus_local_candidates.append(note.to_dict())
-            global_plus_local_groups = child_origin_groups(
-                global_plus_local_candidates
-            )
             prefilter_groups = child_origin_groups(prefilter_candidates)
+            initial_groups = child_origin_groups(initial_candidates)
             stage_origin_groups = {
-                "global_child": global_groups,
-                "global_plus_local": global_plus_local_groups,
                 "prefilter_child": prefilter_groups,
+                "initial_child": initial_groups,
                 "final_child": child_groups,
                 "selected_parent": parent_origin_groups,
                 "final_combined": final_groups,
@@ -476,14 +447,12 @@ class RetrievalMixin:
                 "routing": first_pass["routing"],
                 "counts": first_pass["counts"],
                 "phrase_retrieval": first_pass["phrase_retrieval"],
-                "parent_local_retrieval": first_pass["local_retrieval"],
-                "merge_retrieval": first_pass["merge_retrieval"],
+                "initial_retrieval": first_pass["initial_retrieval"],
                 "parent_candidate_scores": first_pass["routing"].get(
                     "parent_candidates", []
                 ),
-                "global_candidates": global_candidates,
-                "local_candidates": first_pass["local_children"],
                 "prefilter_candidates": prefilter_candidates,
+                "initial_candidates": initial_candidates,
                 "candidates": candidates,
                 "parent_candidates": parent_candidates,
                 "final_child_ids": [
@@ -509,6 +478,9 @@ class RetrievalMixin:
                 "prefilter_origins": stage_origins["prefilter_child"],
                 "prefilter_origin_groups": prefilter_groups,
                 "prefilter_k": len(prefilter_candidates),
+                "initial_origins": stage_origins["initial_child"],
+                "initial_origin_groups": initial_groups,
+                "initial_k": len(initial_candidates),
                 "rollback_check": rollback_metadata,
             }
 

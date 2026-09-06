@@ -96,21 +96,6 @@ class _ReaderGateController:
             "parent_candidates": parents,
         }
 
-    @staticmethod
-    def retrieve_eaes_parent_local_children(*_args, **_kwargs):
-        return [], {"per_parent_k": 3, "parents": []}
-
-    @staticmethod
-    def merge_eaes_hierarchical_candidates(children, _local, _parents, limit=60):
-        children = list(children)[:limit]
-        ids = [child["memory_id"] for child in children]
-        return children, {
-            "local_added_ids": [],
-            "global_plus_local_ids": ids,
-            "dropped_by_pool_limit_ids": [],
-        }
-
-
 class _ReaderGateAgent(EAESMixin):
     def __init__(self, reader_answers):
         self.memory_controller = _ReaderGateController()

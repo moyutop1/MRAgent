@@ -257,7 +257,7 @@ class PhraseFusionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(fused), 57)
-        self.assertIn("SHARED", diagnostics["global_candidate_ids"])
+        self.assertIn("SHARED", diagnostics["prefilter_candidate_ids"])
         by_id = {item["memory_id"]: item for item in fused}
         self.assertGreater(
             by_id["SHARED"]["rrf_score"],

@@ -435,17 +435,7 @@ class Agent(EAESMixin, RetrievalMixin):
         conversation_time = events.get("conversation_time")
         topic_sentences = events.get("topics") or {}
         personal_sentences = self._as_list(events.get("personal_sentences"))
-        tag_prefix_pool = events.get("tag_prefix_pool")
-        uses_composite_tags = "tag_prefix_pool" in events
-        if uses_composite_tags:
-            valid_pool, pool_error = json_scheme.check_tag_prefix_pool(
-                tag_prefix_pool
-            )
-            if not valid_pool:
-                raise ValueError(
-                    f"session {session_id} has an invalid tag_prefix_pool: "
-                    f"{pool_error}"
-                )
+        uses_composite_tags = bool(config.SEMANTIC_HIERARCHY)
         # Legacy summaries are not used by the EAES retrieval pipeline.
         # The keyword cache remains an optional hint for EAES indexing.
 
@@ -507,11 +497,7 @@ class Agent(EAESMixin, RetrievalMixin):
                     )
                 if uses_composite_tags:
                     for tag in tags:
-                        valid_tag, tag_error = json_scheme.check_composite_tag(
-                            tag,
-                            tag_prefix_pool=tag_prefix_pool,
-                            enforce_source=True,
-                        )
+                        valid_tag, tag_error = json_scheme.check_composite_tag(tag)
                         if not valid_tag:
                             raise ValueError(
                                 f"episode event {id} has an invalid composite "

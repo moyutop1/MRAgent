@@ -1,6 +1,7 @@
 import json
 import re
 from collections import defaultdict
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from math import sqrt
 from typing import List, NamedTuple
@@ -183,61 +184,91 @@ def normalize_rewrite_tag_lengths(rewrite_out, max_words=3):
     return changed
 
 
-def normalize_child_tag_cardinality(rewrite_out):
-    """Add a second retrieval view when one composite tag already contains it.
-
-    Child memories require at least two tags.  Some models nevertheless return
-    a single multi-word facet repeatedly, even after retries.  Reusing one
-    concrete word from that facet (or the concrete topic in its prefix) is a
-    lossless local repair: it does not add a fact that was absent from the
-    model output and keeps the original, more specific tag intact.
-    """
+def _compose_child_tag_components(rewrite_out):
+    """Validate generated prefix/facet pairs and compose stored child tags."""
     if not isinstance(rewrite_out, dict):
-        return 0
+        return False, rewrite_out, "output_structure", (
+            "child window rewrite must be a JSON object"
+        )
     sentences = rewrite_out.get("sentence")
     if not isinstance(sentences, list):
-        return 0
+        return True, deepcopy(rewrite_out), "", ""
 
-    changed = 0
-    generic_facets = {
-        "event", "fact", "question", "conversation", "detail",
-    }
-    for sentence in sentences:
+    output = deepcopy(rewrite_out)
+    for sentence_index, sentence in enumerate(output["sentence"]):
         if not isinstance(sentence, dict):
             continue
-        tags = sentence.get("tag")
-        if not isinstance(tags, list) or len(tags) != 1:
-            continue
-        tag = tags[0]
-        if not isinstance(tag, str):
-            continue
-        clean_tag = re.sub(r"\s+", " ", tag).strip()
-        if clean_tag.count(".") != 1:
-            continue
-        raw_prefix, raw_facet = clean_tag.split(".", 1)
-        prefix = raw_prefix.strip()
-        facet = raw_facet.strip()
-        if not prefix or not facet:
-            continue
+        components = sentence.get("tag")
+        if not isinstance(components, list):
+            return False, rewrite_out, "tag_structure", (
+                f"sentence[{sentence_index}].tag must be an array of "
+                "prefix/facet objects"
+            )
+        if not 2 <= len(components) <= 4:
+            return False, rewrite_out, "tag_cardinality", (
+                f"sentence[{sentence_index}].tag must contain 2-4 unique "
+                f"prefix/facet objects; got {len(components)}"
+            )
 
-        facet_words = facet.split()
-        candidates = list(reversed(facet_words)) if len(facet_words) > 1 else []
-        prefix_words = prefix.split()
-        if len(prefix_words) >= 3:
-            candidates.append(" ".join(prefix_words[1:-1]))
+        complete_tags = []
+        for tag_index, component in enumerate(components):
+            location = f"sentence[{sentence_index}].tag[{tag_index}]"
+            if not isinstance(component, dict):
+                return False, rewrite_out, "tag_structure", (
+                    f"{location} must be an object containing prefix and facet"
+                )
+            if "prefix" not in component or "facet" not in component:
+                return False, rewrite_out, "tag_structure", (
+                    f"{location} must contain both prefix and facet"
+                )
+            if set(component) != {"prefix", "facet"}:
+                return False, rewrite_out, "tag_structure", (
+                    f"{location} must contain exactly prefix and facet"
+                )
 
-        for candidate in candidates:
-            candidate = candidate.strip()
-            if (
-                    not candidate
-                    or candidate.casefold() in generic_facets
-                    or candidate.casefold() == facet.casefold()
-                    or len(candidate.split()) > 3):
-                continue
-            sentence["tag"] = [clean_tag, f"{prefix}.{candidate}"]
-            changed += 1
-            break
-    return changed
+            prefix = (
+                re.sub(r"\s+", " ", component["prefix"]).strip()
+                if isinstance(component["prefix"], str)
+                else component["prefix"]
+            )
+            facet = (
+                re.sub(r"\s+", " ", component["facet"]).strip()
+                if isinstance(component["facet"], str)
+                else component["facet"]
+            )
+            prefix_ok, prefix_error = (
+                json_scheme.check_generated_tag_prefix(prefix)
+            )
+            if not prefix_ok:
+                return False, rewrite_out, "tag_prefix", (
+                    f"{location}.prefix {prefix_error}: {component['prefix']!r}"
+                )
+            facet_ok, facet_error = json_scheme.check_tag_facet(facet)
+            if not facet_ok:
+                return False, rewrite_out, "tag_facet", (
+                    f"{location}.facet {facet_error}: {component['facet']!r}"
+                )
+            complete_tags.append(f"{prefix}.{facet}")
+
+        normalized_tags = [tag.casefold() for tag in complete_tags]
+        if len(normalized_tags) != len(set(normalized_tags)):
+            return False, rewrite_out, "tag_duplicate", (
+                f"sentence[{sentence_index}].tag values must be unique after "
+                "whitespace and case normalization"
+            )
+        sentence["tag"] = complete_tags
+
+    return True, output, "", ""
+
+
+def _is_child_tag_validation_error(error):
+    message = str(error or "").casefold()
+    return (
+        ".tag" in message
+        or "tag prefix" in message
+        or "tag facet" in message
+        or "composite tag" in message
+    )
 
 
 _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
@@ -775,61 +806,6 @@ def _rewrite_parent_segment(llm, parent, logger=None):
     )
 
 
-def _extract_session_tag_prefix_pool(llm, parents, logger=None):
-    """Induce one fixed topic-prefix pool from all rewritten Parents."""
-    payload = [
-        {
-            "parent_id": parent.parent_id,
-            "rewrite_content": parent.rewrite_content,
-        }
-        for parent in parents
-    ]
-    user_prompt = Prompts.extract_tag_prefix_pool_prompt(
-        json.dumps(payload, ensure_ascii=False)
-    )
-    last_error = ""
-    # Prefix generation gets exactly one repair attempt.  Do not silently map
-    # synonyms onto canonical heads: the model must return the requested
-    # prefix vocabulary itself, or the session fails explicitly.
-    for attempt in range(2):
-        system_prompt = Prompts.TAG_PREFIX_POOL_SYSTEM_PROMPT
-        if attempt:
-            system_prompt += (
-                "\nThe previous prefix pool was invalid. Return the complete "
-                "JSON object again. "
-                f"Validation error: {last_error}"
-            )
-        output = llm.chat_text(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0 if attempt == 0 else 0.7,
-        )
-        if not isinstance(output, dict):
-            last_error = "tag prefix pool must be a JSON object"
-            continue
-        raw_pool = output.get("tag_prefix_pool")
-        if not isinstance(raw_pool, list):
-            last_error = "tag_prefix_pool must be an array"
-            continue
-        pool = [
-            re.sub(r"\s+", " ", value).strip()
-            if isinstance(value, str) else value
-            for value in raw_pool
-        ]
-        valid, last_error = json_scheme.check_tag_prefix_pool(pool)
-        if valid:
-            return pool
-    if logger:
-        logger.error(
-            "session tag prefix pool failed after retries: %s", last_error
-        )
-    raise ValueError(
-        f"session tag prefix pool failed after retries: {last_error}"
-    )
-
-
 def _child_window_source_text(window, turns, conversation_time):
     dialogue = "\n".join(
         turn.line for turn in child_window_turns(window, turns)
@@ -1017,7 +993,6 @@ def _rewrite_child_window(
         turns,
         conversation_time,
         previous_rewrites=None,
-        tag_prefix_pool=None,
         logger=None,
 ):
     current_turns = child_window_turns(window, turns)
@@ -1029,16 +1004,16 @@ def _rewrite_child_window(
             "current_window_turns": [turn.line for turn in current_turns],
         }, ensure_ascii=False),
         json.dumps(previous_rewrites or [], ensure_ascii=False),
-        json.dumps(tag_prefix_pool or [], ensure_ascii=False),
     )
     source_text = _child_window_source_text(
         window, turns, conversation_time
     )
     last_error = ""
     last_output = None
+    last_validated_output = None
     attempt = 0
     general_retries_used = 0
-    retrying_prefix_error = False
+    tag_retry_used = False
     while True:
         system_prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
         request_prompt = user_prompt
@@ -1056,78 +1031,66 @@ def _rewrite_child_window(
                 "is missing, incorporate that turn into the appropriate memory or "
                 "add a valid memory for it. Return the complete repaired object."
             )
-        output = llm.chat_text(
+        raw_output = llm.chat_text(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request_prompt},
             ],
             temperature=0.0 if attempt == 0 else 0.7,
         )
-        last_output = output
-        inherited_question_count = inherit_adjacent_question_origins(
-            output, current_turns
+        last_output = raw_output
+        tags_valid, output, error_kind, compose_error = (
+            _compose_child_tag_components(raw_output)
         )
-        if inherited_question_count and logger:
-            logger.info(
-                "inherited %d adjacent question origin(s) for %s through %s",
-                inherited_question_count,
-                window.start_origin,
-                window.end_origin,
+        if tags_valid:
+            # ``topics`` has no meaning in a hierarchical child rewrite.
+            # Silently discard an obsolete model-provided value instead of
+            # storing it or spending a retry on it.
+            output.pop("topics", None)
+            inherited_question_count = inherit_adjacent_question_origins(
+                output, current_turns
             )
-        normalize_sentence_ids(output)
-        normalize_rewrite_temporal_granularity(output, source_text)
-        normalized_property_count = normalize_rewrite_semantic_properties(
-            output
-        )
-        if normalized_property_count and logger:
-            logger.info(
-                "normalized %d leaked tag-head semantic property value(s) "
-                "for %s through %s",
-                normalized_property_count,
-                window.start_origin,
-                window.end_origin,
+            if inherited_question_count and logger:
+                logger.info(
+                    "inherited %d adjacent question origin(s) for %s through %s",
+                    inherited_question_count,
+                    window.start_origin,
+                    window.end_origin,
+                )
+            normalize_sentence_ids(output)
+            normalize_rewrite_temporal_granularity(output, source_text)
+            normalized_property_count = normalize_rewrite_semantic_properties(
+                output
             )
-        normalized_tag_count = normalize_rewrite_tag_lengths(output)
-        if normalized_tag_count and logger:
-            logger.info(
-                "normalized %d overlong child tag(s) for %s through %s",
-                normalized_tag_count,
-                window.start_origin,
-                window.end_origin,
+            if normalized_property_count and logger:
+                logger.info(
+                    "normalized %d leaked tag-head semantic property value(s) "
+                    "for %s through %s",
+                    normalized_property_count,
+                    window.start_origin,
+                    window.end_origin,
+                )
+            last_validated_output = output
+            valid, last_error = json_scheme.check_child_window_rewrite_json(
+                output,
+                window,
+                list(turns),
+                source_text,
             )
-        normalized_tag_cardinality_count = normalize_child_tag_cardinality(
-            output
-        )
-        if normalized_tag_cardinality_count and logger:
-            logger.info(
-                "expanded %d single-tag child memory/memories for %s "
-                "through %s",
-                normalized_tag_cardinality_count,
-                window.start_origin,
-                window.end_origin,
-            )
-        valid, last_error = json_scheme.check_child_window_rewrite_json(
-            output,
-            window,
-            list(turns),
-            source_text,
-            tag_prefix_pool=tag_prefix_pool or [],
-        )
-        if valid:
-            output["conversation_time"] = conversation_time or output.get(
-                "conversation_time"
-            )
-            return output
-        is_prefix_error = (
-            "tag prefix" in str(last_error).casefold()
-            or "tag_prefix" in str(last_error).casefold()
-        )
-        if retrying_prefix_error:
-            # This output was the single retry for a prefix validation error.
-            # Any remaining validation failure ends the child rewrite.
-            break
-        if is_prefix_error:
-            retrying_prefix_error = True
+            if valid:
+                output["conversation_time"] = conversation_time or output.get(
+                    "conversation_time"
+                )
+                return output
+            is_tag_error = _is_child_tag_validation_error(last_error)
+        else:
+            last_error = compose_error
+            is_tag_error = error_kind.startswith("tag_")
+
+        if is_tag_error:
+            if tag_retry_used:
+                break
+            tag_retry_used = True
         else:
             if general_retries_used >= 3:
                 break
@@ -1138,15 +1101,16 @@ def _rewrite_child_window(
         ".semantic_properties must contain exactly one persistence property"
         in str(last_error)
     )
-    if persistence_error:
-        fallback_count = fallback_invalid_persistence_to_unknown(last_output)
+    if persistence_error and last_validated_output is not None:
+        fallback_count = fallback_invalid_persistence_to_unknown(
+            last_validated_output
+        )
         if fallback_count:
             valid, fallback_error = json_scheme.check_child_window_rewrite_json(
-                last_output,
+                last_validated_output,
                 window,
                 list(turns),
                 source_text,
-                tag_prefix_pool=tag_prefix_pool or [],
             )
             if valid:
                 if logger:
@@ -1157,11 +1121,11 @@ def _rewrite_child_window(
                         window.start_origin,
                         window.end_origin,
                     )
-                last_output["conversation_time"] = (
+                last_validated_output["conversation_time"] = (
                     conversation_time
-                    or last_output.get("conversation_time")
+                    or last_validated_output.get("conversation_time")
                 )
-                return last_output
+                return last_validated_output
             last_error = fallback_error
     if logger:
         logger.error(
@@ -1181,8 +1145,8 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
     turns = parse_session_turns(text)
     if not turns:
         empty = _empty_rewrite(conversation_time)
+        empty.pop("topics", None)
         empty["parent_nodes"] = []
-        empty["tag_prefix_pool"] = []
         return empty
 
     parents = plan_parent_segments(llm, turns, conversation_time)
@@ -1192,9 +1156,6 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         _rewrite_parent_segment(llm, parent, logger=logger)
         for parent in parents
     ]
-    tag_prefix_pool = _extract_session_tag_prefix_pool(
-        llm, rewritten_parents, logger=logger
-    )
 
     window_outputs = []
     generated_memories = []
@@ -1209,7 +1170,6 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             turns,
             conversation_time,
             previous_rewrites=previous_rewrites,
-            tag_prefix_pool=tag_prefix_pool,
             logger=logger,
         )
         kept_sentences, last_child_embedding = (
@@ -1244,8 +1204,8 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         })
 
     merged = _empty_rewrite(conversation_time)
+    merged.pop("topics", None)
     merged["parent_nodes"] = parent_outputs
-    merged["tag_prefix_pool"] = tag_prefix_pool
     personal_counter = 1
     for output in window_outputs:
         for sentence in output.get("sentence") or []:

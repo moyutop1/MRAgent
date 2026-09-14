@@ -439,24 +439,16 @@ class SemanticHierarchyTests(unittest.TestCase):
             llm.calls[1][0]["content"],
         )
 
-    def test_single_child_tag_gets_one_repair_attempt(self):
+    def test_single_child_tag_is_accepted_without_repair(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         tag = "Caroline LGBTQ support activity.greeting inquiry"
-        invalid = _rewrite_output(_sentence(
+        single_tag = _rewrite_output(_sentence(
             "D1:1",
             "Caroline greeted Melanie and asked how she was doing.",
             tag=[tag],
         ))
-        valid = _rewrite_output(_sentence(
-            "D1:1",
-            "Caroline greeted Melanie and asked how she was doing.",
-            tag=[
-                tag,
-                "Caroline LGBTQ support activity.wellbeing question",
-            ],
-        ))
-        llm = SequenceLLM([invalid, valid])
+        llm = SequenceLLM([single_tag])
 
         output = _rewrite_child_window(
             llm,
@@ -465,11 +457,8 @@ class SemanticHierarchyTests(unittest.TestCase):
             "2023-05-08",
         )
 
-        self.assertEqual(output["sentence"][0]["tag"], [
-            tag,
-            "Caroline LGBTQ support activity.wellbeing question",
-        ])
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(output["sentence"][0]["tag"], [tag])
+        self.assertEqual(len(llm.calls), 1)
 
     def test_compose_child_tag_components_joins_prefix_and_facet(self):
         output = _rewrite_output(_sentence(
@@ -492,21 +481,21 @@ class SemanticHierarchyTests(unittest.TestCase):
             "Caroline support activity.community work",
         ])
 
-    def test_single_child_tag_raises_after_one_failed_repair(self):
+    def test_empty_child_tag_raises_after_one_failed_repair(self):
         turns = parse_session_turns(_dialogue(1))
         window = ChildWindow("D1:1", "D1:1")
         invalid = _rewrite_output(_sentence(
             "D1:1", "A generic event was mentioned.",
-            tag=["Caroline activity.event"],
+            tag=[],
         ))
         llm = SequenceLLM([invalid, invalid])
 
-        with self.assertRaisesRegex(ValueError, "must contain 2-4"):
+        with self.assertRaisesRegex(ValueError, "must contain 1-4"):
             _rewrite_child_window(llm, window, turns, "2023-05-08")
 
         retry_system = llm.calls[1][0]["content"]
         self.assertIn(
-            "sentence[0].tag must contain 2-4 unique prefix/facet objects; got 1",
+            "sentence[0].tag must contain 1-4 unique prefix/facet objects; got 0",
             retry_system,
         )
 

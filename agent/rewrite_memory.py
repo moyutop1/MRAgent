@@ -204,9 +204,9 @@ def _compose_child_tag_components(rewrite_out):
                 f"sentence[{sentence_index}].tag must be an array of "
                 "prefix/facet objects"
             )
-        if not 2 <= len(components) <= 4:
+        if not 1 <= len(components) <= 4:
             return False, rewrite_out, "tag_cardinality", (
-                f"sentence[{sentence_index}].tag must contain 2-4 unique "
+                f"sentence[{sentence_index}].tag must contain 1-4 unique "
                 f"prefix/facet objects; got {len(components)}"
             )
 

@@ -26,7 +26,7 @@ SCHEMA = {
           },
           "tag": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 4,
             "uniqueItems": True,
             "items": {
@@ -205,9 +205,9 @@ def check_rewrite_json(
       if not isinstance(sentence, dict):
         continue
       tags = sentence.get("tag")
-      if isinstance(tags, list) and not 2 <= len(tags) <= 4:
+      if isinstance(tags, list) and not 1 <= len(tags) <= 4:
         return False, (
-          f"sentence[{index}].tag must contain 2-4 unique composite tags; "
+          f"sentence[{index}].tag must contain 1-4 unique composite tags; "
           f"got {len(tags)}"
         )
 

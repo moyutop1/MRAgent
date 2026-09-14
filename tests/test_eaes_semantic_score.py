@@ -81,10 +81,10 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
         self.assertTrue(ok, error)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
-    def test_tags_require_strict_two_to_four_short_phrase_array(self):
+    def test_tags_require_strict_one_to_four_short_phrase_array(self):
         invalid_tags = [
             "Personal Profile",
-            ["only one"],
+            [],
             ["one", "two", "three", "four", "five"],
             ["valid tag", "six word tag is definitely invalid"],
             ["Personal Profile", " personal   profile "],
@@ -95,6 +95,11 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
             with self.subTest(tags=tags):
                 ok, _ = check_rewrite_json(payload, self.dialogue)
                 self.assertFalse(ok)
+
+        payload = _valid_rewrite()
+        payload["sentence"][0]["tag"] = ["single valid tag"]
+        ok, error = check_rewrite_json(payload, self.dialogue)
+        self.assertTrue(ok, error)
 
     @unittest.skipUnless(HAS_JSONSCHEMA, "jsonschema is not installed")
     def test_hierarchy_rewrite_accepts_generated_composite_tags(self):
@@ -175,7 +180,7 @@ class SemanticRewriteSchemaTests(unittest.TestCase):
         for prompt in (
                 Prompts.REWRITE_SYSTEM_PROMPT,
                 Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT):
-            self.assertIn("two to four", prompt)
+            self.assertIn("one to four", prompt)
             self.assertIn("independent fact", prompt)
             self.assertIn("collectively cover", prompt)
 

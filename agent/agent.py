@@ -491,9 +491,9 @@ class Agent(EAESMixin, RetrievalMixin):
                     semantic_properties=semantic_properties,
                 )
                 tags = ee.get("tag")
-                if not isinstance(tags, list) or not 2 <= len(tags) <= 4:
+                if not isinstance(tags, list) or not 1 <= len(tags) <= 4:
                     raise ValueError(
-                        f"episode event {id} requires a tag array with 2-4 items"
+                        f"episode event {id} requires a tag array with 1-4 items"
                     )
                 if uses_composite_tags:
                     for tag in tags:

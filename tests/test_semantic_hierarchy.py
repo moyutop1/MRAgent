@@ -233,7 +233,7 @@ class SemanticHierarchyTests(unittest.TestCase):
             llm.calls[1][0]["content"],
         )
 
-    def test_child_window_plan_rejects_boundary_between_question_and_answer(self):
+    def test_child_window_plan_allows_boundary_after_question_mark(self):
         turns = parse_session_turns("\n".join([
             "time:2023-05-08",
             "dia_id:D1:1 Alex: I have an update.",
@@ -241,21 +241,15 @@ class SemanticHierarchyTests(unittest.TestCase):
             "dia_id:D1:3 Morgan: I am researching adoption agencies.",
             "dia_id:D1:4 Alex: That sounds promising.",
         ]))
-        llm = SequenceLLM([
-            {"child_segments": [
-                {"start_origin": "D1:1", "end_origin": "D1:2"},
-                {"start_origin": "D1:3", "end_origin": "D1:4"},
-            ]},
-            {"child_segments": [
-                {"start_origin": "D1:1", "end_origin": "D1:3"},
-                {"start_origin": "D1:4", "end_origin": "D1:4"},
-            ]},
-        ])
+        llm = SequenceLLM([{"child_segments": [
+            {"start_origin": "D1:1", "end_origin": "D1:2"},
+            {"start_origin": "D1:3", "end_origin": "D1:4"},
+        ]}])
 
         windows = plan_child_windows(llm, turns, "2023-05-08")
 
-        self.assertEqual(windows[0], ChildWindow("D1:1", "D1:3"))
-        self.assertIn("question/answer pair", llm.calls[1][0]["content"])
+        self.assertEqual(windows[0], ChildWindow("D1:1", "D1:2"))
+        self.assertEqual(len(llm.calls), 1)
 
     def test_child_window_plan_allows_one_turn_and_enforces_maximum(self):
         single_turns = parse_session_turns(_dialogue(1))

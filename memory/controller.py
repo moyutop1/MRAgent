@@ -118,9 +118,9 @@ class MemoryController:
     def _eaes_child_tags(self, note):
         event = self.memory.episode_events[note.event_id]
         tags = event.tag_t
-        if not isinstance(tags, list) or not 2 <= len(tags) <= 4:
+        if not isinstance(tags, list) or not 1 <= len(tags) <= 4:
             raise ValueError(
-                f"EAES child {note.event_id} requires a tag array with 2-4 items"
+                f"EAES child {note.event_id} requires a tag array with 1-4 items"
             )
         clean_tags = []
         for tag in tags:

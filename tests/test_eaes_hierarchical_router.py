@@ -58,6 +58,11 @@ class _Note:
         }
 
 
+class _Event:
+    def __init__(self, tags):
+        self.tag_t = tags
+
+
 def _parent_rows(count=6, raw_similarity=0.0):
     return [
         {
@@ -72,6 +77,23 @@ def _parent_rows(count=6, raw_similarity=0.0):
 
 @unittest.skipUnless(np is not None, "numpy is unavailable")
 class HierarchicalRouterTests(unittest.TestCase):
+    def test_retrieval_tag_validation_allows_one_and_rejects_zero(self):
+        store = _Store()
+        note = _Note(1)
+        store.episode_events[note.event_id] = _Event([
+            "Caroline profile.career interest"
+        ])
+        controller = MemoryController(store)
+
+        self.assertEqual(
+            controller._eaes_child_tags(note),
+            ["Caroline profile.career interest"],
+        )
+
+        store.episode_events[note.event_id].tag_t = []
+        with self.assertRaisesRegex(ValueError, "1-4 items"):
+            controller._eaes_child_tags(note)
+
     def test_breadth_changes_dynamic_parent_budget(self):
         controller = MemoryController(_Store())
         children = [

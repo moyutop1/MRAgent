@@ -293,10 +293,7 @@ class PhraseFusionTests(unittest.TestCase):
         store = MemorySystem()
         for index, (tags, vector) in enumerate(
                 [
-                    ([
-                        "Caroline profile.unrelated",
-                        "Caroline profile.alpha",
-                    ], np.array([1.0, 0.0])),
+                    (["Caroline profile.alpha"], np.array([1.0, 0.0])),
                     ([
                         "Caroline activity.other topic",
                         "Caroline activity.beta",
@@ -349,10 +346,10 @@ class PhraseFusionTests(unittest.TestCase):
         self.assertEqual(
             rankings[0][0]["matched_tag"], "Caroline profile.alpha"
         )
-        self.assertEqual(rankings[0][0]["matched_tag_index"], 1)
-        self.assertEqual(rankings[0][0]["tag"], [
-            "Caroline profile.unrelated", "Caroline profile.alpha",
-        ])
+        self.assertEqual(rankings[0][0]["matched_tag_index"], 0)
+        self.assertEqual(
+            rankings[0][0]["tag"], ["Caroline profile.alpha"]
+        )
         self.assertEqual(rankings[1][0]["memory_id"], "M_2")
         self.assertEqual(
             rankings[1][0]["matched_tag"], "Caroline activity.beta"
@@ -360,7 +357,6 @@ class PhraseFusionTests(unittest.TestCase):
         self.assertEqual(rankings[2][0]["memory_id"], "M_1")
         self.assertEqual(rankings[3][0]["memory_id"], "M_2")
         self.assertEqual(embedding_inputs[0], [
-            "Caroline profile.unrelated",
             "Caroline profile.alpha",
             "Caroline activity.other topic",
             "Caroline activity.beta",

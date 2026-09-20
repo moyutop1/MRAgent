@@ -136,6 +136,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", False),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
             patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
         ):
             answer, prediction_context = agent.answer_question_eaes(
@@ -169,6 +170,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
             patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
@@ -197,6 +199,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
             patch.object(config, "SEMANTIC_HIERARCHY", False),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
         ):
             agent.answer_question_eaes("question", category=1)
 
@@ -219,6 +222,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
         ):
             agent.answer_question_eaes("question", category=1)
 

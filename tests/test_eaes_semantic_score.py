@@ -402,6 +402,118 @@ class SemanticScoringTests(unittest.TestCase):
         self.assertEqual(dog["score"], unrelated["score"])
         self.assertNotIn("keyword", dog["score_parts"])
 
+    def test_rollback_child_uses_agreed_formula_and_existing_embedding(self):
+        memory = MemorySystem()
+        event_id = "D1:1-1"
+        memory.episode_events[event_id] = EpisodeEvent(
+            event_id,
+            "Caroline adopted a dog.",
+            "D1:1",
+            semantic_properties=["event_action", "durable"],
+        )
+        memory.add_eaes_memory_note(EAESMemoryNote(
+            memory_id="M_D1_1_1",
+            event_id=event_id,
+            entities=["Caroline"],
+            attribute_paths=["Caroline pet possession.dog adoption"],
+            raw_text="Caroline: I adopted a dog.",
+            rewrite_content="Caroline adopted a dog.",
+            conversation_time="2023-07-22",
+            event_lifecycle="current",
+            origin="D1:1",
+            embedding=np.array([1.0, 0.0], dtype=np.float32),
+            retrieval_embedding=np.array([1.0, 0.0], dtype=np.float32),
+        ))
+        controller = MemoryController(memory)
+
+        with (
+            patch.object(config, "EAES_SEMANTIC_SCORE", True),
+            patch(
+                "memory.controller.get_embedding",
+                return_value=np.array([[1.0, 0.0]], dtype=np.float32),
+            ) as get_embedding,
+        ):
+            rows = controller.retrieve_eaes_rollback_children(
+                query_phases=["missing pet"],
+                semantic_properties=["event_action", "durable"],
+                entities=["Caroline"],
+                question_emb=np.array([1.0, 0.0], dtype=np.float32),
+                limit=27,
+            )
+
+        get_embedding.assert_called_once_with(["missing pet"])
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["score"], 3.8)
+        self.assertEqual(rows[0]["score_parts"]["entity"], 1.0)
+        self.assertEqual(rows[0]["score_parts"]["rollback_phase"], 1.0)
+        self.assertEqual(rows[0]["score_parts"]["question_embedding"], 1.0)
+        self.assertEqual(rows[0]["score_parts"]["semantic_bonus"], 0.2)
+        self.assertEqual(
+            rows[0]["score_parts"]["matched_semantic_properties"],
+            ["event_action", "durable"],
+        )
+
+    def test_rollback_semantic_bonus_is_flag_controlled_and_never_filters(self):
+        memory = MemorySystem()
+        event_id = "D1:1-1"
+        memory.episode_events[event_id] = EpisodeEvent(
+            event_id,
+            "Caroline adopted a dog.",
+            "D1:1",
+            semantic_properties=["event_action", "durable"],
+        )
+        memory.add_eaes_memory_note(EAESMemoryNote(
+            memory_id="M_D1_1_1",
+            event_id=event_id,
+            entities=["Caroline"],
+            attribute_paths=["Caroline pet possession.dog adoption"],
+            raw_text="Caroline: I adopted a dog.",
+            rewrite_content="Caroline adopted a dog.",
+            conversation_time="2023-07-22",
+            event_lifecycle="current",
+            origin="D1:1",
+            retrieval_embedding=np.array([1.0, 0.0], dtype=np.float32),
+        ))
+
+        def retrieve(enabled, properties):
+            controller = MemoryController(memory)
+            with (
+                patch.object(config, "EAES_SEMANTIC_SCORE", enabled),
+                patch(
+                    "memory.controller.get_embedding",
+                    return_value=np.array([[1.0, 0.0]], dtype=np.float32),
+                ),
+            ):
+                return controller.retrieve_eaes_rollback_children(
+                    query_phases=["missing pet"],
+                    semantic_properties=properties,
+                    entities=["Caroline"],
+                    limit=27,
+                )[0]
+
+        disabled = retrieve(False, ["event_action", "durable"])
+        empty = retrieve(True, [])
+        mismatch = retrieve(True, ["relation_social"])
+        self.assertEqual(disabled["score_parts"]["semantic_bonus"], 0.0)
+        self.assertEqual(empty["score_parts"]["semantic_bonus"], 0.0)
+        self.assertEqual(mismatch["score_parts"]["semantic_bonus"], 0.0)
+        self.assertEqual(disabled["score"], empty["score"])
+        self.assertEqual(empty["score"], mismatch["score"])
+
+        controller = MemoryController(memory)
+        with patch(
+            "memory.controller.get_embedding",
+            return_value=np.array([[1.0, 0.0]], dtype=np.float32),
+        ):
+            excluded = controller.retrieve_eaes_rollback_children(
+                query_phases=["missing pet"],
+                semantic_properties=[],
+                entities=["Caroline"],
+                exclude_memory_ids={"M_D1_1_1"},
+                limit=27,
+            )
+        self.assertEqual(excluded, [])
+
     def test_parent_retrieval_embeds_query_keywords(self):
         memory = MemorySystem()
         memory.add_eaes_parent_node(EAESParentNode(
@@ -427,6 +539,38 @@ class SemanticScoringTests(unittest.TestCase):
         get_embedding.assert_called_once_with(["dog"])
         self.assertEqual(rows[0]["parent_id"], "1-1")
         self.assertEqual(rows[0]["matched_keyword"], "dog")
+
+    def test_rollback_parent_scores_gap_phases_and_honors_exclusions(self):
+        memory = MemorySystem()
+        memory.add_eaes_parent_node(EAESParentNode(
+            parent_id="1-1",
+            rewrite_content="Caroline likes dogs.",
+            child_ids=[],
+            child_attributes=[],
+            retrieval_embedding=np.array([1.0, 0.0], dtype=np.float32),
+        ))
+        controller = MemoryController(memory)
+
+        with (
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch(
+                "memory.controller.get_embedding",
+                return_value=np.array([[1.0, 0.0]], dtype=np.float32),
+            ) as get_embedding,
+        ):
+            rows = controller.retrieve_eaes_rollback_parents(
+                ["missing pet"], limit=3
+            )
+
+        get_embedding.assert_called_once_with(["missing pet"])
+        self.assertEqual(rows[0]["parent_id"], "1-1")
+        self.assertEqual(rows[0]["matched_query_phase"], "missing pet")
+        self.assertNotIn("semantic_bonus", rows[0])
+
+        excluded = controller.retrieve_eaes_rollback_parents(
+            ["missing pet"], exclude_parent_ids={"1-1"}, limit=3
+        )
+        self.assertEqual(excluded, [])
 
 
 if __name__ == "__main__":

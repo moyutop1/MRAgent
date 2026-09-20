@@ -473,30 +473,53 @@ Schema:
   "ranked_memory_ids": ["M_D1_2_1"]
 }"""
 
-    EAES_ROLLBACK_QUERY_PROMPT = """The input also contains the current query plan and only the rewrite contents of the 20 memories retrieved in the first pass.
-Use those rewrite contents only to identify answer-relevant evidence that may still be missing. Produce one replacement query plan that searches for complementary evidence outside the current memories.
-Keep the same query-plan schema and constraints. Do not add fields, answer the question, assume that a retrieved memory is true, or put a guessed answer into a query attribute.
-Prefer alternate entities, relations, wording, temporal constraints, or answer-slot descriptions only when they are justified by the original question and address a real gap in the current memories."""
+    EAES_ROLLBACK_QUERY_PROMPT = """You are an evidence-sufficiency controller for long-term conversational memory. Only output valid JSON.
+The input contains the original question, only the rewrite_content strings currently available as evidence, the four initial query phases, any previous rollback decisions, and the number of rollback retrievals still available.
+
+First decide whether the selected rewrite contents already contain all evidence needed to answer the original question correctly. Judge evidence sufficiency, not whether a language model could guess a plausible answer.
+
+Output schema:
+{
+  "state": "no_need_more | need_more",
+  "semantic_properties": ["property required by the missing evidence"],
+  "query_phase": ["short phase 1", "short phase 2", "short phase 3", "short phase 4"]
+}
+
+State rules:
+- Use "no_need_more" only when the current rewrite contents explicitly provide every necessary fact, entity binding, relation, and time/detail constraint needed by the question.
+- Use "need_more" when any necessary evidence is absent, only topically related, attached to the wrong entity/event, too imprecise, or in unresolved conflict.
+- For "no_need_more", semantic_properties and query_phase must both be empty arrays.
+- For "need_more", describe only the still-missing evidence. Do not repeat evidence already present merely to increase confidence.
+
+semantic_properties rules:
+- Allowed content properties are: "event_action", "state_opinion", "personal_profile", "relation_social".
+- Allowed persistence properties are: "transient", "episodic", "durable".
+- Content and persistence properties may each contain multiple applicable labels.
+- If the missing evidence's semantic properties are unknown, output an empty array. An empty array means no memory receives a semantic-property bonus.
+- Never output the literal label "unknown", tag-prefix heads, or any unlisted property. Do not repeat a property.
+
+query_phase rules:
+- For "need_more", generate exactly four distinct non-empty phases, each containing no more than three whitespace-separated words. Distinctness is case-insensitive.
+- Every phase must target the missing evidence rather than restating the overall question or evidence already present.
+- The rollback phases are deliberately allowed more aggressive synonymy than the first query plan. Use meaningfully different synonyms, paraphrased relations, event roles, nominalizations, or inverse relation wording that could retrieve the same missing fact.
+- Preserve the missing fact's known person/entity, event, object, and explicit temporal or relational constraint where useful. Evidence and entities explicitly present in the supplied rewrites may be used as bridge terms.
+- Do not invent an answer, unknown entity, event, object, date, or unsupported constraint. Do not use generic words such as "information", "detail", or "mention" when a concrete missing relation is available.
+- Phases are ordinary retrieval expressions, not child-memory prefix.facet tags. Do not output questions or explanations.
+- Previous rollback decisions are context: do not repeat an unsuccessful phase set without a meaningfully different access path.
+- On a repair attempt, use validation_error and previous_invalid_output to correct the invalid fields while preserving the intended missing-evidence target.
+
+Return exactly the three fields in the schema and nothing else."""
 
     EAES_ROLLBACK_SUPPLEMENT_RERANK_PROMPT = """You select complementary memory nodes for a retrieval rollback check. Only output valid JSON.
 The input contains two separately prefiltered groups: child_candidates has up to 27 child memories and parent_candidates has up to 3 parent memories. Their scores are meaningful only within the same node type; never compare child and parent numeric scores directly.
-Use the question, current query plan, rollback query plan, current top rewrite contents, and candidate contents. Select the requested total number of nodes that add the strongest missing answer evidence. Do not select a node merely because it repeats evidence already present. Do not invent IDs.
-Return exactly limit distinct nodes when at least limit candidates are provided.
+Use the question, rollback decision, current evidence rewrite contents, and candidate contents. Select up to limit distinct nodes that add the strongest missing answer evidence. Do not select a node merely because it repeats evidence already present. Do not invent IDs.
+Returning fewer than limit nodes, including an empty array, is valid when no additional candidate provides useful missing evidence.
 Schema:
 {
   "ranked_nodes": [
     {"node_type": "child", "node_id": "M_D1_2_1"},
     {"node_type": "parent", "node_id": "D1:t2"}
   ]
-}"""
-
-    EAES_ROLLBACK_FINAL_RERANK_PROMPT = """You rerank one merged child candidate pool and one merged parent candidate pool. Each pool contains the first-pass memories plus any supplemental rollback memories of that type. Only output valid JSON.
-Rank child and parent memories separately. Retrieval ranks and scores are only weak hints because candidates may have been retrieved by different query plans. Prefer nodes that directly answer the question, preserve complementary evidence, and avoid redundancy. A rollback node may replace a first-pass node only when it is more useful for answering the question. Do not invent IDs.
-Return exactly child_limit distinct child IDs and exactly parent_limit distinct parent IDs when each pool is large enough.
-Schema:
-{
-  "ranked_child_ids": ["M_D1_2_1"],
-  "ranked_parent_ids": ["D1:t2"]
 }"""
 
     EAES_EVIDENCE_SELECTION_PROMPT = """You select compact answer evidence from retrieved memory notes. Only output valid JSON.

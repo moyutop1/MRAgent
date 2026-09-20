@@ -40,12 +40,50 @@ def _parents(prefix, count):
     ]
 
 
+def _decision(state="need_more", semantic_properties=None, query_phase=None):
+    if state == "no_need_more":
+        return {
+            "state": state,
+            "semantic_properties": [],
+            "query_phase": [],
+        }
+    return {
+        "state": state,
+        "semantic_properties": (
+            ["event_action", "episodic"]
+            if semantic_properties is None else semantic_properties
+        ),
+        "query_phase": query_phase or [
+            "Caroline adopted pet",
+            "Caroline gained animal",
+            "pet adoption event",
+            "animal joined Caroline",
+        ],
+    }
+
+
+def _query_plan():
+    return {
+        "entities": ["Caroline"],
+        "query_attributes": ["profile.pet: animal owned by Caroline"],
+        "keywords": ["animal companion"],
+        "retrieval_phrases": [
+            "Caroline pet",
+            "owned animal",
+            "animal companion",
+            "pet identity",
+        ],
+    }
+
+
 class _RollbackLLM:
     def __init__(self, responses):
         self.responses = list(responses)
         self.inputs = []
+        self.system_prompts = []
 
     def chat_text(self, messages, **_kwargs):
+        self.system_prompts.append(messages[0]["content"])
         self.inputs.append(json.loads(messages[-1]["content"]))
         return self.responses.pop(0)
 
@@ -55,13 +93,21 @@ class _RollbackController:
         self.child_calls = []
         self.parent_calls = []
 
-    def retrieve_eaes_candidates(self, query_plan, _question_emb, **kwargs):
-        self.child_calls.append((dict(query_plan), kwargs))
-        return _children("RC", 27)
+    def retrieve_eaes_rollback_children(self, **kwargs):
+        call = {
+            **kwargs,
+            "exclude_memory_ids": set(kwargs.get("exclude_memory_ids") or []),
+        }
+        self.child_calls.append(call)
+        return _children(f"R{len(self.child_calls)}C", kwargs["limit"])
 
-    def retrieve_eaes_parent_candidates(self, query_plan, _question_emb, **kwargs):
-        self.parent_calls.append((dict(query_plan), kwargs))
-        return _parents("RP", 3)
+    def retrieve_eaes_rollback_parents(self, **kwargs):
+        call = {
+            **kwargs,
+            "exclude_parent_ids": set(kwargs.get("exclude_parent_ids") or []),
+        }
+        self.parent_calls.append(call)
+        return _parents(f"R{len(self.parent_calls)}P", kwargs["limit"])
 
 
 class _RollbackAgent(EAESMixin):
@@ -76,334 +122,365 @@ class _RollbackAgent(EAESMixin):
         return value if isinstance(value, list) else [value]
 
 
-class _ReaderGateController:
-    @staticmethod
-    def retrieve_eaes_candidates(_query_plan, _question_emb, **_kwargs):
-        return _children("C", 20)
-
-    @staticmethod
-    def retrieve_eaes_phrase_candidates(_retrieval_phrases, **kwargs):
-        children = _children("C", 20)
-        diagnostics = {"phrases": [{"selected_k": 20}] * 4}
-        return (children, diagnostics) if kwargs.get("include_diagnostics") else children
-
-    @staticmethod
-    def route_eaes_parent_candidates(_query_plan, _children, _question_emb=None):
-        parents = _parents("P", 4)
-        return parents, {
-            "breadth_value": 0.5,
-            "detail_value": 0.5,
-            "parent_candidates": parents,
-        }
-
-class _ReaderGateAgent(EAESMixin):
-    def __init__(self, reader_answers):
-        self.memory_controller = _ReaderGateController()
-        self.reader_answers = list(reader_answers)
+class _AnswerAgent(_RollbackAgent):
+    def __init__(self, responses):
+        super().__init__(responses)
         self.reader_inputs = []
-        self.rollback_calls = 0
 
     @staticmethod
-    def parse_eaes_query(_question, _question_emb=None):
+    def _retrieve_eaes_first_pass(_question, _question_emb=None):
         return {
-            "query_attributes": ["profile.pet"],
-            "keywords": ["pet"],
-            "retrieval_phrases": [
-                "Caroline possession.pet",
-                "Caroline possession.owned pet",
-                "Caroline profile.animal",
-                "Caroline profile.companion",
-            ],
-            "breadth_value": 0.5,
-            "detail_value": 0.5,
+            "query_plan": _query_plan(),
+            "final_children": _children("C", 15),
+            "selected_parents": _parents("P", 4),
         }
-
-    @staticmethod
-    def _eaes_child_query_plan(query_plan):
-        plan = dict(query_plan)
-        plan.pop("retrieval_phrases", None)
-        return plan
-
-    @staticmethod
-    def rerank_eaes_phrase_candidates(_question, candidates, top_k=15):
-        return list(candidates)[:top_k]
 
     def _read_eaes_candidates(
             self, _question, _child_query_plan, candidates, parents,
-            _category=0, _lm_current_date=None
+            _category=0, _lm_current_date=None,
     ):
         self.reader_inputs.append((list(candidates), list(parents)))
-        response = self.reader_answers.pop(0)
-        if isinstance(response, tuple):
-            answer, raw_answer = response
-        else:
-            answer = raw_answer = response
-        return answer, [
-            candidate.get("memory_id") for candidate in candidates
-        ] + [parent.get("parent_id") for parent in parents], raw_answer
-
-    def apply_eaes_rollback_check(
-            self, _question, _query_plan, candidates, parents,
-            question_emb=None
-    ):
-        self.rollback_calls += 1
-        updated_children = list(candidates)
-        updated_children[-1] = _children("RC", 1)[0]
-        return updated_children, list(parents), {"enabled": True}
+        context = [
+            candidate["memory_id"] for candidate in candidates
+        ] + [parent["parent_id"] for parent in parents]
+        return "A cat", context, {"answer": "A cat"}
 
 
-def _rollback_plan():
-    return {
-        "entities": ["Caroline"],
-        "query_attributes": ["profile.pet: animal owned by Caroline"],
-        "answer_type": "fact",
-        "keywords": ["animal companion"],
-    }
+class _EmptyRollbackController(_RollbackController):
+    def retrieve_eaes_rollback_children(self, **kwargs):
+        super().retrieve_eaes_rollback_children(**kwargs)
+        return []
+
+    def retrieve_eaes_rollback_parents(self, **kwargs):
+        super().retrieve_eaes_rollback_parents(**kwargs)
+        return []
+
+
+class _EmptyAnswerAgent(_AnswerAgent):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.memory_controller = _EmptyRollbackController()
+
+    @staticmethod
+    def _retrieve_eaes_first_pass(_question, _question_emb=None):
+        return {
+            "query_plan": _query_plan(),
+            "final_children": [],
+            "selected_parents": [],
+        }
 
 
 class EAESRollbackCheckTests(unittest.TestCase):
-    def test_answer_mode_skips_rollback_for_a_normal_reader_answer(self):
-        agent = _ReaderGateAgent(["A dog"])
-
-        with (
-            patch.object(config, "SEMANTIC_HIERARCHY", True),
-            patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "PARENT_TOP_K", 4),
-        ):
-            answer, context = agent.answer_question_eaes(
-                "What pet does Caroline own?"
-            )
-
-        self.assertEqual(answer, "A dog")
-        self.assertEqual(agent.rollback_calls, 0)
-        self.assertEqual(len(agent.reader_inputs), 1)
-        self.assertEqual(len(context), 19)
-
-    def test_answer_mode_rolls_back_only_after_no_information_answer(self):
-        agent = _ReaderGateAgent([
-            " No Information Available. ",
-            "A cat",
-        ])
-
-        with (
-            patch.object(config, "SEMANTIC_HIERARCHY", True),
-            patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "PARENT_TOP_K", 4),
-        ):
-            answer, context = agent.answer_question_eaes(
-                "What pet does Caroline own?"
-            )
-
-        self.assertEqual(answer, "A cat")
-        self.assertEqual(agent.rollback_calls, 1)
-        self.assertEqual(len(agent.reader_inputs), 2)
+    def test_validator_accepts_multiple_or_empty_semantic_properties(self):
+        parsed = EAESMixin._validate_eaes_rollback_decision(_decision())
         self.assertEqual(
-            agent.reader_inputs[1][0][-1]["memory_id"], "RC1"
+            parsed["semantic_properties"], ["event_action", "episodic"]
         )
-        self.assertIn("RC1", context)
 
-    def test_no_information_phrase_with_extra_content_does_not_trigger(self):
-        self.assertFalse(EAESMixin._eaes_is_no_information_answer(
-            "No information available because the evidence conflicts."
-        ))
+        parsed = EAESMixin._validate_eaes_rollback_decision(
+            _decision(semantic_properties=[])
+        )
+        self.assertEqual(parsed["semantic_properties"], [])
 
-    def test_synthetic_no_information_fallback_does_not_trigger(self):
-        agent = _ReaderGateAgent([("no information available", None)])
-
-        with (
-            patch.object(config, "SEMANTIC_HIERARCHY", True),
-            patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "PARENT_TOP_K", 4),
-        ):
-            answer, _ = agent.answer_question_eaes(
-                "What pet does Caroline own?"
-            )
-
-        self.assertEqual(answer, "no information available")
-        self.assertEqual(agent.rollback_calls, 0)
-        self.assertEqual(len(agent.reader_inputs), 1)
-
-    def test_gate_uses_raw_reader_answer_before_temporal_postprocessing(self):
-        agent = _ReaderGateAgent([
-            ("8 May 2023", "no information available"),
-            "The event date is 9 May 2023.",
-        ])
-
-        with (
-            patch.object(config, "SEMANTIC_HIERARCHY", True),
-            patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "PARENT_TOP_K", 4),
-        ):
-            answer, _ = agent.answer_question_eaes(
-                "When did the event happen?", category=2
-            )
-
-        self.assertEqual(answer, "The event date is 9 May 2023.")
-        self.assertEqual(agent.rollback_calls, 1)
-        self.assertEqual(len(agent.reader_inputs), 2)
-
-    def test_excludes_first_top20_and_preserves_sixteen_plus_four(self):
-        initial_children = _children("C", 16)
-        initial_parents = _parents("P", 4)
-        final_child_ids = ["RC1", "RC2"] + [
-            f"C{index}" for index in range(1, 15)
+    def test_validator_rejects_invalid_state_properties_and_phases(self):
+        invalid_outputs = [
+            _decision(state="unknown"),
+            _decision(semantic_properties=["unknown"]),
+            _decision(query_phase=["one", "two", "three"]),
+            _decision(query_phase=["same", "Same", "three", "four"]),
+            _decision(query_phase=[
+                "one two three four", "two", "three", "four"
+            ]),
+            {
+                "state": "no_need_more",
+                "semantic_properties": ["durable"],
+                "query_phase": [],
+            },
         ]
-        final_parent_ids = ["RP1", "P1", "P2", "P3"]
+        for output in invalid_outputs:
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                EAESMixin._validate_eaes_rollback_decision(output)
+
+    def test_invalid_decision_gets_one_error_informed_retry(self):
+        invalid = _decision(query_phase=["only one"])
+        valid = _decision(state="no_need_more")
+        agent = _RollbackAgent([invalid, valid])
+
+        result = agent._request_eaes_rollback_decision(
+            "What pet does Caroline own?",
+            _children("C", 1),
+            _parents("P", 1),
+            _query_plan()["retrieval_phrases"],
+            [],
+            2,
+        )
+
+        self.assertEqual(result, valid)
+        self.assertEqual(len(agent.llm.inputs), 2)
+        self.assertNotIn("validation_error", agent.llm.inputs[0])
+        self.assertEqual(
+            agent.llm.inputs[1]["previous_invalid_output"], invalid
+        )
+        self.assertIn("exactly four", agent.llm.inputs[1]["validation_error"])
+        self.assertEqual(
+            agent.llm.system_prompts[0], agent.llm.system_prompts[1]
+        )
+
+    def test_second_invalid_decision_raises(self):
+        agent = _RollbackAgent([{"bad": 1}, {"still_bad": 2}])
+
+        with self.assertRaisesRegex(ValueError, "repair attempt"):
+            agent._request_eaes_rollback_decision(
+                "Question", [], [], [], [], 2
+            )
+
+        self.assertEqual(len(agent.llm.inputs), 2)
+
+    def test_first_no_need_more_stops_without_retrieval(self):
+        initial_children = _children("C", 15)
+        initial_parents = _parents("P", 4)
+        agent = _RollbackAgent([_decision(state="no_need_more")])
+
+        children, parents, metadata = agent.apply_eaes_rollback_check(
+            "What pet does Caroline own?",
+            _query_plan(),
+            initial_children,
+            initial_parents,
+        )
+
+        self.assertEqual(children, initial_children)
+        self.assertEqual(parents, initial_parents)
+        self.assertEqual(metadata["terminal_reason"], "no_need_more")
+        self.assertEqual(metadata["rollback_count"], 0)
+        self.assertEqual(agent.memory_controller.child_calls, [])
+        self.assertEqual(agent.memory_controller.parent_calls, [])
+
+    def test_second_s2g_sees_selected_supplements_and_both_phase_sets(self):
+        first_decision = _decision()
         agent = _RollbackAgent([
-            _rollback_plan(),
+            first_decision,
             {
                 "ranked_nodes": [
-                    {"node_type": "child", "node_id": "RC1"},
-                    {"node_type": "parent", "node_id": "RP1"},
-                    {"node_type": "child", "node_id": "RC2"},
+                    {"node_type": "child", "node_id": "R1C1"},
+                    {"node_type": "parent", "node_id": "R1P1"},
+                    {"node_type": "child", "node_id": "R1C2"},
                 ]
             },
-            {
-                "ranked_child_ids": final_child_ids,
-                "ranked_parent_ids": final_parent_ids,
-            },
+            _decision(state="no_need_more"),
         ])
 
         with (
-            patch.object(config, "EAES_SEMANTIC_SCORE", False),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
-            patch.object(config, "PARENT_TOP_K", 4),
             patch.object(config, "EAES_ROLLBACK_CHILD_PREFILTER_LIMIT", 27),
             patch.object(config, "EAES_ROLLBACK_PARENT_PREFILTER_LIMIT", 3),
             patch.object(config, "EAES_ROLLBACK_SUPPLEMENT_LIMIT", 3),
         ):
             children, parents, metadata = agent.apply_eaes_rollback_check(
                 "What pet does Caroline own?",
-                {
-                    "entities": ["Caroline"],
-                    "query_attributes": ["profile.pet: pet owned by Caroline"],
-                    "keywords": ["pet"],
-                },
-                initial_children,
-                initial_parents,
+                _query_plan(),
+                _children("C", 15),
+                _parents("P", 4),
                 question_emb="question-embedding",
             )
 
-        self.assertEqual([item["memory_id"] for item in children], final_child_ids)
-        self.assertEqual([item["parent_id"] for item in parents], final_parent_ids)
-        self.assertEqual(len(children), 16)
-        self.assertEqual(len(parents), 4)
-        self.assertNotIn("applied", metadata)
-        self.assertEqual(metadata["first_query_plan"]["keywords"], ["pet"])
-        self.assertEqual(
-            metadata["rollback_query_plan"]["keywords"], ["animal companion"]
-        )
-        self.assertEqual(
-            metadata["selected_supplements"]["child_ids"], ["RC1", "RC2"]
-        )
-        self.assertEqual(
-            metadata["selected_supplements"]["parent_ids"], ["RP1"]
-        )
-        self.assertEqual(len(
-            metadata["rollback_prefilter"]["child_candidates"]
-        ), 27)
-        self.assertEqual(len(
-            metadata["rollback_prefilter"]["parent_candidates"]
-        ), 3)
-        self.assertEqual(metadata["final"]["child_ids"], final_child_ids)
-        self.assertEqual(metadata["final"]["parent_ids"], final_parent_ids)
-
-        child_plan, child_kwargs = agent.memory_controller.child_calls[0]
-        parent_plan, parent_kwargs = agent.memory_controller.parent_calls[0]
-        self.assertNotIn("keywords", child_plan)
-        self.assertEqual(parent_plan["keywords"], ["animal companion"])
-        self.assertEqual(child_kwargs["limit"], 27)
-        self.assertEqual(parent_kwargs["limit"], 3)
-        self.assertEqual(
-            child_kwargs["exclude_memory_ids"],
-            {f"C{index}" for index in range(1, 17)},
-        )
-        self.assertEqual(
-            parent_kwargs["exclude_parent_ids"],
-            {f"P{index}" for index in range(1, 5)},
-        )
-
-        planner_input = agent.llm.inputs[0]
-        self.assertNotIn("current_top_memories", planner_input)
-        self.assertEqual(len(planner_input["current_top_rewrite_contents"]), 20)
+        self.assertEqual(len(children), 17)
+        self.assertEqual(len(parents), 5)
+        self.assertEqual(metadata["rollback_count"], 1)
+        self.assertEqual(metadata["terminal_reason"], "no_need_more")
+        second_s2g_input = agent.llm.inputs[2]
+        self.assertEqual(agent.llm.inputs[0]["remaining_rollbacks"], 2)
+        self.assertEqual(second_s2g_input["remaining_rollbacks"], 1)
+        self.assertEqual(len(second_s2g_input["current_evidence"]), 22)
         self.assertTrue(all(
             isinstance(value, str)
-            for value in planner_input["current_top_rewrite_contents"]
+            for value in second_s2g_input["current_evidence"]
         ))
-        supplement_input = agent.llm.inputs[1]
-        self.assertEqual(len(supplement_input["child_candidates"]), 27)
-        self.assertEqual(len(supplement_input["parent_candidates"]), 3)
-        final_input = agent.llm.inputs[2]
-        self.assertEqual(len(final_input["child_candidates"]), 18)
-        self.assertEqual(len(final_input["parent_candidates"]), 5)
-        self.assertNotIn("first_pass_child_candidates", final_input)
-        self.assertNotIn("supplemental_child_candidates", final_input)
+        self.assertTrue({
+            "Child memory R1C1",
+            "Child memory R1C2",
+            "Parent memory R1P1",
+        }.issubset(second_s2g_input["current_evidence"]))
+        self.assertEqual(
+            second_s2g_input["initial_query_phase"],
+            _query_plan()["retrieval_phrases"],
+        )
+        self.assertEqual(
+            second_s2g_input["rollback_history"][0]["query_phase"],
+            first_decision["query_phase"],
+        )
 
-    def test_invalid_query_plan_keeps_first_pass_top20(self):
-        initial_children = _children("C", 16)
-        initial_parents = _parents("P", 4)
-        agent = _RollbackAgent(["invalid plan"])
-
-        with patch.object(config, "EAES_SEMANTIC_SCORE", False):
-            children, parents, metadata = agent.apply_eaes_rollback_check(
-                "What pet does Caroline own?",
-                {"query_attributes": ["profile.pet"], "keywords": ["pet"]},
-                initial_children,
-                initial_parents,
-            )
-
-        self.assertIs(children, initial_children)
-        self.assertIs(parents, initial_parents)
-        self.assertNotIn("applied", metadata)
-        self.assertEqual(metadata["failure_reason"], "invalid_rollback_query_plan")
-        self.assertEqual(agent.memory_controller.child_calls, [])
-        self.assertEqual(agent.memory_controller.parent_calls, [])
-
-    def test_incomplete_final_rerank_keeps_first_pass_top20(self):
-        initial_children = _children("C", 16)
-        initial_parents = _parents("P", 4)
+    def test_two_rounds_are_additive_and_exclude_only_selected_nodes(self):
+        first_decision = _decision()
+        second_decision = _decision(
+            semantic_properties=[],
+            query_phase=[
+                "pet name", "animal type", "Caroline companion", "owned pet"
+            ],
+        )
         agent = _RollbackAgent([
-            _rollback_plan(),
+            first_decision,
             {
                 "ranked_nodes": [
-                    {"node_type": "child", "node_id": "RC1"},
-                    {"node_type": "child", "node_id": "RC2"},
-                    {"node_type": "parent", "node_id": "RP1"},
+                    {"node_type": "child", "node_id": "R1C1"},
+                    {"node_type": "parent", "node_id": "R1P1"},
                 ]
             },
+            second_decision,
             {
-                "ranked_child_ids": ["RC1"],
-                "ranked_parent_ids": ["RP1"],
+                "ranked_nodes": [
+                    {"node_type": "child", "node_id": "R2C1"},
+                ]
             },
         ])
 
         with (
-            patch.object(config, "EAES_SEMANTIC_SCORE", False),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
-            patch.object(config, "PARENT_TOP_K", 4),
+            patch.object(config, "EAES_ROLLBACK_CHILD_PREFILTER_LIMIT", 27),
+            patch.object(config, "EAES_ROLLBACK_PARENT_PREFILTER_LIMIT", 3),
+            patch.object(config, "EAES_ROLLBACK_SUPPLEMENT_LIMIT", 3),
         ):
             children, parents, metadata = agent.apply_eaes_rollback_check(
                 "What pet does Caroline own?",
-                {"query_attributes": ["profile.pet"], "keywords": ["pet"]},
-                initial_children,
-                initial_parents,
+                _query_plan(),
+                _children("C", 15),
+                _parents("P", 4),
+                question_emb="question-embedding",
             )
+
+        self.assertEqual(len(agent.llm.inputs), 4)
+        self.assertEqual(len(agent.memory_controller.child_calls), 2)
+        self.assertEqual(len(agent.memory_controller.parent_calls), 2)
+        self.assertEqual(
+            agent.memory_controller.child_calls[0]["exclude_memory_ids"],
+            {f"C{index}" for index in range(1, 16)},
+        )
+        self.assertEqual(
+            agent.memory_controller.child_calls[1]["exclude_memory_ids"],
+            {f"C{index}" for index in range(1, 16)} | {"R1C1"},
+        )
+        self.assertNotIn(
+            "R1C2",
+            agent.memory_controller.child_calls[1]["exclude_memory_ids"],
+        )
+        self.assertEqual(
+            agent.memory_controller.parent_calls[1]["exclude_parent_ids"],
+            {f"P{index}" for index in range(1, 5)} | {"R1P1"},
+        )
+        self.assertEqual(
+            [item["memory_id"] for item in children[-2:]],
+            ["R1C1", "R2C1"],
+        )
+        self.assertEqual(parents[-1]["parent_id"], "R1P1")
+        self.assertEqual(metadata["rollback_count"], 2)
+        self.assertEqual(
+            metadata["terminal_reason"], "max_rollbacks_completed"
+        )
+        self.assertEqual(
+            metadata["post_second_rollback_sufficiency"], "not_checked"
+        )
+
+    def test_two_rounds_can_add_full_three_plus_three_without_truncation(self):
+        agent = _RollbackAgent([
+            _decision(),
+            {
+                "ranked_nodes": [
+                    {"node_type": "child", "node_id": f"R1C{index}"}
+                    for index in range(1, 4)
+                ]
+            },
+            _decision(query_phase=["a", "b", "c", "d"]),
+            {
+                "ranked_nodes": [
+                    {"node_type": "parent", "node_id": f"R2P{index}"}
+                    for index in range(1, 4)
+                ]
+            },
+        ])
+
+        children, parents, metadata = agent.apply_eaes_rollback_check(
+            "Question",
+            _query_plan(),
+            _children("C", 15),
+            _parents("P", 4),
+        )
+
+        self.assertEqual(len(children), 18)
+        self.assertEqual(len(parents), 7)
+        self.assertEqual(
+            [item["memory_id"] for item in children[-3:]],
+            ["R1C1", "R1C2", "R1C3"],
+        )
+        self.assertEqual(
+            [item["parent_id"] for item in parents[-3:]],
+            ["R2P1", "R2P2", "R2P3"],
+        )
+        self.assertEqual(metadata["rollback_count"], 2)
+        self.assertEqual(
+            len(metadata["selected_supplements"]["child_ids"])
+            + len(metadata["selected_supplements"]["parent_ids"]),
+            6,
+        )
+
+    def test_empty_supplements_still_consume_both_rounds(self):
+        agent = _RollbackAgent([
+            _decision(),
+            {"ranked_nodes": []},
+            _decision(query_phase=["a", "b", "c", "d"]),
+            {"ranked_nodes": []},
+        ])
+        initial_children = _children("C", 15)
+        initial_parents = _parents("P", 4)
+
+        children, parents, metadata = agent.apply_eaes_rollback_check(
+            "Question",
+            _query_plan(),
+            initial_children,
+            initial_parents,
+        )
 
         self.assertEqual(children, initial_children)
         self.assertEqual(parents, initial_parents)
-        self.assertNotIn("applied", metadata)
+        self.assertEqual(metadata["rollback_count"], 2)
+        self.assertEqual(len(metadata["rounds"]), 2)
         self.assertEqual(
-            metadata["final"]["child_ids"],
-            [f"C{index}" for index in range(1, 17)],
+            [item["selected_supplement_count"] for item in metadata["rounds"]],
+            [0, 0],
         )
-        self.assertEqual(
-            metadata["final"]["parent_ids"],
-            [f"P{index}" for index in range(1, 5)],
-        )
+
+    def test_answer_path_rolls_back_before_one_reader_call(self):
+        agent = _AnswerAgent([
+            _decision(),
+            {
+                "ranked_nodes": [
+                    {"node_type": "child", "node_id": "R1C1"},
+                ]
+            },
+            _decision(state="no_need_more"),
+        ])
+
+        with patch.object(config, "EAES_ROLLBACK_CHECK", True):
+            answer, context = agent.answer_question_eaes(
+                "What pet does Caroline own?"
+            )
+
+        self.assertEqual(answer, "A cat")
+        self.assertEqual(len(agent.reader_inputs), 1)
+        self.assertEqual(len(agent.reader_inputs[0][0]), 16)
+        self.assertEqual(agent.reader_inputs[0][0][-1]["memory_id"], "R1C1")
+        self.assertIn("R1C1", context)
+
+    def test_answer_path_calls_reader_after_two_empty_rollback_rounds(self):
+        agent = _EmptyAnswerAgent([
+            _decision(),
+            _decision(query_phase=["a", "b", "c", "d"]),
+        ])
+
+        with patch.object(config, "EAES_ROLLBACK_CHECK", True):
+            answer, context = agent.answer_question_eaes("Question")
+
+        self.assertEqual(answer, "A cat")
+        self.assertEqual(context, [])
+        self.assertEqual(len(agent.llm.inputs), 2)
+        self.assertEqual(len(agent.reader_inputs), 1)
+        self.assertEqual(agent.reader_inputs[0], ([], []))
 
 
 if __name__ == "__main__":

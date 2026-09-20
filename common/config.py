@@ -47,10 +47,9 @@ parser.add_argument(
     "--eaes_rollback_check",
     action="store_true",
     help=(
-        "Run the reader on the first phrase-reranked child + parent retrieval. Only when its answer "
-        "is 'no information available', build a complementary query plan, select three "
-        "candidates from 27 unseen children plus 3 unseen parents, and rerank the merged "
-        "pool back to the original 16 + 4 budget."
+        "Before the final reader, judge evidence sufficiency and run up to two "
+        "gap-focused retrievals. Each round inspects 27 unseen children plus 3 "
+        "unseen parents and may add up to 3 supplemental nodes."
     ),
 )
 parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")
@@ -62,9 +61,9 @@ parser.add_argument(
 parser.add_argument(
     "--disable_evidence_selector",
     action="store_true",
-    help="Bypass the EAES evidence selector and pass all reranked candidates directly to answer readers, including the retrieval-only rollback trigger reader.",
+    help="Bypass the EAES evidence selector and pass all retrieved candidates directly to the final answer reader.",
 )
-parser.add_argument("--retrieval_only", action="store_true", help="Only save retrieval evidence and skip LLM judge. With rollback enabled, an internal first-pass reader answer is generated only to decide whether rollback is needed.")
+parser.add_argument("--retrieval_only", action="store_true", help="Only save retrieval evidence and skip the final answer reader. Enabled rollback decisions and supplemental retrievals still run.")
 
 # parse_known_args (not parse_args) so importing this module under a foreign argv
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
@@ -196,12 +195,6 @@ if EAES_SEMANTIC_SCORE and not EAES_MODE:
     raise ValueError("--eaes_semantic_score requires --eaes.")
 if SEMANTIC_HIERARCHY and not EAES_MODE:
     raise ValueError("--semantic_hierarchy requires --eaes.")
-if DISABLE_EVIDENCE_SELECTOR and RETRIEVAL_ONLY and not args.eaes_rollback_check:
-    raise ValueError(
-        "--disable_evidence_selector cannot change --retrieval_only metrics because "
-        "retrieval-only stops before the evidence selector unless rollback is enabled. "
-        "Add --eaes_rollback_check or run the answer ablation instead."
-    )
 EAES_CANDIDATE_LIMIT = args.eaes_prefilter_limit
 if EAES_CANDIDATE_LIMIT <= 0:
     raise ValueError("--eaes_prefilter_limit must be a positive integer.")
@@ -276,12 +269,6 @@ CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
 CHILD_DUPLICATE_SIMILARITY_THRESHOLD = args.child_duplicate_similarity_threshold
 PARENT_TOP_K = args.parent_top_k
 PARENT_RELEVANCE_FLOOR = args.parent_relevance_floor
-if EAES_ROLLBACK_CHECK and (
-        EAES_RERANK_LIMIT != 16 or PARENT_TOP_K != 4
-):
-    raise ValueError(
-        "--eaes_rollback_check requires --eaes_rerank_limit 16 and --parent_top_k 4."
-    )
 if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
     raise ValueError("parent turn limits must satisfy 0 < min <= max.")
 if SEMANTIC_HIERARCHY and PARENT_MAX_TURNS > 10:

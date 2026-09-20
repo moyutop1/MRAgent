@@ -16,14 +16,15 @@ def compact_eaes_retrieval(retrieval):
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
         "rewrite_content", "max_phrase_similarity", "rrf_score",
-        "base_score", "candidate_score",
+        "base_score", "candidate_score", "score", "score_parts",
         "candidate_sources", "prefilter_rank", "rerank_rank",
         "rerank_source", "matched_tag", "phrase_matches",
+        "matched_query_phase",
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",
         "parent_probability", "child_support", "posterior_score",
-        "selected", "rank",
+        "selected", "rank", "score", "matched_query_phase",
     )
     routing = {
         key: value for key, value in (retrieval.get("routing") or {}).items()
@@ -35,8 +36,10 @@ def compact_eaes_retrieval(retrieval):
     rollback = retrieval.get("rollback_check") or {"enabled": False}
     compact_rollback = {"enabled": bool(rollback.get("enabled"))}
     for key in (
-            "reader_gate", "failure_reason", "first_pass",
-            "selected_supplements", "final"):
+            "terminal_reason", "rollback_count", "initial_query_phase",
+            "first_pass", "initial_retrieval_pool", "rounds",
+            "selected_supplements", "last_s2g_decision",
+            "post_second_rollback_sufficiency", "final"):
         if key in rollback:
             compact_rollback[key] = rollback[key]
     return {
@@ -56,7 +59,20 @@ def compact_eaes_retrieval(retrieval):
             {key: item.get(key) for key in child_fields if key in item}
             for item in retrieval.get("initial_candidates") or []
         ],
+        "final_child_candidates": [
+            {key: item.get(key) for key in child_fields if key in item}
+            for item in retrieval.get("candidates") or []
+        ],
+        "final_parent_candidates": [
+            {key: item.get(key) for key in parent_fields if key in item}
+            for item in retrieval.get("parent_candidates") or []
+        ],
         "final_child_ids": retrieval.get("final_child_ids") or [],
+        "final_parent_ids": [
+            item.get("parent_id")
+            for item in retrieval.get("parent_candidates") or []
+            if item.get("parent_id")
+        ],
         "counts": retrieval.get("counts") or {},
         "rollback_check": compact_rollback,
     }
@@ -307,7 +323,6 @@ class RetrievalMixin:
         if config.EAES_MODE:
             first_pass = self._retrieve_eaes_first_pass(question, question_emb)
             query_plan = first_pass["query_plan"]
-            child_query_plan = self._eaes_child_query_plan(query_plan)
             prefilter_candidates = first_pass["prefilter_children"]
             initial_candidates = first_pass["initial_children"]
             candidates = first_pass["final_children"]
@@ -315,81 +330,25 @@ class RetrievalMixin:
             rollback_metadata = {"enabled": False}
             if getattr(config, "EAES_ROLLBACK_CHECK", False):
                 first_parent_candidates = list(parent_candidates)
-                try:
-                    _, _, internal_raw_answer = self._read_eaes_candidates(
+                candidates, parent_candidates, rollback_metadata = (
+                    self.apply_eaes_rollback_check(
                         question,
-                        child_query_plan,
+                        query_plan,
                         candidates,
                         parent_candidates,
-                        category,
-                        lm_current_date,
+                        question_emb,
                     )
-                    returned_no_information = (
-                        self._eaes_is_no_information_answer(
-                            internal_raw_answer
-                        )
-                    )
-                    if returned_no_information:
-                        candidates, parent_candidates, rollback_metadata = (
-                            self.apply_eaes_rollback_check(
-                                question,
-                                query_plan,
-                                candidates,
-                                parent_candidates,
-                                question_emb,
-                            )
-                        )
-                    else:
-                        rollback_metadata = {
-                            "enabled": True,
-                            "first_query_plan": query_plan,
-                            "first_pass": {
-                                "child_ids": [
-                                    candidate.get("memory_id")
-                                    for candidate in candidates
-                                ],
-                                "parent_ids": [
-                                    candidate.get("parent_id")
-                                    for candidate in parent_candidates
-                                ],
-                            },
-                        }
-                    rollback_metadata["reader_gate"] = {
-                        "returned_no_information_available": (
-                            returned_no_information
-                        ),
-                    }
-                    rollback_metadata["first_initial"] = {
-                        "child_ids": [
-                            candidate.get("memory_id")
-                            for candidate in initial_candidates
-                        ],
-                        "parent_ids": [
-                            candidate.get("parent_id")
-                            for candidate in first_parent_candidates
-                        ],
-                    }
-                except Exception:
-                    logger.warning(
-                        "EAES rollback reader gate/check failed; retaining "
-                        "the first-pass reader set.",
-                        exc_info=True,
-                    )
-                    rollback_metadata = {
-                        "enabled": True,
-                        "first_query_plan": query_plan,
-                        "first_initial": {
-                            "child_ids": [
-                                candidate.get("memory_id")
-                                for candidate in initial_candidates
-                            ],
-                            "parent_ids": [
-                                candidate.get("parent_id")
-                                for candidate in first_parent_candidates
-                            ],
-                        },
-                        "failure_reason": "reader_gate_or_rollback_exception",
-                    }
+                )
+                rollback_metadata["initial_retrieval_pool"] = {
+                    "child_ids": [
+                        candidate.get("memory_id")
+                        for candidate in initial_candidates
+                    ],
+                    "parent_ids": [
+                        candidate.get("parent_id")
+                        for candidate in first_parent_candidates
+                    ],
+                }
             def child_origin_groups(items):
                 return [
                     [candidate.get("origin")]

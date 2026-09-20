@@ -642,6 +642,123 @@ class MemoryController:
             exclude_memory_ids=exclude_memory_ids,
         )
 
+    def retrieve_eaes_rollback_children(
+            self,
+            query_phases,
+            semantic_properties,
+            entities,
+            question_emb=None,
+            exclude_memory_ids=None,
+            limit=None,
+    ):
+        """Retrieve unseen children for one evidence-gap rollback round."""
+        phases = [
+            str(value).strip() for value in query_phases or []
+            if str(value).strip()
+        ]
+        if not phases:
+            return []
+
+        self.prepare_eaes_retrieval_embeddings()
+        phase_vectors = self._eaes_phrase_embeddings(phases)
+        entity_words = [
+            self._eaes_words(value) for value in entities or []
+            if str(value).strip()
+        ]
+        required_properties = []
+        for value in semantic_properties or []:
+            normalized = str(value or "").lower().strip()
+            if normalized and normalized not in required_properties:
+                required_properties.append(normalized)
+
+        excluded = set(exclude_memory_ids or [])
+        scored = []
+        for note in self.memory.eaes_notes.values():
+            if note.memory_id in excluded or note.retrieval_embedding is None:
+                continue
+
+            note_vector = self._normalize_embedding_rows(
+                note.retrieval_embedding
+            )[0]
+            phase_similarities = np.dot(phase_vectors, note_vector)
+            best_phase_index = int(np.argmax(phase_similarities))
+            raw_phase_score = float(phase_similarities[best_phase_index])
+            phase_score = max(0.0, raw_phase_score)
+
+            note_entity_words = set()
+            for entity in self._as_list(note.entities):
+                note_entity_words |= self._eaes_words(entity)
+            note_text_words = self._eaes_words(note.rewrite_content)
+            if entity_words:
+                entity_score = max(
+                    self._eaes_overlap_score(
+                        words, note_entity_words | note_text_words
+                    )
+                    for words in entity_words
+                )
+            else:
+                entity_score = 0.2
+
+            question_score = 0.0
+            if question_emb is not None and note.embedding is not None:
+                try:
+                    question_score = float(np.dot(
+                        np.asarray(question_emb).reshape(-1),
+                        np.asarray(note.embedding).reshape(-1),
+                    ))
+                except Exception:
+                    question_score = 0.0
+
+            event = self.memory.episode_events.get(note.event_id)
+            memory_properties = {
+                str(value or "").lower().strip()
+                for value in self._as_list(
+                    getattr(event, "semantic_properties", [])
+                    if event is not None else []
+                )
+                if str(value or "").strip()
+            }
+            matched_properties = [
+                value for value in required_properties
+                if value in memory_properties
+            ]
+            semantic_bonus = 0.0
+            if config.EAES_SEMANTIC_SCORE and required_properties:
+                semantic_bonus = (
+                    min(len(matched_properties), 3)
+                    * config.SEMANTIC_MATCH_WEIGHT
+                )
+
+            score = (
+                2.0 * entity_score
+                + 1.4 * phase_score
+                + 0.2 * question_score
+                + semantic_bonus
+            )
+            scored.append({
+                **note.to_dict(include_raw=False),
+                "score": round(score, 4),
+                "score_parts": {
+                    "entity": round(entity_score, 3),
+                    "rollback_phase": round(phase_score, 4),
+                    "rollback_phase_raw": round(raw_phase_score, 4),
+                    "question_embedding": round(question_score, 3),
+                    "semantic_match_count": len(matched_properties),
+                    "matched_semantic_properties": matched_properties,
+                    "semantic_bonus": round(semantic_bonus, 3),
+                },
+                "matched_query_phase": phases[best_phase_index],
+            })
+
+        scored.sort(key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("memory_id") or ""),
+        ))
+        selected = scored[:limit] if limit is not None else scored
+        for rank, item in enumerate(selected, start=1):
+            item["rank"] = rank
+        return selected
+
     @staticmethod
     def _eaes_probability_entropy(probabilities):
         values = np.asarray(probabilities, dtype=np.float64)
@@ -835,6 +952,49 @@ class MemoryController:
             }
             for rank, parent in enumerate(selected, start=1)
         ]
+
+    def retrieve_eaes_rollback_parents(
+            self,
+            query_phases,
+            exclude_parent_ids=None,
+            limit=None,
+    ):
+        """Retrieve unseen parents by gap-phase similarity without a semantic bonus."""
+        phases = [
+            str(value).strip() for value in query_phases or []
+            if str(value).strip()
+        ]
+        if not phases or not config.SEMANTIC_HIERARCHY:
+            return []
+
+        self.prepare_eaes_parent_embeddings()
+        phase_vectors = self._eaes_phrase_embeddings(phases)
+        excluded = set(exclude_parent_ids or [])
+        scored = []
+        for parent in self.memory.eaes_parent_nodes.values():
+            if parent.parent_id in excluded or parent.retrieval_embedding is None:
+                continue
+            vector = self._normalize_embedding_rows(
+                parent.retrieval_embedding
+            )[0]
+            similarities = np.dot(phase_vectors, vector)
+            best_index = int(np.argmax(similarities))
+            raw_similarity = float(similarities[best_index])
+            scored.append({
+                **parent.to_reader_dict(),
+                "raw_similarity": raw_similarity,
+                "score": round(raw_similarity, 4),
+                "matched_query_phase": phases[best_index],
+            })
+
+        scored.sort(key=lambda item: (
+            -float(item.get("raw_similarity") or 0.0),
+            str(item.get("parent_id") or ""),
+        ))
+        selected = scored[:limit] if limit is not None else scored
+        for rank, item in enumerate(selected, start=1):
+            item["rank"] = rank
+        return selected
 
     def expand_eaes_raw_text(self, memory_ids: List[str]):
         expanded = []

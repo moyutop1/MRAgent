@@ -166,11 +166,11 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_phrase_rrf_k` | RRF denominator constant | `10` |
 | `--eaes_phrase_rerank_limit` | children retained by the query-only LLM reranker | `15` |
 | `--eaes_prefilter_limit` | legacy combined-score pool used by rollback/compatibility paths | `120` |
-| `--eaes_rerank_limit` | rollback final child budget | `16` |
+| `--eaes_rerank_limit` | children retained by the compatibility attribute reranker | `16` |
 | `--parent_top_k` | independently retrieved parent memories sent to the final reader | `4` |
-| `--eaes_rollback_check` | if the normal 15-child + 4-parent reader answers `no information available`, retrieve 27 unseen children plus 3 unseen parents, select 3 supplements, then rerank back to 16 children plus 4 parents | off |
+| `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
-| `--disable_evidence_selector` | pass all reranked candidates directly to answer readers, including the retrieval-only rollback trigger reader | off |
+| `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
 
 ### 5.2 LoCoMo
 
@@ -202,10 +202,10 @@ python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file sem
 # answer-stage ablation: bypass the EAES evidence selector
 python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
 
-# reader-answer gate; only no information available triggers: 27 unseen children + 3 unseen parents -> LLM Top3 -> final 16 + 4
+# pre-reader S2G controller; up to two rounds of 27 unseen children + 3 unseen parents -> additive LLM Top0-3 supplements
 python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 41 --workers 1 --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
 
-# the same rollback gate in retrieval-only mode; the internal answer is discarded
+# the same S2G/rollback flow in retrieval-only mode; no answer reader is called
 python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
 
 ```

@@ -92,6 +92,7 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
         self.memory_controller = _Controller()
         self.rollback_calls = 0
         self.retained_rollback_child = None
+        self.retained_rollback_parent = None
         self.reader_answer = "no information available"
         self.reader_calls = 0
 
@@ -134,8 +135,64 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
         self.rollback_calls += 1
         if self.retained_rollback_child is not None:
             candidates = list(candidates)
-            candidates[-1] = self.retained_rollback_child
-        return candidates, parents, {"enabled": True}
+            candidates.append(self.retained_rollback_child)
+        if self.retained_rollback_parent is not None:
+            parents = list(parents)
+            parents.append(self.retained_rollback_parent)
+        return candidates, parents, {
+            "enabled": True,
+            "terminal_reason": "no_need_more",
+            "rollback_count": int(
+                self.retained_rollback_child is not None
+                or self.retained_rollback_parent is not None
+            ),
+        }
+
+
+class _RollbackLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.inputs = []
+
+    def chat_text(self, messages, **_kwargs):
+        self.inputs.append(json.loads(messages[-1]["content"]))
+        return self.responses.pop(0)
+
+
+class _RealRollbackController(_Controller):
+    def retrieve_eaes_rollback_children(
+            self, *, exclude_memory_ids=None, **_kwargs
+    ):
+        candidate = {
+            "memory_id": "M_REAL_ROLLBACK",
+            "event_id": "D9:99-1",
+            "origin": "D9:99",
+            "rewrite_content": "Caroline adopted a cat.",
+            "score": 3.4,
+            "matched_query_phase": "Caroline adopted pet",
+        }
+        return [] if candidate["memory_id"] in set(
+            exclude_memory_ids or []
+        ) else [candidate]
+
+    @staticmethod
+    def retrieve_eaes_rollback_parents(**_kwargs):
+        return []
+
+
+class _RealRollbackRetrievalAgent(_RetrievalAgent):
+    apply_eaes_rollback_check = EAESMixin.apply_eaes_rollback_check
+
+    def __init__(self, responses):
+        super().__init__()
+        self.llm = _RollbackLLM(responses)
+        self.memory_controller = _RealRollbackController()
+
+    @staticmethod
+    def _as_list(value):
+        if value is None:
+            return []
+        return value if isinstance(value, list) else [value]
 
 
 class RetrievalTopTwentyTests(unittest.TestCase):
@@ -145,6 +202,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         with (
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
             patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
             patch.object(config, "PARENT_TOP_K", 4),
@@ -206,22 +264,18 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
 
         self.assertEqual(agent.rollback_calls, 1)
-        self.assertEqual(agent.reader_calls, 1)
+        self.assertEqual(agent.reader_calls, 0)
         self.assertTrue(result["rollback_check"]["enabled"])
         self.assertNotIn("applied", result["rollback_check"])
-        self.assertTrue(
-            result["rollback_check"]["reader_gate"][
-                "returned_no_information_available"
-            ]
+        self.assertNotIn("reader_gate", result["rollback_check"])
+        self.assertEqual(
+            len(result["rollback_check"]["initial_retrieval_pool"]["child_ids"]), 24
         )
         self.assertEqual(
-            len(result["rollback_check"]["first_initial"]["child_ids"]), 24
-        )
-        self.assertEqual(
-            len(result["rollback_check"]["first_initial"]["parent_ids"]), 4
+            len(result["rollback_check"]["initial_retrieval_pool"]["parent_ids"]), 4
         )
 
-    def test_retrieval_only_discards_normal_internal_answer_and_skips_rollback(self):
+    def test_retrieval_only_never_calls_reader_and_still_runs_rollback(self):
         agent = _RetrievalAgent()
         agent.reader_answer = "Caroline owns a dog."
 
@@ -237,15 +291,58 @@ class RetrievalTopTwentyTests(unittest.TestCase):
                 "What pet does Caroline own?"
             )
 
-        self.assertEqual(agent.reader_calls, 1)
-        self.assertEqual(agent.rollback_calls, 0)
-        self.assertFalse(
-            result["rollback_check"]["reader_gate"][
-                "returned_no_information_available"
-            ]
-        )
+        self.assertEqual(agent.reader_calls, 0)
+        self.assertEqual(agent.rollback_calls, 1)
+        self.assertNotIn("reader_gate", result["rollback_check"])
         self.assertNotIn("answer", result)
         self.assertNotIn("prediction", result)
+
+    def test_retrieval_only_runs_real_two_stage_s2g_loop_without_reader(self):
+        agent = _RealRollbackRetrievalAgent([
+            {
+                "state": "need_more",
+                "semantic_properties": [],
+                "query_phase": [
+                    "Caroline adopted pet",
+                    "Caroline gained animal",
+                    "pet adoption event",
+                    "animal joined Caroline",
+                ],
+            },
+            {
+                "ranked_nodes": [{
+                    "node_type": "child",
+                    "node_id": "M_REAL_ROLLBACK",
+                }],
+            },
+            {
+                "state": "no_need_more",
+                "semantic_properties": [],
+                "query_phase": [],
+            },
+        ])
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            result = agent.retrieve_question_evidence(
+                "What pet did Caroline adopt?"
+            )
+
+        self.assertEqual(agent.reader_calls, 0)
+        self.assertEqual(len(agent.llm.inputs), 3)
+        self.assertEqual(result["rollback_check"]["rollback_count"], 1)
+        self.assertEqual(
+            result["rollback_check"]["terminal_reason"], "no_need_more"
+        )
+        self.assertEqual(result["child_k"], 16)
+        self.assertEqual(
+            result["candidates"][-1]["memory_id"], "M_REAL_ROLLBACK"
+        )
 
     def test_retained_rollback_node_contributes_to_final_hit_and_mrr(self):
         agent = _RetrievalAgent()
@@ -272,11 +369,11 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             result["retrieved_origins"],
             result["retrieved_origin_groups"],
         )
-        self.assertEqual(result["retrieval_k"], 19)
-        self.assertEqual(len(result["retrieved_origin_groups"]), 19)
-        self.assertEqual(result["retrieved_origin_groups"][14], ["D9:99"])
+        self.assertEqual(result["retrieval_k"], 20)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
+        self.assertEqual(result["retrieved_origin_groups"][15], ["D9:99"])
         self.assertEqual(metrics["hit"], 1)
-        self.assertEqual(metrics["mrr"], 1 / 15)
+        self.assertEqual(metrics["mrr"], 1 / 16)
 
     def test_compact_retrieval_schema_removes_deprecated_and_duplicate_fields(self):
         agent = _RetrievalAgent()
@@ -298,8 +395,10 @@ class RetrievalTopTwentyTests(unittest.TestCase):
 
         self.assertEqual(set(compact), {
             "mode", "query_plan", "routing", "phrase_retrieval",
-            "parent_candidates", "child_candidates", "final_child_ids",
-            "counts", "rollback_check",
+            "parent_candidates", "child_candidates",
+            "final_child_candidates", "final_parent_candidates",
+            "final_child_ids", "final_parent_ids", "counts",
+            "rollback_check",
         })
         self.assertNotIn("retrieved_origins", compact)
         self.assertNotIn("prefilter_candidates", compact)
@@ -309,11 +408,66 @@ class RetrievalTopTwentyTests(unittest.TestCase):
                 "event_lifecycle", "entities"):
             self.assertNotIn(deprecated, serialized)
         self.assertEqual(len(compact["child_candidates"]), 24)
+        self.assertEqual(len(compact["final_child_candidates"]), 15)
+        self.assertEqual(len(compact["final_parent_candidates"]), 4)
         self.assertEqual(len(compact["final_child_ids"]), 15)
+        self.assertEqual(len(compact["final_parent_ids"]), 4)
         self.assertTrue(all(
             re.fullmatch(r"\d+-\d+", item["parent_id"])
             for item in compact["parent_candidates"]
         ))
+
+    def test_compact_schema_preserves_rollback_supplement_contents(self):
+        agent = _RetrievalAgent()
+        agent.retained_rollback_child = {
+            "memory_id": "M_ROLLBACK",
+            "event_id": "D9:99-1",
+            "origin": "D9:99",
+            "rewrite_content": "Caroline adopted a cat.",
+            "score": 3.4,
+            "matched_query_phase": "Caroline adopted pet",
+        }
+        agent.retained_rollback_parent = {
+            "parent_id": "2-99",
+            "rewrite_content": "Caroline's pet adoption history.",
+            "score": 0.8,
+            "matched_query_phase": "pet adoption history",
+        }
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "PARENT_TOP_K", 4),
+        ):
+            internal = agent.retrieve_question_evidence(
+                "What pet does Caroline own?"
+            )
+        compact = compact_eaes_retrieval(internal)
+
+        self.assertNotIn(
+            "M_ROLLBACK",
+            [item["memory_id"] for item in compact["child_candidates"]],
+        )
+        final_child = next(
+            item for item in compact["final_child_candidates"]
+            if item["memory_id"] == "M_ROLLBACK"
+        )
+        final_parent = next(
+            item for item in compact["final_parent_candidates"]
+            if item["parent_id"] == "2-99"
+        )
+        self.assertEqual(
+            final_child["rewrite_content"], "Caroline adopted a cat."
+        )
+        self.assertEqual(final_child["score"], 3.4)
+        self.assertEqual(
+            final_parent["rewrite_content"],
+            "Caroline's pet adoption history.",
+        )
+        self.assertIn("M_ROLLBACK", compact["final_child_ids"])
+        self.assertIn("2-99", compact["final_parent_ids"])
 
 
 if __name__ == "__main__":

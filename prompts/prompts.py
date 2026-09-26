@@ -555,14 +555,6 @@ Limits:
 - Select at most 3 memories per answer_item.
 - Prefer direct evidence; use complementary pairs only when one memory supplies specificity and another supplies lifecycle/completion."""
 
-    TEMPORAL_ANSWER_POLICY = """Temporal output policy:
-- Preserve the temporal granularity and relation stated by the source memory. The conversation anchor explains what a relative phrase refers to; it is not automatically the answer.
-- After identifying the event, call query_conversation_time when its conversation anchor is not already available.
-- For named weekdays, weeks, and weekends, use an anchored-relative phrase instead of calculating the calendar date: "last Friday" + anchor 2023-07-15 becomes "The Friday before 15 July 2023"; "last week" becomes "The week before 15 July 2023". Do not output an ISO date for these expressions.
-- For day-exact expressions such as "yesterday" or "two days ago", an explicit source date, or a question explicitly asking for the exact date, return a human-readable absolute date such as "7 May 2023", never YYYY-MM-DD.
-- For month/year expressions, preserve their natural precision, such as "June 2023" or "2022". For duration questions, return the duration as stated, such as "10 years ago"; do not turn it into a date.
-- Return one minimal time expression and no explanation."""
-
     EAES_FINAL_ANSWER_PROMPT = """You answer from an EAES evidence package. Only output valid JSON.
 Use the structured evidence package as the primary context.
 Rules:
@@ -573,10 +565,7 @@ Rules:
 - A relevant parent memory may support the answer even when its children are absent from the child candidate list. Cite its parent_id in supports when used.
 - For list questions, return a concise comma-separated list.
 - Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.
-- For time questions, preserve the source wording and its precision. Use conversation_time only when a relative expression needs that reference point.
-- For a single-time question, return exactly one best time expression, not a list of multiple candidate dates.
-- If the question asks for an exact date, output a human-readable absolute date like "10 July 2023".
-- When multiple candidates mention similar events, choose the one whose entity, event type, month/season, and wording best match the question; do not merge conflicting times.
+- When multiple candidates mention similar events, choose the evidence whose entities, relations, constraints, and wording best match the question; do not merge conflicting facts.
 - Do not use planned-only evidence to answer a historical/completed question unless paired with historical evidence.
 - If evidence_package has answer_items or backup_candidates, make the best answer supported by them instead of saying "no information available".
 - Use "no information available" only when there is no relevant evidence at all.

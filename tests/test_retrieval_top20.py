@@ -124,7 +124,7 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
 
     def _read_eaes_candidates(
             self, _question, _child_query_plan, _candidates, _parents,
-            _category=0, _lm_current_date=None
+            lm_current_date=None
     ):
         self.reader_calls += 1
         return self.reader_answer, [], self.reader_answer

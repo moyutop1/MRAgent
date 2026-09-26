@@ -137,7 +137,7 @@ class _AnswerAgent(_RollbackAgent):
 
     def _read_eaes_candidates(
             self, _question, _child_query_plan, candidates, parents,
-            _category=0, _lm_current_date=None,
+            lm_current_date=None,
     ):
         self.reader_inputs.append((list(candidates), list(parents)))
         context = [

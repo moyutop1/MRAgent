@@ -121,9 +121,15 @@ def main():
         return
 
     stages = {
+        "child_probe_all_views": "child_probe_k",
+        "parent_probe_all_views": "parent_probe_k",
+        "child_selected_views": "selected_view_child_k",
+        "parent_selected_views": "selected_view_parent_k",
+        "child_pre_rerank": "adaptive_child_k",
+        "parent_final": "adaptive_parent_k",
         "global_child": "global_pool_k",
         "global_plus_local": "global_plus_local_k",
-        "prefilter_child": "prefilter_k",
+        "prefilter_child": "prefilter_child_k",
         "final_child": "final_child_k",
         "selected_parent": "final_parent_k",
         "final_combined": "final_total_k",

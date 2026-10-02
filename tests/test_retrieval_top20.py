@@ -86,6 +86,51 @@ class _Controller:
             "parent_candidates": parents,
         }
 
+    def retrieve_eaes_adaptive_views(
+            self, retrieval_phrases, question_emb=None, question_text=None
+    ):
+        self.child_plans.append(list(retrieval_phrases))
+        children = []
+        raw_children = _children()
+        for rank, candidate in enumerate(raw_children, start=1):
+            children.append({
+                **candidate,
+                "rrf_score": 1.0 / (10 + rank),
+                "rrf_score_ratio": 11.0 / (10 + rank),
+                "rrf_rank": rank,
+                "prefilter_rank": rank,
+                "inside_adaptive_prefix": rank <= config.EAES_RERANK_LIMIT,
+                "adaptive_k": min(config.EAES_RERANK_LIMIT, len(raw_children)),
+            })
+        adaptive = children[:config.EAES_RERANK_LIMIT]
+        parents = []
+        if config.SEMANTIC_HIERARCHY:
+            parents = [{
+                "parent_id": f"1-{index}",
+                "rewrite_content": f"Parent memory {index}",
+                "rrf_score": 1.0 / (10 + index),
+                "rrf_score_ratio": 11.0 / (10 + index),
+                "rrf_rank": index,
+                "rank": index,
+                "score": 1.0 / (10 + index),
+                "inside_adaptive_prefix": True,
+                "adaptive_k": 4,
+            } for index in range(1, 5)]
+        return {
+            "child_probe_candidates": children,
+            "parent_probe_candidates": parents,
+            "selected_child_candidates": children,
+            "selected_parent_candidates": parents,
+            "adaptive_children": adaptive,
+            "adaptive_parents": parents,
+            "child_rankings": [],
+            "parent_rankings": [],
+            "phrase_retrieval": {
+                "phrases": [],
+                "selected_phrase_indices": [0],
+            },
+        }
+
 class _RetrievalAgent(EAESMixin, RetrievalMixin):
     def __init__(self):
         self.memory = _Memory()
@@ -106,6 +151,8 @@ class _RetrievalAgent(EAESMixin, RetrievalMixin):
                 "Caroline possession.owned animal",
                 "Caroline profile.animal companion",
                 "Caroline possession.dog ownership",
+                "Caroline pet ownership",
+                "animal companion owned by Caroline",
             ],
             "breadth_value": 0.5,
             "detail_value": 0.5,
@@ -196,7 +243,7 @@ class _RealRollbackRetrievalAgent(_RetrievalAgent):
 
 
 class RetrievalTopTwentyTests(unittest.TestCase):
-    def test_retrieval_only_matches_fifteen_child_four_parent_budget(self):
+    def test_retrieval_only_matches_sixteen_child_four_parent_budget(self):
         agent = _RetrievalAgent()
 
         with (
@@ -204,50 +251,47 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
 
-        self.assertEqual(result["retrieval_k"], 19)
-        self.assertEqual(result["child_k"], 15)
+        self.assertEqual(result["retrieval_k"], 20)
+        self.assertEqual(result["child_k"], 16)
         self.assertEqual(result["parent_k"], 4)
-        self.assertEqual(len(result["candidates"]), 15)
+        self.assertEqual(len(result["candidates"]), 16)
         self.assertEqual(len(result["parent_candidates"]), 4)
-        self.assertEqual(len(result["retrieved_origin_groups"]), 19)
-        self.assertEqual(len(result["retrieved_memory_ids"]), 19)
-        self.assertEqual(
-            agent.memory_controller.parent_plans[0]["keywords"], ["dog"]
-        )
-        self.assertEqual(len(agent.memory_controller.child_plans[0]), 4)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
+        self.assertEqual(len(result["retrieved_memory_ids"]), 20)
+        self.assertEqual(len(agent.memory_controller.child_plans[0]), 6)
         self.assertIn("D2:1", result["parent_origins"])
-        self.assertEqual(set(result["stage_origins"]), {
-            "prefilter_child", "initial_child", "final_child",
-            "selected_parent", "final_combined",
-        })
+        self.assertTrue({
+            "child_probe_all_views", "parent_probe_all_views",
+            "child_selected_views", "parent_selected_views",
+            "child_pre_rerank", "parent_final", "final_combined",
+        }.issubset(result["stage_origins"]))
         self.assertEqual(result["counts"]["prefilter_child_k"], 24)
-        self.assertEqual(result["counts"]["initial_child_k"], 24)
+        self.assertEqual(result["counts"]["initial_child_k"], 16)
         self.assertNotIn("global_child", result["stage_origins"])
 
-    def test_prefilter_initial_final_names_keep_existing_stage_logic(self):
+    def test_adaptive_child_limit_controls_pre_rerank_membership(self):
         agent = _RetrievalAgent()
 
         with (
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_PHRASE_UNION_LIMIT", 10),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 5),
+            patch.object(config, "EAES_RERANK_LIMIT", 5),
         ):
             result = agent.retrieve_question_evidence(
                 "What pet does Caroline own?"
             )
 
         self.assertEqual(len(result["prefilter_candidates"]), 24)
-        self.assertEqual(len(result["initial_candidates"]), 10)
+        self.assertEqual(len(result["initial_candidates"]), 5)
         self.assertEqual(len(result["candidates"]), 5)
         self.assertEqual(result["counts"]["prefilter_child_k"], 24)
-        self.assertEqual(result["counts"]["initial_child_k"], 10)
+        self.assertEqual(result["counts"]["initial_child_k"], 5)
         self.assertEqual(result["counts"]["final_child_k"], 5)
 
     def test_retrieval_only_runs_enabled_rollback_check(self):
@@ -258,7 +302,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What pet does Caroline own?")
@@ -269,7 +313,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         self.assertNotIn("applied", result["rollback_check"])
         self.assertNotIn("reader_gate", result["rollback_check"])
         self.assertEqual(
-            len(result["rollback_check"]["initial_retrieval_pool"]["child_ids"]), 24
+            len(result["rollback_check"]["initial_retrieval_pool"]["child_ids"]), 16
         )
         self.assertEqual(
             len(result["rollback_check"]["initial_retrieval_pool"]["parent_ids"]), 4
@@ -284,7 +328,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence(
@@ -326,7 +370,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence(
@@ -339,7 +383,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         self.assertEqual(
             result["rollback_check"]["terminal_reason"], "no_need_more"
         )
-        self.assertEqual(result["child_k"], 16)
+        self.assertEqual(result["child_k"], 17)
         self.assertEqual(
             result["candidates"][-1]["memory_id"], "M_REAL_ROLLBACK"
         )
@@ -359,7 +403,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
             patch.object(config, "EAES_CANDIDATE_LIMIT", 120),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             result = agent.retrieve_question_evidence("What happened?")
@@ -369,11 +413,11 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             result["retrieved_origins"],
             result["retrieved_origin_groups"],
         )
-        self.assertEqual(result["retrieval_k"], 20)
-        self.assertEqual(len(result["retrieved_origin_groups"]), 20)
-        self.assertEqual(result["retrieved_origin_groups"][15], ["D9:99"])
+        self.assertEqual(result["retrieval_k"], 21)
+        self.assertEqual(len(result["retrieved_origin_groups"]), 21)
+        self.assertEqual(result["retrieved_origin_groups"][16], ["D9:99"])
         self.assertEqual(metrics["hit"], 1)
-        self.assertEqual(metrics["mrr"], 1 / 16)
+        self.assertEqual(metrics["mrr"], 1 / 17)
 
     def test_compact_retrieval_schema_removes_deprecated_and_duplicate_fields(self):
         agent = _RetrievalAgent()
@@ -381,7 +425,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
         ):
             internal = agent.retrieve_question_evidence("What pet does Caroline own?")
         internal["prefilter_candidates"][0].update({
@@ -396,6 +440,8 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         self.assertEqual(set(compact), {
             "mode", "query_plan", "routing", "phrase_retrieval",
             "parent_candidates", "child_candidates",
+            "child_probe_candidates", "selected_view_child_candidates",
+            "parent_probe_candidates", "selected_view_parent_candidates",
             "final_child_candidates", "final_parent_candidates",
             "final_child_ids", "final_parent_ids", "counts",
             "rollback_check",
@@ -407,10 +453,11 @@ class RetrievalTopTwentyTests(unittest.TestCase):
                 "temporal_intent", "required_lifecycle",
                 "event_lifecycle", "entities"):
             self.assertNotIn(deprecated, serialized)
-        self.assertEqual(len(compact["child_candidates"]), 24)
-        self.assertEqual(len(compact["final_child_candidates"]), 15)
+        self.assertEqual(len(compact["child_candidates"]), 16)
+        self.assertEqual(len(compact["selected_view_child_candidates"]), 24)
+        self.assertEqual(len(compact["final_child_candidates"]), 16)
         self.assertEqual(len(compact["final_parent_candidates"]), 4)
-        self.assertEqual(len(compact["final_child_ids"]), 15)
+        self.assertEqual(len(compact["final_child_ids"]), 16)
         self.assertEqual(len(compact["final_parent_ids"]), 4)
         self.assertTrue(all(
             re.fullmatch(r"\d+-\d+", item["parent_id"])
@@ -438,7 +485,7 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             patch.object(config, "EAES_MODE", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             internal = agent.retrieve_question_evidence(

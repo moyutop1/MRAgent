@@ -70,6 +70,52 @@ class _FakeController:
             "parent_candidates": parents,
         }
 
+    def retrieve_eaes_adaptive_views(
+            self, retrieval_phrases, question_emb=None, question_text=None
+    ):
+        self.child_retrieval_phrases.append(list(retrieval_phrases))
+        children = []
+        for rank, candidate in enumerate(self.candidates, start=1):
+            children.append({
+                **candidate,
+                "rrf_score": 1.0 / (10 + rank),
+                "rrf_score_ratio": 11.0 / (10 + rank),
+                "rrf_rank": rank,
+                "prefilter_rank": rank,
+                "inside_adaptive_prefix": rank <= config.EAES_RERANK_LIMIT,
+                "adaptive_k": min(
+                    config.EAES_RERANK_LIMIT, len(self.candidates)
+                ),
+            })
+        adaptive = children[:config.EAES_RERANK_LIMIT]
+        parents = []
+        if config.SEMANTIC_HIERARCHY:
+            parents = [{
+                "parent_id": f"1-{i}",
+                "rewrite_content": f"Parent memory {i} about Caroline and dogs.",
+                "rrf_score": 1.0 / (10 + i),
+                "rrf_score_ratio": 11.0 / (10 + i),
+                "rrf_rank": i,
+                "rank": i,
+                "score": 1.0 / (10 + i),
+                "inside_adaptive_prefix": True,
+                "adaptive_k": 4,
+            } for i in range(1, 5)]
+        return {
+            "child_probe_candidates": children,
+            "parent_probe_candidates": parents,
+            "selected_child_candidates": children,
+            "selected_parent_candidates": parents,
+            "adaptive_children": adaptive,
+            "adaptive_parents": parents,
+            "child_rankings": [],
+            "parent_rankings": [],
+            "phrase_retrieval": {
+                "phrases": [],
+                "selected_phrase_indices": [0],
+            },
+        }
+
 class _AblationAgent(EAESMixin):
     def __init__(self, candidates, reader_answer="test answer"):
         self.llm = _FakeLLM(reader_answer)
@@ -90,6 +136,8 @@ class _AblationAgent(EAESMixin):
                 "Caroline possession.owned animal",
                 "Caroline profile.animal companion",
                 "Caroline possession.dog ownership",
+                "Caroline pet ownership",
+                "animal companion owned by Caroline",
             ],
             "breadth_value": 0.5,
             "detail_value": 0.5,
@@ -137,7 +185,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", False),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
         ):
             answer, prediction_context = agent.answer_question_eaes(
                 "question", category=1
@@ -146,15 +194,15 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         self.assertEqual(answer, "test answer")
         self.assertEqual(
             prediction_context,
-            [f"D1:{i}" for i in range(1, 16)],
+            [f"D1:{i}" for i in range(1, 17)],
         )
         self.assertEqual(agent.selector_calls, 0)
         package = agent.llm.inputs[0]["evidence_package"]
         self.assertNotIn("backup_candidates", agent.llm.inputs[0])
-        self.assertEqual(len(package["answer_items"]), 15)
+        self.assertEqual(len(package["answer_items"]), 16)
         self.assertEqual(
             [item["evidence"][0]["memory_id"] for item in package["answer_items"]],
-            [f"M_{i}" for i in range(1, 16)],
+            [f"M_{i}" for i in range(1, 17)],
         )
         self.assertTrue(all(
             set(item["evidence"][0]) == {
@@ -164,14 +212,14 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         ))
         self.assertTrue(all(set(item) == {"evidence"} for item in package["answer_items"]))
 
-    def test_default_hierarchy_budget_is_fifteen_children_plus_four_parents(self):
+    def test_default_hierarchy_budget_is_sixteen_children_plus_four_parents(self):
         agent = _AblationAgent(_candidates(30))
 
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             _, prediction_context = agent.answer_question_eaes(
@@ -179,19 +227,19 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             )
 
         reader_input = agent.llm.inputs[0]
-        self.assertEqual(len(reader_input["evidence_package"]["answer_items"]), 15)
+        self.assertEqual(len(reader_input["evidence_package"]["answer_items"]), 16)
         self.assertEqual(len(reader_input["parent_memories"]), 4)
         self.assertEqual(
             len(reader_input["evidence_package"]["answer_items"])
             + len(reader_input["parent_memories"]),
-            19,
+            20,
         )
-        self.assertEqual(len(prediction_context), 19)
+        self.assertEqual(len(prediction_context), 20)
         self.assertEqual(
-            prediction_context[:15],
-            [f"D1:{i}" for i in range(1, 16)],
+            prediction_context[:16],
+            [f"D1:{i}" for i in range(1, 17)],
         )
-        self.assertEqual(prediction_context[15], "D2:1,D2:11")
+        self.assertEqual(prediction_context[16], "D2:1,D2:11")
 
     def test_enabled_selector_keeps_existing_path(self):
         agent = _AblationAgent(_candidates())
@@ -216,7 +264,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             for item in reader_input["backup_candidates"]
         ))
 
-    def test_query_keywords_are_parent_only(self):
+    def test_parent_and_child_use_the_same_phrase_pool(self):
         agent = _AblationAgent(_candidates())
 
         with (
@@ -227,16 +275,14 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             agent.answer_question_eaes("question", category=1)
 
         self.assertEqual(
-            agent.memory_controller.parent_query_plans[0]["keywords"],
-            ["dog"],
-        )
-        self.assertEqual(
             agent.memory_controller.child_retrieval_phrases[0],
             [
                 "Caroline possession.pet ownership",
                 "Caroline possession.owned animal",
                 "Caroline profile.animal companion",
                 "Caroline possession.dog ownership",
+                "Caroline pet ownership",
+                "animal companion owned by Caroline",
             ],
         )
         self.assertNotIn("keywords", agent.selector_query_plans[0])
@@ -255,7 +301,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            patch.object(config, "EAES_RERANK_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             agent.answer_question_eaes("question", category=4)

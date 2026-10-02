@@ -252,6 +252,10 @@ def compact_candidate(cand, rank):
         "tag": cand.get("tag"),
         "max_phrase_similarity": cand.get("max_phrase_similarity"),
         "rrf_score": cand.get("rrf_score"),
+        "rrf_score_ratio": cand.get("rrf_score_ratio"),
+        "rrf_rank": cand.get("rrf_rank"),
+        "question_relevance": cand.get("question_relevance"),
+        "inside_adaptive_prefix": cand.get("inside_adaptive_prefix"),
         "candidate_score": cand.get("candidate_score"),
         "candidate_sources": cand.get("candidate_sources"),
         "prefilter_rank": cand.get("prefilter_rank"),
@@ -265,6 +269,19 @@ def compact_gold_diag(retrieval_row):
     diag = retrieval_row.get("gold_memory_diagnostics") or {}
     out = []
     for gold in diag.get("gold_origins") or []:
+        if "child_nodes" in gold or "parent_nodes" in gold:
+            out.append({
+                "origin": gold.get("origin"),
+                "covered_by_retrieval": gold.get("covered_by_retrieval"),
+                "covered_by_final": gold.get("covered_by_final"),
+                "covered_by_child": gold.get("covered_by_child"),
+                "covered_by_parent": gold.get("covered_by_parent"),
+                "final_path": gold.get("final_path"),
+                "drop_reason": gold.get("drop_reason"),
+                "child_nodes": gold.get("child_nodes") or [],
+                "parent_nodes": gold.get("parent_nodes") or [],
+            })
+            continue
         memories = []
         for mem in gold.get("memories") or []:
             memories.append({

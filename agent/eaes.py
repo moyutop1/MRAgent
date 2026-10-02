@@ -270,7 +270,11 @@ class EAESMixin:
         return plan
 
     @staticmethod
-    def _validate_eaes_retrieval_phrases(values, expected_count=4):
+    def _validate_eaes_retrieval_phrases(
+            values, expected_count=None, max_words=None
+    ):
+        expected_count = expected_count or getattr(config, "EAES_PHRASE_COUNT", 6)
+        max_words = max_words or getattr(config, "EAES_PHRASE_MAX_WORDS", 10)
         if not isinstance(values, list):
             return None, "retrieval_phrases must be an array"
         phrases = []
@@ -282,10 +286,10 @@ class EAESMixin:
             phrase = re.sub(r"\s+", " ", value).strip()
             if not phrase:
                 return None, f"retrieval_phrases[{index}] must be non-empty"
-            if len(phrase.split()) > 3:
+            if len(phrase.split()) > max_words:
                 return None, (
                     f"retrieval_phrases[{index}] must contain no more than "
-                    f"3 whitespace-separated words: {value!r}"
+                    f"{max_words} whitespace-separated words: {value!r}"
                 )
             phrases.append(phrase)
         if len(phrases) < expected_count:
@@ -296,9 +300,13 @@ class EAESMixin:
         return phrases[:expected_count], ""
 
     @staticmethod
-    def _normalize_eaes_retrieval_phrases(values, expected_count=4):
+    def _normalize_eaes_retrieval_phrases(
+            values, expected_count=None, max_words=None
+    ):
         phrases, _ = EAESMixin._validate_eaes_retrieval_phrases(
-            values, expected_count=expected_count
+            values,
+            expected_count=expected_count,
+            max_words=max_words,
         )
         return phrases
 
@@ -1227,71 +1235,87 @@ class EAESMixin:
         )
 
     def _retrieve_eaes_first_pass(self, question, question_emb=None):
-        """Shared dynamic first pass for normal answering and retrieval-only."""
+        """Shared adaptive-view first pass for answering and retrieval-only."""
         query_plan = self.parse_eaes_query(question, question_emb)
-        prefilter_children, phrase_retrieval = (
-            self.memory_controller.retrieve_eaes_phrase_candidates(
-                query_plan["retrieval_phrases"],
-                include_diagnostics=True,
-            )
+        view_retrieval = self.memory_controller.retrieve_eaes_adaptive_views(
+            query_plan["retrieval_phrases"],
+            question_emb=question_emb,
+            question_text=self._eaes_query_question(question),
         )
-        selected_parents = []
-        routing = {
-            "breadth_value": float(query_plan.get("breadth_value", 0.5)),
-            "detail_value": float(query_plan.get("detail_value", 0.5)),
-            "parent_entropy": 0.0,
-            "child_parent_dispersion": 0.0,
-            "parent_child_jsd": 0.0,
-            "retrieval_uncertainty": 0.0,
-            "target_parent_mass": 0.0,
-            "selected_parent_mass": 0.0,
-            "selected_parent_k": 0,
-            "parent_candidates": [],
-        }
-        if getattr(config, "SEMANTIC_HIERARCHY", False):
-            selected_parents, routing = (
-                self.memory_controller.route_eaes_parent_candidates(
-                    query_plan, prefilter_children, question_emb
-                )
-            )
-        initial_limit = getattr(config, "EAES_PHRASE_UNION_LIMIT", 60)
-        initial_children = prefilter_children[:initial_limit]
-        initial_retrieval = {
-            "prefilter_candidate_ids": [
-                item.get("memory_id") for item in prefilter_children
-            ],
-            "initial_candidate_ids": [
-                item.get("memory_id") for item in initial_children
-            ],
-            "dropped_by_pool_limit_ids": [
-                item.get("memory_id")
-                for item in prefilter_children[initial_limit:]
-            ],
-        }
+        child_probe = view_retrieval["child_probe_candidates"]
+        parent_probe = view_retrieval["parent_probe_candidates"]
+        selected_child_pool = view_retrieval["selected_child_candidates"]
+        selected_parent_pool = view_retrieval["selected_parent_candidates"]
+        initial_children = view_retrieval["adaptive_children"]
+        selected_parents = view_retrieval["adaptive_parents"]
+        phrase_retrieval = view_retrieval["phrase_retrieval"]
         final_children = self.rerank_eaes_phrase_candidates(
             question,
             initial_children,
-            top_k=getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            top_k=len(initial_children),
         ) if initial_children else []
+        routing = {
+            "selected_parent_k": 0,
+            "parent_candidates": selected_parent_pool,
+            "parent_phrase_top_k": getattr(
+                config, "EAES_PARENT_PHRASE_TOP_K", 10
+            ),
+            "parent_adaptive_threshold": getattr(
+                config, "EAES_PARENT_ADAPTIVE_THRESHOLD", 0.55
+            ),
+        }
+        routing["selected_parent_k"] = len(selected_parents)
+        initial_retrieval = {
+            "all_view_child_ids": [
+                item.get("memory_id") for item in child_probe
+            ],
+            "selected_view_child_ids": [
+                item.get("memory_id") for item in selected_child_pool
+            ],
+            "adaptive_child_ids": [
+                item.get("memory_id") for item in initial_children
+            ],
+            "all_view_parent_ids": [
+                item.get("parent_id") for item in parent_probe
+            ],
+            "selected_view_parent_ids": [
+                item.get("parent_id") for item in selected_parent_pool
+            ],
+            "adaptive_parent_ids": [
+                item.get("parent_id") for item in selected_parents
+            ],
+        }
         return {
             "query_plan": query_plan,
-            "prefilter_children": prefilter_children,
+            "child_probe_candidates": child_probe,
+            "parent_probe_candidates": parent_probe,
+            "prefilter_children": selected_child_pool,
+            "selected_parent_pool": selected_parent_pool,
             "initial_children": initial_children,
             "final_children": final_children,
             "selected_parents": selected_parents,
             "routing": routing,
             "phrase_retrieval": phrase_retrieval,
+            "child_rankings": view_retrieval["child_rankings"],
+            "parent_rankings": view_retrieval["parent_rankings"],
             "initial_retrieval": initial_retrieval,
             "counts": {
-                "phrase_selected_k": [
-                    item.get("selected_k")
-                    for item in phrase_retrieval.get("phrases", [])
-                ],
-                "prefilter_child_k": len(prefilter_children),
-                "initial_child_k": len(initial_children),
-                "dropped_by_pool_limit_k": len(
-                    initial_retrieval.get("dropped_by_pool_limit_ids", [])
+                "candidate_phrase_k": len(
+                    query_plan.get("retrieval_phrases") or []
                 ),
+                "selected_phrase_k": len(
+                    phrase_retrieval.get("selected_phrase_indices") or []
+                ),
+                "child_probe_k": len(child_probe),
+                "parent_probe_k": len(parent_probe),
+                "selected_view_child_k": len(selected_child_pool),
+                "selected_view_parent_k": len(selected_parent_pool),
+                "adaptive_child_k": len(initial_children),
+                "adaptive_parent_k": len(selected_parents),
+                # Compatibility names for existing result readers.
+                "prefilter_child_k": len(selected_child_pool),
+                "initial_child_k": len(initial_children),
+                "dropped_by_pool_limit_k": 0,
                 "final_child_k": len(final_children),
                 "final_parent_k": len(selected_parents),
                 "final_total_k": len(final_children) + len(selected_parents),

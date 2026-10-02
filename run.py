@@ -31,6 +31,45 @@ from eval.retrieval_metrics import retrieval_metrics as _retrieval_metrics
 logger = logging.getLogger(__name__)
 
 
+def _resolve_compatible_cache_path(
+        canonical_path, dataset, sample_id, cache_kind
+):
+    """Reuse compatible legacy cache names before generating new artifacts."""
+    canonical = Path(canonical_path)
+    if canonical.is_file():
+        return str(canonical)
+    model_token = str(config.MODEL_NAME).replace("-", "_")
+    if cache_kind == "rewrite":
+        root = Path("data") / dataset / f"rewrite_{model_token}"
+        candidates = [
+            root / f"{sample_id}_rewrite.jsonl",
+            root / f"{sample_id}_rewrite.json",
+        ]
+    elif cache_kind == "keyword":
+        root = Path("data") / dataset / f"keyword_{model_token}"
+        candidates = [
+            root / f"{sample_id}_keyword.jsonl",
+            root / f"{sample_id}_keyword.json",
+        ]
+    elif cache_kind == "embedding":
+        root = (
+            Path("data") / dataset / "embedding"
+            / f"gpt_{model_token}_{config.EMBEDDING_TAG}"
+        )
+        candidates = [root / f"{sample_id}_embedding.pkl"]
+    else:
+        raise ValueError(f"Unknown cache kind: {cache_kind}")
+    legacy = next((path for path in candidates if path.is_file()), None)
+    if legacy is not None:
+        logger.info(
+            "Reusing compatible legacy %s cache: %s",
+            cache_kind,
+            legacy,
+        )
+        return str(legacy)
+    return str(canonical)
+
+
 def _select_question_rows(question_list, sample_id):
     rows = list(enumerate(question_list[sample_id], start=1))
     if config.EXCLUDED_CATEGORIES:
@@ -221,6 +260,12 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             f.write(json.dumps(row, ensure_ascii=False, default=list) + "\n")
 
     count_fields = {
+        "child_probe_all_views": "child_probe_k",
+        "parent_probe_all_views": "parent_probe_k",
+        "child_selected_views": "selected_view_child_k",
+        "parent_selected_views": "selected_view_parent_k",
+        "child_pre_rerank": "adaptive_child_k",
+        "parent_final": "adaptive_parent_k",
         "prefilter_child": "prefilter_child_k",
         "initial_child": "initial_child_k",
         "final_child": "final_child_k",
@@ -321,7 +366,14 @@ def main():
                     continue
         with per_sample_log(sample_id=sample_id, dataset=dataset):
             logging.info(f"=== Start processing sample {sample_id} ===")
-            rewrite_path = config.rewrite_template.format(dataset=dataset, sample_id=sample_id)
+            rewrite_path = _resolve_compatible_cache_path(
+                config.rewrite_template.format(
+                    dataset=dataset, sample_id=sample_id
+                ),
+                dataset,
+                sample_id,
+                "rewrite",
+            )
             expected_session_ids = list(sample)
             rewrite_records = load_jsonl_records(rewrite_path)
             validate_rewrite_cache_prefix(
@@ -352,8 +404,22 @@ def main():
             else:
                 logging.info(f"Rewrite for sample {sample_id} already exists, skipping.")
 
-            keyword_path = config.keyword_template.format(dataset=dataset, sample_id=sample_id)
-            embedding_path = config.embedding_template.format(dataset=dataset, sample_id=sample_id)
+            keyword_path = _resolve_compatible_cache_path(
+                config.keyword_template.format(
+                    dataset=dataset, sample_id=sample_id
+                ),
+                dataset,
+                sample_id,
+                "keyword",
+            )
+            embedding_path = _resolve_compatible_cache_path(
+                config.embedding_template.format(
+                    dataset=dataset, sample_id=sample_id
+                ),
+                dataset,
+                sample_id,
+                "embedding",
+            )
             if rewrite_updated:
                 # A keyword/embedding cache beside an incomplete rewrite came
                 # from a different generation and cannot be aligned safely.

@@ -272,6 +272,8 @@ def _query_output():
             "Caroline possession.owned animal",
             "Caroline profile.animal companion",
             "Caroline possession.dog ownership",
+            "Caroline pet ownership",
+            "animal companion owned by Caroline",
         ],
         "required_semantic_properties": [
             "personal_profile", "durable", "unknown", "personal_profile",

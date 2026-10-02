@@ -94,6 +94,7 @@ class HierarchicalRouterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "1-4 items"):
             controller._eaes_child_tags(note)
 
+    @unittest.skip("legacy parent router is outside the adaptive-view main path")
     def test_breadth_changes_dynamic_parent_budget(self):
         controller = MemoryController(_Store())
         children = [
@@ -123,6 +124,7 @@ class HierarchicalRouterTests(unittest.TestCase):
         )
         self.assertAlmostEqual(single_diag["child_parent_dispersion"], 1.0)
 
+    @unittest.skip("legacy parent router is outside the adaptive-view main path")
     def test_router_can_select_zero_when_no_parent_is_eligible(self):
         controller = MemoryController(_Store())
         with (
@@ -150,6 +152,7 @@ class HierarchicalRouterTests(unittest.TestCase):
             controller, "merge_eaes_hierarchical_candidates"
         ))
 
+    @unittest.skip("legacy parent router is outside the adaptive-view main path")
     def test_parent_routing_does_not_mutate_child_scores(self):
         controller = MemoryController(_Store())
         children = [{

@@ -479,6 +479,674 @@ class MemoryController:
             return candidates, diagnostics
         return candidates
 
+    def rank_eaes_parents_per_phrase(
+            self,
+            retrieval_phrases,
+            top_k=None,
+            exclude_parent_ids=None,
+    ):
+        """Probe parent summaries independently with the shared phrase pool."""
+        phrases = [str(value).strip() for value in retrieval_phrases or []]
+        top_k = top_k or config.EAES_PARENT_PHRASE_TOP_K
+        excluded = set(exclude_parent_ids or [])
+        if not config.SEMANTIC_HIERARCHY:
+            return [[] for _ in phrases]
+
+        self.prepare_eaes_parent_embeddings()
+        phrase_vectors = self._eaes_phrase_embeddings(phrases)
+        parents = sorted(
+            (
+                parent for parent in self.memory.eaes_parent_nodes.values()
+                if parent.parent_id not in excluded
+                and parent.retrieval_embedding is not None
+            ),
+            key=lambda parent: parent.parent_id,
+        )
+        rankings = []
+        for phrase_index, (phrase, phrase_vector) in enumerate(
+                zip(phrases, phrase_vectors)):
+            scored = []
+            for parent in parents:
+                parent_vector = self._normalize_embedding_rows(
+                    parent.retrieval_embedding
+                )[0]
+                scored.append((
+                    parent,
+                    float(np.dot(phrase_vector, parent_vector)),
+                ))
+            scored.sort(key=lambda row: (-row[1], row[0].parent_id))
+            rankings.append([
+                {
+                    **parent.to_reader_dict(),
+                    "phrase_index": phrase_index,
+                    "phrase": phrase,
+                    "phrase_rank": rank,
+                    "phrase_similarity": similarity,
+                }
+                for rank, (parent, similarity) in enumerate(
+                    scored[:top_k], start=1
+                )
+            ])
+        return rankings
+
+    def _eaes_question_vector(self, question_emb=None, question_text=None):
+        if question_emb is not None:
+            rows = self._normalize_embedding_rows(question_emb)
+            return rows[0] if len(rows) else None
+        question_text = str(question_text or "").strip()
+        if not question_text:
+            return None
+        rows = self._normalize_embedding_rows(get_embedding([question_text]))
+        return rows[0] if len(rows) else None
+
+    @staticmethod
+    def _eaes_clipped_cosine(left, right):
+        if left is None or right is None:
+            return 0.0
+        return max(0.0, min(1.0, float(np.dot(left, right))))
+
+    def _score_eaes_view_rankings(
+            self,
+            child_rankings,
+            parent_rankings,
+            retrieval_phrases,
+            question_emb=None,
+            question_text=None,
+    ):
+        """Attach fidelity, question relevance, and MEG support potential."""
+        self.prepare_eaes_retrieval_embeddings()
+        if config.SEMANTIC_HIERARCHY:
+            self.prepare_eaes_parent_embeddings()
+        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
+        question_vector = self._eaes_question_vector(
+            question_emb, question_text
+        )
+        fidelities = [
+            self._eaes_clipped_cosine(vector, question_vector)
+            for vector in phrase_vectors
+        ]
+        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
+        rrf_k = float(config.EAES_PHRASE_RRF_K)
+
+        child_relevance = {}
+        for note in self.memory.eaes_notes.values():
+            vector = (
+                self._normalize_embedding_rows(note.retrieval_embedding)[0]
+                if note.retrieval_embedding is not None else None
+            )
+            child_relevance[note.memory_id] = self._eaes_clipped_cosine(
+                vector, question_vector
+            )
+        parent_relevance = {}
+        for parent in self.memory.eaes_parent_nodes.values():
+            vector = (
+                self._normalize_embedding_rows(parent.retrieval_embedding)[0]
+                if parent.retrieval_embedding is not None else None
+            )
+            parent_relevance[parent.parent_id] = self._eaes_clipped_cosine(
+                vector, question_vector
+            )
+
+        def attach(rankings, id_field, relevance_by_id):
+            for phrase_index, ranking in enumerate(rankings):
+                fidelity = fidelities[phrase_index]
+                for item in ranking:
+                    node_id = item.get(id_field)
+                    rank = int(item.get("phrase_rank") or 0)
+                    question_relevance = relevance_by_id.get(node_id, 0.0)
+                    phrase_similarity = max(
+                        0.0,
+                        min(1.0, float(item.get("phrase_similarity") or 0.0)),
+                    )
+                    support = fidelity * (
+                        beta * question_relevance
+                        + (1.0 - beta) * phrase_similarity
+                    ) / (rrf_k + rank)
+                    item["phrase_fidelity"] = fidelity
+                    item["question_relevance"] = question_relevance
+                    item["support_potential"] = support
+
+        attach(child_rankings, "memory_id", child_relevance)
+        attach(parent_rankings, "parent_id", parent_relevance)
+        return fidelities
+
+    @staticmethod
+    def _eaes_view_potential_maps(rankings, id_field):
+        return [
+            {
+                item[id_field]: float(item.get("support_potential") or 0.0)
+                for item in ranking
+                if item.get(id_field)
+            }
+            for ranking in rankings
+        ]
+
+    @staticmethod
+    def _eaes_marginal_gain(potential, coverage):
+        return sum(
+            max(0.0, value - coverage.get(node_id, 0.0))
+            for node_id, value in potential.items()
+        )
+
+    def select_eaes_views_by_meg(
+            self,
+            retrieval_phrases,
+            fidelities,
+            child_rankings,
+            parent_rankings,
+    ):
+        """Greedily select phrases by dual-channel marginal evidence gain."""
+        child_maps = self._eaes_view_potential_maps(
+            child_rankings, "memory_id"
+        )
+        parent_maps = self._eaes_view_potential_maps(
+            parent_rankings, "parent_id"
+        )
+        child_scale = max(
+            (sum(values.values()) for values in child_maps), default=0.0
+        )
+        parent_scale = max(
+            (sum(values.values()) for values in parent_maps), default=0.0
+        )
+        child_weight = float(config.EAES_CHILD_GAIN_WEIGHT)
+        min_views = int(config.EAES_MIN_SELECTED_VIEWS)
+        max_views = int(config.EAES_MAX_SELECTED_VIEWS)
+        threshold = float(config.EAES_VIEW_GAIN_THRESHOLD)
+        child_coverage = {}
+        parent_coverage = {}
+        selected = []
+        history = []
+        remaining = set(range(len(retrieval_phrases)))
+
+        def normalized_combined(child_gain, parent_gain):
+            parts = []
+            if child_scale > 0:
+                parts.append((child_weight, child_gain / child_scale))
+            if parent_scale > 0:
+                parts.append((1.0 - child_weight, parent_gain / parent_scale))
+            active_weight = sum(weight for weight, _ in parts)
+            if active_weight <= 0:
+                return 0.0
+            return sum(weight * value for weight, value in parts) / active_weight
+
+        while remaining and len(selected) < max_views:
+            rows = []
+            for phrase_index in sorted(remaining):
+                child_gain = self._eaes_marginal_gain(
+                    child_maps[phrase_index], child_coverage
+                )
+                parent_gain = self._eaes_marginal_gain(
+                    parent_maps[phrase_index], parent_coverage
+                )
+                rows.append({
+                    "phrase_index": phrase_index,
+                    "child_marginal_gain": child_gain,
+                    "parent_marginal_gain": parent_gain,
+                    "combined_marginal_gain": normalized_combined(
+                        child_gain, parent_gain
+                    ),
+                })
+            best = max(
+                rows,
+                key=lambda row: (
+                    row["combined_marginal_gain"],
+                    -row["phrase_index"],
+                ),
+            )
+            must_select = len(selected) < min_views
+            if (
+                    not must_select
+                    and best["combined_marginal_gain"] < threshold
+            ):
+                history.append({
+                    "step": len(selected) + 1,
+                    "selected_phrase_index": None,
+                    "stop_reason": "below_marginal_gain_threshold",
+                    "candidates": rows,
+                })
+                break
+            phrase_index = best["phrase_index"]
+            selected.append(phrase_index)
+            remaining.remove(phrase_index)
+            for node_id, value in child_maps[phrase_index].items():
+                child_coverage[node_id] = max(
+                    child_coverage.get(node_id, 0.0), value
+                )
+            for node_id, value in parent_maps[phrase_index].items():
+                parent_coverage[node_id] = max(
+                    parent_coverage.get(node_id, 0.0), value
+                )
+            history.append({
+                "step": len(selected),
+                "selected_phrase_index": phrase_index,
+                "stop_reason": None,
+                "candidates": rows,
+            })
+
+        selected_step = {value: index + 1 for index, value in enumerate(selected)}
+        selected_gain = {}
+        for step in history:
+            chosen = step.get("selected_phrase_index")
+            if chosen is None:
+                continue
+            selected_gain[chosen] = next(
+                (
+                    row for row in step.get("candidates", [])
+                    if row.get("phrase_index") == chosen
+                ),
+                {},
+            )
+        final_rows = []
+        for phrase_index, phrase in enumerate(retrieval_phrases):
+            child_gain = self._eaes_marginal_gain(
+                child_maps[phrase_index], child_coverage
+            )
+            parent_gain = self._eaes_marginal_gain(
+                parent_maps[phrase_index], parent_coverage
+            )
+            is_selected = phrase_index in selected_step
+            if is_selected:
+                decision = "selected"
+            elif len(selected) >= max_views:
+                decision = "max_views_reached"
+            elif child_gain <= 1e-12 and parent_gain <= 1e-12:
+                decision = "redundant_with_selected_views"
+            else:
+                decision = "below_marginal_gain_threshold"
+            reported_gain = selected_gain.get(phrase_index) or {
+                "child_marginal_gain": child_gain,
+                "parent_marginal_gain": parent_gain,
+                "combined_marginal_gain": normalized_combined(
+                    child_gain, parent_gain
+                ),
+            }
+            final_rows.append({
+                "phrase_index": phrase_index,
+                "phrase": phrase,
+                "fidelity": float(fidelities[phrase_index]),
+                "selected": is_selected,
+                "selection_step": selected_step.get(phrase_index),
+                "child_marginal_gain": reported_gain.get(
+                    "child_marginal_gain", 0.0
+                ),
+                "parent_marginal_gain": reported_gain.get(
+                    "parent_marginal_gain", 0.0
+                ),
+                "combined_marginal_gain": reported_gain.get(
+                    "combined_marginal_gain", 0.0
+                ),
+                "remaining_child_marginal_gain": child_gain,
+                "remaining_parent_marginal_gain": parent_gain,
+                "remaining_combined_marginal_gain": normalized_combined(
+                    child_gain, parent_gain
+                ),
+                "decision": decision,
+            })
+        for rankings in (child_rankings, parent_rankings):
+            for ranking in rankings:
+                for item in ranking:
+                    item["phrase_selected"] = (
+                        item.get("phrase_index") in selected_step
+                    )
+        return selected, {
+            "phrases": final_rows,
+            "selection_history": history,
+            "selected_phrase_indices": selected,
+            "min_views": min_views,
+            "max_views": max_views,
+            "gain_threshold": threshold,
+            "child_gain_weight": child_weight,
+            "question_relevance_weight": float(
+                config.EAES_QUESTION_RELEVANCE_WEIGHT
+            ),
+        }
+
+    @staticmethod
+    def fuse_eaes_channel_rankings(
+            phrase_rankings,
+            selected_phrase_indices,
+            id_field,
+            rrf_k=10.0,
+    ):
+        """Fuse selected phrase lists inside one channel without cross-level mixing."""
+        selected_set = set(selected_phrase_indices)
+        fused = {}
+        for phrase_index, ranking in enumerate(phrase_rankings):
+            if phrase_index not in selected_set:
+                continue
+            for item in ranking:
+                node_id = item.get(id_field)
+                rank = int(item.get("phrase_rank") or 0)
+                if not node_id or rank <= 0:
+                    continue
+                if node_id not in fused:
+                    fused[node_id] = {
+                        key: value for key, value in item.items()
+                        if key not in {
+                            "phrase_index", "phrase", "phrase_rank",
+                            "phrase_similarity", "phrase_fidelity",
+                            "support_potential", "phrase_selected",
+                        }
+                    }
+                    fused[node_id]["phrase_matches"] = []
+                    fused[node_id]["rrf_score"] = 0.0
+                contribution = 1.0 / (float(rrf_k) + rank)
+                fused[node_id]["rrf_score"] += contribution
+                fused[node_id]["phrase_matches"].append({
+                    "phrase_index": phrase_index,
+                    "phrase": item.get("phrase"),
+                    "phrase_rank": rank,
+                    "phrase_similarity": float(
+                        item.get("phrase_similarity") or 0.0
+                    ),
+                    "phrase_fidelity": float(
+                        item.get("phrase_fidelity") or 0.0
+                    ),
+                    "question_relevance": float(
+                        item.get("question_relevance") or 0.0
+                    ),
+                    "support_potential": float(
+                        item.get("support_potential") or 0.0
+                    ),
+                    "rrf_contribution": contribution,
+                })
+        rows = list(fused.values())
+        rows.sort(key=lambda item: (
+            -float(item.get("rrf_score") or 0.0),
+            str(item.get(id_field) or ""),
+        ))
+        top_score = float(rows[0]["rrf_score"]) if rows else 0.0
+        for rank, item in enumerate(rows, start=1):
+            ratio = (
+                float(item["rrf_score"]) / top_score
+                if top_score > 0 else 0.0
+            )
+            item["rrf_rank"] = rank
+            item["prefilter_rank"] = rank
+            item["rrf_score_ratio"] = ratio
+            item["candidate_score"] = float(item["rrf_score"])
+            item["_candidate_score"] = float(item["rrf_score"])
+            item["candidate_sources"] = ["selected_phrase_rrf"]
+        return rows
+
+    @staticmethod
+    def select_eaes_adaptive_prefix(
+            candidates,
+            max_k,
+            ratio_threshold,
+            min_k=1,
+            relevance_floor=None,
+    ):
+        """Keep one RRF prefix; adaptive scores are not a second ranking."""
+        annotated = [dict(item) for item in candidates]
+        if not annotated or max_k <= 0:
+            return [], annotated
+        eligible = True
+        if relevance_floor is not None:
+            eligible = float(
+                annotated[0].get("question_relevance") or 0.0
+            ) >= float(relevance_floor)
+        selected_k = 0
+        if eligible:
+            selected_k = sum(
+                1 for item in annotated[:max_k]
+                if float(item.get("rrf_score_ratio") or 0.0)
+                >= float(ratio_threshold)
+            )
+            selected_k = min(max_k, max(min_k, selected_k))
+        for index, item in enumerate(annotated):
+            item["inside_adaptive_prefix"] = index < selected_k
+            item["adaptive_k"] = selected_k
+        return annotated[:selected_k], annotated
+
+    @staticmethod
+    def _eaes_compact_phrase_rankings(rankings, id_field):
+        return [
+            {
+                "phrase_index": phrase_index,
+                "candidates": [
+                    {
+                        id_field: item.get(id_field),
+                        "rank": item.get("phrase_rank"),
+                        "similarity": item.get("phrase_similarity"),
+                        "question_relevance": item.get("question_relevance"),
+                        "support_potential": item.get("support_potential"),
+                        "selected": item.get("phrase_selected"),
+                    }
+                    for item in ranking
+                ],
+            }
+            for phrase_index, ranking in enumerate(rankings)
+        ]
+
+    def retrieve_eaes_adaptive_views(
+            self,
+            retrieval_phrases,
+            question_emb=None,
+            question_text=None,
+    ):
+        """Run shared-view, independent-channel retrieval and adaptive depths."""
+        phrases = [str(value).strip() for value in retrieval_phrases or []]
+        child_rankings = self.rank_eaes_children_per_phrase(
+            phrases, top_k=config.EAES_PHRASE_INITIAL_TOP_K
+        )
+        parent_rankings = self.rank_eaes_parents_per_phrase(
+            phrases, top_k=config.EAES_PARENT_PHRASE_TOP_K
+        )
+        fidelities = self._score_eaes_view_rankings(
+            child_rankings,
+            parent_rankings,
+            phrases,
+            question_emb=question_emb,
+            question_text=question_text,
+        )
+        selected_indices, selection = self.select_eaes_views_by_meg(
+            phrases, fidelities, child_rankings, parent_rankings
+        )
+        all_indices = list(range(len(phrases)))
+        child_probe = self.fuse_eaes_channel_rankings(
+            child_rankings, all_indices, "memory_id", config.EAES_PHRASE_RRF_K
+        )
+        parent_probe = self.fuse_eaes_channel_rankings(
+            parent_rankings, all_indices, "parent_id", config.EAES_PHRASE_RRF_K
+        )
+        child_fused = self.fuse_eaes_channel_rankings(
+            child_rankings,
+            selected_indices,
+            "memory_id",
+            config.EAES_PHRASE_RRF_K,
+        )
+        parent_fused = self.fuse_eaes_channel_rankings(
+            parent_rankings,
+            selected_indices,
+            "parent_id",
+            config.EAES_PHRASE_RRF_K,
+        )
+        adaptive_children, child_scored = self.select_eaes_adaptive_prefix(
+            child_fused,
+            max_k=config.EAES_RERANK_LIMIT,
+            ratio_threshold=config.EAES_CHILD_ADAPTIVE_THRESHOLD,
+            min_k=1,
+        )
+        adaptive_parents, parent_scored = self.select_eaes_adaptive_prefix(
+            parent_fused,
+            max_k=config.PARENT_TOP_K,
+            ratio_threshold=config.EAES_PARENT_ADAPTIVE_THRESHOLD,
+            min_k=1,
+            relevance_floor=config.PARENT_RELEVANCE_FLOOR,
+        )
+        for rank, parent in enumerate(adaptive_parents, start=1):
+            parent["rank"] = rank
+            parent["score"] = float(parent.get("rrf_score") or 0.0)
+        return {
+            "child_probe_candidates": child_probe,
+            "parent_probe_candidates": parent_probe,
+            "selected_child_candidates": child_scored,
+            "selected_parent_candidates": parent_scored,
+            "adaptive_children": adaptive_children,
+            "adaptive_parents": adaptive_parents,
+            "child_rankings": child_rankings,
+            "parent_rankings": parent_rankings,
+            "phrase_retrieval": {
+                **selection,
+                "child": {
+                    "top_k": config.EAES_PHRASE_INITIAL_TOP_K,
+                    "phrases": self._eaes_compact_phrase_rankings(
+                        child_rankings, "memory_id"
+                    ),
+                },
+                "parent": {
+                    "top_k": config.EAES_PARENT_PHRASE_TOP_K,
+                    "phrases": self._eaes_compact_phrase_rankings(
+                        parent_rankings, "parent_id"
+                    ),
+                },
+            },
+        }
+
+    def diagnose_eaes_nodes_against_phrases(
+            self,
+            retrieval_phrases,
+            selected_phrase_indices,
+            question_emb=None,
+            question_text=None,
+            child_memory_ids=None,
+            parent_ids=None,
+    ):
+        """Score requested gold-linked nodes without changing retrieval state."""
+        phrases = [str(value).strip() for value in retrieval_phrases or []]
+        selected = set(selected_phrase_indices or [])
+        requested_children = set(child_memory_ids or [])
+        requested_parents = set(parent_ids or [])
+        self._prepare_eaes_tag_embeddings()
+        self.prepare_eaes_retrieval_embeddings()
+        if config.SEMANTIC_HIERARCHY:
+            self.prepare_eaes_parent_embeddings()
+        phrase_vectors = self._eaes_phrase_embeddings(phrases)
+        question_vector = self._eaes_question_vector(
+            question_emb, question_text
+        )
+        fidelities = [
+            self._eaes_clipped_cosine(vector, question_vector)
+            for vector in phrase_vectors
+        ]
+        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
+        rrf_k = float(config.EAES_PHRASE_RRF_K)
+
+        child_rows = {}
+        child_notes = sorted(
+            self.memory.eaes_notes.values(), key=lambda note: note.memory_id
+        )
+        for phrase_index, (phrase, phrase_vector) in enumerate(
+                zip(phrases, phrase_vectors)):
+            scored = []
+            for note in child_notes:
+                tags, tag_vectors = self._eaes_tag_embedding_cache[note.memory_id]
+                similarities = np.dot(tag_vectors, phrase_vector)
+                tag_index = int(np.argmax(similarities))
+                scored.append((
+                    float(similarities[tag_index]),
+                    note.memory_id,
+                    tags[tag_index],
+                ))
+            scored.sort(key=lambda row: (-row[0], row[1]))
+            for full_rank, (similarity, memory_id, matched_tag) in enumerate(
+                    scored, start=1):
+                if memory_id not in requested_children:
+                    continue
+                note = self.memory.eaes_notes[memory_id]
+                node_vector = self._normalize_embedding_rows(
+                    note.retrieval_embedding
+                )[0]
+                question_relevance = self._eaes_clipped_cosine(
+                    node_vector, question_vector
+                )
+                inside = full_rank <= int(config.EAES_PHRASE_INITIAL_TOP_K)
+                diagnostic_support = fidelities[phrase_index] * (
+                    beta * question_relevance
+                    + (1.0 - beta) * max(0.0, min(1.0, similarity))
+                ) / (rrf_k + full_rank)
+                actual_support = diagnostic_support if inside else 0.0
+                contribution = (
+                    1.0 / (rrf_k + full_rank)
+                    if inside and phrase_index in selected else 0.0
+                )
+                row = child_rows.setdefault(memory_id, {
+                    "question_relevance": question_relevance,
+                    "phrase_scores": [],
+                })
+                row["phrase_scores"].append({
+                    "phrase_index": phrase_index,
+                    "phrase": phrase,
+                    "phrase_fidelity": fidelities[phrase_index],
+                    "phrase_node_similarity": similarity,
+                    "matched_tag": matched_tag,
+                    "full_channel_rank": full_rank,
+                    "inside_top30": inside,
+                    "phrase_selected": phrase_index in selected,
+                    "support_potential": actual_support,
+                    "diagnostic_support_potential": diagnostic_support,
+                    "rrf_contribution": contribution,
+                })
+
+        parent_rows = {}
+        parents = sorted(
+            self.memory.eaes_parent_nodes.values(),
+            key=lambda parent: parent.parent_id,
+        )
+        for phrase_index, (phrase, phrase_vector) in enumerate(
+                zip(phrases, phrase_vectors)):
+            scored = []
+            for parent in parents:
+                if parent.retrieval_embedding is None:
+                    continue
+                vector = self._normalize_embedding_rows(
+                    parent.retrieval_embedding
+                )[0]
+                scored.append((
+                    float(np.dot(phrase_vector, vector)),
+                    parent.parent_id,
+                ))
+            scored.sort(key=lambda row: (-row[0], row[1]))
+            for full_rank, (similarity, parent_id) in enumerate(
+                    scored, start=1):
+                if parent_id not in requested_parents:
+                    continue
+                parent = self.memory.eaes_parent_nodes[parent_id]
+                node_vector = self._normalize_embedding_rows(
+                    parent.retrieval_embedding
+                )[0]
+                question_relevance = self._eaes_clipped_cosine(
+                    node_vector, question_vector
+                )
+                inside = full_rank <= int(config.EAES_PARENT_PHRASE_TOP_K)
+                diagnostic_support = fidelities[phrase_index] * (
+                    beta * question_relevance
+                    + (1.0 - beta) * max(0.0, min(1.0, similarity))
+                ) / (rrf_k + full_rank)
+                actual_support = diagnostic_support if inside else 0.0
+                contribution = (
+                    1.0 / (rrf_k + full_rank)
+                    if inside and phrase_index in selected else 0.0
+                )
+                row = parent_rows.setdefault(parent_id, {
+                    "question_relevance": question_relevance,
+                    "phrase_scores": [],
+                })
+                row["phrase_scores"].append({
+                    "phrase_index": phrase_index,
+                    "phrase": phrase,
+                    "phrase_fidelity": fidelities[phrase_index],
+                    "phrase_node_similarity": similarity,
+                    "full_channel_rank": full_rank,
+                    "inside_top10": inside,
+                    "phrase_selected": phrase_index in selected,
+                    "support_potential": actual_support,
+                    "diagnostic_support_potential": diagnostic_support,
+                    "rrf_contribution": contribution,
+                })
+        return {"child": child_rows, "parent": parent_rows}
+
     def _eaes_parent_keyword_embeddings(self, query_plan, question_emb=None):
         keywords = [
             str(value).strip()

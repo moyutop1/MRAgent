@@ -341,7 +341,7 @@ Schema:
   "keywords": ["important lexical constraints"],
   "retrieval_breadth": "single | several | wide",
   "detail_need": "coarse | mixed | exact",
-  "retrieval_phrases": ["short phrase 1", "short phrase 2", "short phrase 3", "short phrase 4"]
+  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5", "phrase 6"]
 }
 Rules:
 - Generate 1-3 query_attributes using only the question. Never use or assume an answer.
@@ -351,54 +351,54 @@ Rules:
 - Set retrieval_breadth to "several" for a person's participated events, traits, experiences, preferences, motivations, or a person-level inference requiring multiple facts.
 - Set retrieval_breadth to "wide" only when the same person's evidence spans a long time or multiple sessions, or the question asks about a broad theme or overall development. Never use wide merely because multiple people are mentioned.
 - Set detail_need to "coarse" for a high-level summary, "exact" for a specific answer-bearing detail, and "mixed" when both levels may be useful.
-- Generate exactly four non-empty retrieval_phrases. Each phrase must be a normal short retrieval expression containing no more than three whitespace-separated words.
+- Generate exactly six non-empty retrieval_phrases. Each phrase must be a normal retrieval expression containing no more than ten whitespace-separated words.
 - Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
-- Retrieval phrases are matched against complete child-memory tags describing people's actions, objects, attributes, states, and relationships. Express the kind of fact a relevant memory would state, using concrete relation wording supported by the question rather than merely summarizing its broad topic.
+- The same phrases retrieve two independent memory views: concise child-memory tags and parent-memory summaries. Write phrases that preserve the question's entity and relation while remaining useful for either representation.
 - Prioritize the specific action or relation asked about together with its known person/entity, event, or object. Preserve distinctions such as adoption versus ownership, joining versus attending, occurrence date versus duration, and celebration versus winning. Do not replace a concrete relation with a broader topic.
 - Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output questions, explanations, narrative sentences, or question words.
 - Each phrase must independently describe a useful retrieval target. Anchor it with a known person, distinctive entity, event, object, or specific relation when available. Separate query-plan fields do not automatically supply missing context to a phrase. Avoid disconnected name-only, date-only, or generic-topic fragments.
-- For one fact or relation, use the four phrases as alternative access wordings for that same evidence need. Prefer meaningful wording differences over changes only to possessives, prepositions, or word order; do not change the retrieval target merely to make the phrases different.
-- For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute the four phrases across the required entities or relations. Preserve the question's relation in each branch; do not drop one participant or condition by spending all four phrases on near-identical overall-topic wording.
-- Do not force every question into four evidence categories or invent additional evidence branches. Only decompose requirements explicitly supported by the question.
-- Across the four phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Within the three-word limit, prioritize the specific relation and its identifying entity/event/object; express other useful constraints in another meaningful phrase when possible. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
+- For one fact or relation, some phrases may be synonymous access wordings. Allow useful redundancy, but do not make all six differ only in possessives, prepositions, or word order.
+- For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute phrases across the stated entities or relations. Preserve the question's relation in each branch.
+- Do not infer question complexity or force the six phrases into six evidence categories. Only decompose requirements explicitly supported by the question.
+- Across the six phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
 - Avoid generic words such as "information", "detail", "mention", or "action" when the question supplies a more specific relation. Broad words such as "activity" remain valid when the question itself is broad.
 - If the question is underspecified, preserve that uncertainty. Do not guess a concrete activity, object, place, or answer to make the phrases more specific. Do not invent entities, facts, times, constraints, or answer values. Do not answer the question.
-- Before returning the JSON, silently check the phrase count and three-word limit, preservation of the specific retrieval target, coverage of explicitly required entities or evidence branches, meaningful wording differences, and absence of unsupported answers or assumptions.
+- Before returning the JSON, silently check the six-phrase count and ten-word limit, preservation of the specific retrieval target, useful access variation, and absence of unsupported answers or assumptions.
 Examples illustrate retrieval_phrases only; return the full query-plan schema above and never copy example facts into an unrelated question:
 - Question: "When did Maya adopt her cat Leo?"
-  retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "Leo adoption time"]
+  retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "when Maya adopted her cat Leo", "date Leo joined Maya's home", "Maya and Leo adoption time"]
 - Question: "What hobbies do Alice and Ben share?"
-  retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities"]
+  retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities", "activities Alice and Ben both enjoy", "shared hobbies of Alice and Ben"]
 - For an adoption-date question, "Leo adoption date" preserves the relation; "Maya pet information" loses it. For a question about celebrating a tournament win, "tournament victory celebration" preserves the relation; "tournament information" loses it.
 - "What new activity did Lena start?" does not justify guessing volunteering or a shelter. "What did Alex do for Riley?" does not justify guessing a gift unless the question mentions giving or receiving one."""
 
     EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT = """You repair an invalid list of retrieval phrases for long-term conversational memory. Only output valid JSON.
-Generate exactly four non-empty retrieval phrases for the supplied question.
+Generate exactly six non-empty retrieval phrases for the supplied question.
 The previous output had the wrong count or contained an invalid phrase.
 Read the supplied validation_error and repair that exact error once.
-Every phrase must be a normal short retrieval expression containing no more than three whitespace-separated words.
+Every phrase must be a normal retrieval expression containing no more than ten whitespace-separated words.
 Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
-Retrieval phrases are matched against complete child-memory tags describing people's actions, objects, attributes, states, and relationships. Express the kind of fact a relevant memory would state, using concrete relation wording supported by the question rather than merely summarizing its broad topic.
+The same phrases retrieve concise child-memory tags and parent-memory summaries. Preserve the question's known entity and relation in wording useful for either representation.
 Prioritize the specific action or relation asked about together with its known person/entity, event, or object. Preserve distinctions such as adoption versus ownership, joining versus attending, occurrence date versus duration, and celebration versus winning. Do not replace a concrete relation with a broader topic.
 Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output questions, explanations, narrative sentences, or question words.
 Each phrase must independently describe a useful retrieval target. Anchor it with a known person, distinctive entity, event, object, or specific relation when available. Separate query-plan fields do not automatically supply missing context to a phrase. Avoid disconnected name-only, date-only, or generic-topic fragments.
-For one fact or relation, use the four phrases as alternative access wordings for that same evidence need. Prefer meaningful wording differences over changes only to possessives, prepositions, or word order; do not change the retrieval target merely to make the phrases different.
-For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute the four phrases across the required entities or relations. Preserve the question's relation in each branch; do not drop one participant or condition by spending all four phrases on near-identical overall-topic wording.
-Do not force every question into four evidence categories or invent additional evidence branches. Only decompose requirements explicitly supported by the question.
-Across the four phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Within the three-word limit, prioritize the specific relation and its identifying entity/event/object; express other useful constraints in another meaningful phrase when possible. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
+For one fact or relation, some phrases may be synonymous access wordings. Allow useful redundancy, but do not make all six differ only in possessives, prepositions, or word order.
+For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute phrases across the stated entities or relations while preserving the requested relation.
+Do not infer question complexity or force the six phrases into six evidence categories. Only decompose requirements explicitly supported by the question.
+Across the six phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
 Avoid generic words such as "information", "detail", "mention", or "action" when the question supplies a more specific relation. Broad words such as "activity" remain valid when the question itself is broad.
 If the question is underspecified, preserve that uncertainty. Do not guess a concrete activity, object, place, or answer to make the phrases more specific. Do not invent entities, facts, times, constraints, or answer values. Do not answer the question.
-Before returning the JSON, silently check the phrase count and three-word limit, preservation of the specific retrieval target, coverage of explicitly required entities or evidence branches, meaningful wording differences, and absence of unsupported answers or assumptions.
+Before returning the JSON, silently check the six-phrase count and ten-word limit, preservation of the specific retrieval target, useful access variation, and absence of unsupported answers or assumptions.
 Examples illustrate retrieval_phrases only; return the repair schema below and never copy example facts into an unrelated question:
 - Question: "When did Maya adopt her cat Leo?"
-  retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "Leo adoption time"]
+  retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "when Maya adopted her cat Leo", "date Leo joined Maya's home", "Maya and Leo adoption time"]
 - Question: "What hobbies do Alice and Ben share?"
-  retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities"]
+  retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities", "activities Alice and Ben both enjoy", "shared hobbies of Alice and Ben"]
 - For an adoption-date question, "Leo adoption date" preserves the relation; "Maya pet information" loses it. For a question about celebrating a tournament win, "tournament victory celebration" preserves the relation; "tournament information" loses it.
 - "What new activity did Lena start?" does not justify guessing volunteering or a shelter. "What did Alex do for Riley?" does not justify guessing a gift unless the question mentions giving or receiving one.
 Schema:
 {
-  "retrieval_phrases": ["short phrase 1", "short phrase 2", "short phrase 3", "short phrase 4"]
+  "retrieval_phrases": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5", "phrase 6"]
 }"""
 
     EAES_SEMANTIC_QUERY_EXTENSION = """
@@ -467,7 +467,7 @@ Rank candidates solely by how useful their stored content is for answering the q
 The retrieval phrases and retrieval scores are intentionally hidden and must not be inferred as required evidence categories.
 Do not enforce diversity or phrase coverage. Select complementary memories only when the original question itself requires multiple facts.
 Do not answer the question and do not invent memory IDs.
-Return memory IDs in descending relevance order, with at most the requested limit.
+Return every supplied memory ID exactly once in descending relevance order. The requested limit equals the number of supplied candidates; do not filter or omit candidates.
 Schema:
 {
   "ranked_memory_ids": ["M_D1_2_1"]

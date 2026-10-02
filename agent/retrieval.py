@@ -16,6 +16,8 @@ def compact_eaes_retrieval(retrieval):
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
         "rewrite_content", "max_phrase_similarity", "rrf_score",
+        "rrf_score_ratio", "rrf_rank", "question_relevance",
+        "inside_adaptive_prefix", "adaptive_k",
         "base_score", "candidate_score", "score", "score_parts",
         "candidate_sources", "prefilter_rank", "rerank_rank",
         "rerank_source", "matched_tag", "phrase_matches",
@@ -23,6 +25,8 @@ def compact_eaes_retrieval(retrieval):
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",
+        "rrf_score", "rrf_score_ratio", "rrf_rank",
+        "question_relevance", "inside_adaptive_prefix", "adaptive_k",
         "parent_probability", "child_support", "posterior_score",
         "selected", "rank", "score", "matched_query_phase",
     )
@@ -46,11 +50,7 @@ def compact_eaes_retrieval(retrieval):
         "mode": "eaes",
         "query_plan": query_plan,
         "routing": routing,
-        "phrase_retrieval": {
-            "phrases": (retrieval.get("phrase_retrieval") or {}).get(
-                "phrases", []
-            ),
-        },
+        "phrase_retrieval": retrieval.get("phrase_retrieval") or {},
         "parent_candidates": [
             {key: item.get(key) for key in parent_fields if key in item}
             for item in retrieval.get("parent_candidate_scores") or []
@@ -58,6 +58,22 @@ def compact_eaes_retrieval(retrieval):
         "child_candidates": [
             {key: item.get(key) for key in child_fields if key in item}
             for item in retrieval.get("initial_candidates") or []
+        ],
+        "child_probe_candidates": [
+            {key: item.get(key) for key in child_fields if key in item}
+            for item in retrieval.get("child_probe_candidates") or []
+        ],
+        "selected_view_child_candidates": [
+            {key: item.get(key) for key in child_fields if key in item}
+            for item in retrieval.get("prefilter_candidates") or []
+        ],
+        "parent_probe_candidates": [
+            {key: item.get(key) for key in parent_fields if key in item}
+            for item in retrieval.get("parent_probe_candidates") or []
+        ],
+        "selected_view_parent_candidates": [
+            {key: item.get(key) for key in parent_fields if key in item}
+            for item in retrieval.get("selected_parent_pool") or []
         ],
         "final_child_candidates": [
             {key: item.get(key) for key in child_fields if key in item}
@@ -129,9 +145,270 @@ class RetrievalMixin:
                 event_ids.append(event_id)
         return self._unique_keep_order(event_ids)
 
+    def _diagnose_eaes_adaptive_gold_memories(
+            self, gold_evidence, retrieval, question_emb=None
+    ):
+        phrases = self._as_list(
+            (retrieval.get("query_plan") or {}).get("retrieval_phrases")
+        )
+        phrase_retrieval = retrieval.get("phrase_retrieval") or {}
+        selected_phrase_indices = self._as_list(
+            phrase_retrieval.get("selected_phrase_indices")
+        )
+        gold_origins = self._normalize_evidence_ids(gold_evidence)
+
+        origin_event_ids = {
+            origin: self._episode_ids_for_origin(origin)
+            for origin in gold_origins
+        }
+        origin_memory_ids = {}
+        requested_memory_ids = []
+        for origin, event_ids in origin_event_ids.items():
+            memory_ids = self._unique_keep_order([
+                self.memory.eaes_event_to_memory.get(event_id)
+                for event_id in event_ids
+                if self.memory.eaes_event_to_memory.get(event_id)
+            ])
+            origin_memory_ids[origin] = memory_ids
+            requested_memory_ids.extend(memory_ids)
+
+        origin_parent_ids = {origin: [] for origin in gold_origins}
+        requested_parent_ids = []
+        for parent in self.memory.eaes_parent_nodes.values():
+            linked_origins = set()
+            for child_id in parent.child_ids:
+                child = self.memory.eaes_notes.get(child_id)
+                if child is not None:
+                    linked_origins.update(
+                        self._normalize_evidence_ids([child.origin])
+                    )
+            for origin in gold_origins:
+                if origin in linked_origins:
+                    origin_parent_ids[origin].append(parent.parent_id)
+                    requested_parent_ids.append(parent.parent_id)
+
+        node_scores = self.memory_controller.diagnose_eaes_nodes_against_phrases(
+            phrases,
+            selected_phrase_indices,
+            question_emb=question_emb,
+            child_memory_ids=self._unique_keep_order(requested_memory_ids),
+            parent_ids=self._unique_keep_order(requested_parent_ids),
+        )
+
+        def by_id(items, field):
+            return {
+                item.get(field): item for item in self._as_list(items)
+                if isinstance(item, dict) and item.get(field)
+            }
+
+        child_probe = by_id(
+            retrieval.get("child_probe_candidates"), "memory_id"
+        )
+        child_selected = by_id(
+            retrieval.get("prefilter_candidates"), "memory_id"
+        )
+        child_adaptive = by_id(
+            retrieval.get("initial_candidates"), "memory_id"
+        )
+        child_final = by_id(retrieval.get("candidates"), "memory_id")
+        parent_probe = by_id(
+            retrieval.get("parent_probe_candidates"), "parent_id"
+        )
+        parent_selected = by_id(
+            retrieval.get("selected_parent_pool"), "parent_id"
+        )
+        parent_final = by_id(
+            retrieval.get("parent_candidates"), "parent_id"
+        )
+
+        def best_phrase_index(scores):
+            if not scores:
+                return None
+            return max(
+                scores,
+                key=lambda row: (
+                    float(row.get("diagnostic_support_potential") or 0.0),
+                    -int(row.get("phrase_index") or 0),
+                ),
+            ).get("phrase_index")
+
+        diagnostics = {
+            "candidate_phrase_count": len(phrases),
+            "selected_phrase_indices": selected_phrase_indices,
+            "child_phrase_top_k": getattr(
+                config, "EAES_PHRASE_INITIAL_TOP_K", 30
+            ),
+            "parent_phrase_top_k": getattr(
+                config, "EAES_PARENT_PHRASE_TOP_K", 10
+            ),
+            "question_relevance_weight": getattr(
+                config, "EAES_QUESTION_RELEVANCE_WEIGHT", 0.7
+            ),
+            "gold_origins": [],
+        }
+        for origin in gold_origins:
+            child_nodes = []
+            for memory_id in origin_memory_ids.get(origin, []):
+                note = self.memory.get_eaes_note(memory_id)
+                phrase_info = (node_scores.get("child") or {}).get(
+                    memory_id, {}
+                )
+                phrase_scores = phrase_info.get("phrase_scores") or []
+                fused = child_selected.get(memory_id) or {}
+                adaptive = child_adaptive.get(memory_id) or {}
+                final = child_final.get(memory_id) or {}
+                any_top30 = any(
+                    row.get("inside_top30") for row in phrase_scores
+                )
+                selected_top30 = any(
+                    row.get("inside_top30") and row.get("phrase_selected")
+                    for row in phrase_scores
+                )
+                if note is None:
+                    drop_reason = "no_child_memory_built"
+                elif memory_id in child_final:
+                    drop_reason = "inside_final_child"
+                elif not any_top30:
+                    drop_reason = "outside_all_child_top30"
+                elif not selected_top30:
+                    drop_reason = "retrieved_only_by_unselected_phrase"
+                elif memory_id not in child_adaptive:
+                    drop_reason = "outside_child_adaptive_prefix"
+                else:
+                    drop_reason = "missing_after_child_rerank"
+                child_nodes.append({
+                    "memory_id": memory_id,
+                    "event_id": note.event_id if note is not None else None,
+                    "parent_id": note.parent_id if note is not None else None,
+                    "rewrite_content": (
+                        note.rewrite_content if note is not None else None
+                    ),
+                    "question_relevance": phrase_info.get(
+                        "question_relevance"
+                    ),
+                    "best_phrase_index": best_phrase_index(phrase_scores),
+                    "phrase_scores": phrase_scores,
+                    "inside_all_view_probe": memory_id in child_probe,
+                    "inside_selected_view_union": memory_id in child_selected,
+                    "rrf_score": fused.get("rrf_score", 0.0),
+                    "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
+                    "rrf_rank": fused.get("rrf_rank"),
+                    "adaptive_child_k": adaptive.get(
+                        "adaptive_k",
+                        (retrieval.get("counts") or {}).get(
+                            "adaptive_child_k"
+                        ),
+                    ),
+                    "inside_adaptive_prefix": memory_id in child_adaptive,
+                    "pre_rerank_rank": adaptive.get("rrf_rank"),
+                    "rerank_rank": final.get("rerank_rank"),
+                    "inside_final_child": memory_id in child_final,
+                    "drop_reason": drop_reason,
+                })
+
+            parent_nodes = []
+            for parent_id in origin_parent_ids.get(origin, []):
+                parent = self.memory.get_eaes_parent_node(parent_id)
+                phrase_info = (node_scores.get("parent") or {}).get(
+                    parent_id, {}
+                )
+                phrase_scores = phrase_info.get("phrase_scores") or []
+                fused = parent_selected.get(parent_id) or {}
+                final = parent_final.get(parent_id) or {}
+                any_top10 = any(
+                    row.get("inside_top10") for row in phrase_scores
+                )
+                selected_top10 = any(
+                    row.get("inside_top10") and row.get("phrase_selected")
+                    for row in phrase_scores
+                )
+                if parent is None:
+                    drop_reason = "no_parent_memory_built"
+                elif parent_id in parent_final:
+                    drop_reason = "inside_final_parent"
+                elif not any_top10:
+                    drop_reason = "outside_all_parent_top10"
+                elif not selected_top10:
+                    drop_reason = "retrieved_only_by_unselected_phrase"
+                else:
+                    drop_reason = "outside_parent_adaptive_prefix"
+                parent_nodes.append({
+                    "parent_id": parent_id,
+                    "rewrite_content": (
+                        parent.rewrite_content if parent is not None else None
+                    ),
+                    "origin_association": "child_membership_proxy",
+                    "question_relevance": phrase_info.get(
+                        "question_relevance"
+                    ),
+                    "best_phrase_index": best_phrase_index(phrase_scores),
+                    "phrase_scores": phrase_scores,
+                    "inside_all_view_probe": parent_id in parent_probe,
+                    "inside_selected_view_union": parent_id in parent_selected,
+                    "rrf_score": fused.get("rrf_score", 0.0),
+                    "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
+                    "rrf_rank": fused.get("rrf_rank"),
+                    "adaptive_parent_k": final.get(
+                        "adaptive_k",
+                        (retrieval.get("counts") or {}).get(
+                            "adaptive_parent_k"
+                        ),
+                    ),
+                    "inside_adaptive_prefix": parent_id in parent_final,
+                    "inside_final_parent": parent_id in parent_final,
+                    "drop_reason": drop_reason,
+                })
+
+            covered_by_child = any(
+                node["inside_final_child"] for node in child_nodes
+            )
+            covered_by_parent = any(
+                node["inside_final_parent"] for node in parent_nodes
+            )
+            if covered_by_child and covered_by_parent:
+                final_path = "child_and_parent"
+            elif covered_by_child:
+                final_path = "child"
+            elif covered_by_parent:
+                final_path = "parent"
+            else:
+                final_path = None
+            if final_path:
+                origin_drop_reason = None
+            elif not origin_event_ids.get(origin):
+                origin_drop_reason = "gold_origin_not_in_memory"
+            elif not child_nodes and not parent_nodes:
+                origin_drop_reason = "no_memory_node_built_for_origin"
+            else:
+                reasons = [
+                    node.get("drop_reason")
+                    for node in child_nodes + parent_nodes
+                    if node.get("drop_reason")
+                ]
+                origin_drop_reason = reasons[0] if reasons else "not_retrieved"
+            diagnostics["gold_origins"].append({
+                "origin": origin,
+                "event_ids": origin_event_ids.get(origin, []),
+                "memory_ids": origin_memory_ids.get(origin, []),
+                "linked_parent_ids": origin_parent_ids.get(origin, []),
+                "covered_by_retrieval": bool(final_path),
+                "covered_by_final": bool(final_path),
+                "covered_by_child": covered_by_child,
+                "covered_by_parent": covered_by_parent,
+                "final_path": final_path,
+                "drop_reason": origin_drop_reason,
+                "child_nodes": child_nodes,
+                "parent_nodes": parent_nodes,
+            })
+        return diagnostics
+
     def diagnose_eaes_gold_memories(self, gold_evidence, retrieval, question_emb=None, window=2):
         if not isinstance(retrieval, dict) or retrieval.get("mode") != "eaes":
             return None
+        if "child_rankings" in retrieval:
+            return self._diagnose_eaes_adaptive_gold_memories(
+                gold_evidence, retrieval, question_emb
+            )
         phrase_retrieval = retrieval.get("phrase_retrieval") or {}
         prefilter_candidates = self._as_list(retrieval.get("prefilter_candidates"))
         initial_candidates = self._as_list(retrieval.get("initial_candidates"))
@@ -327,6 +604,15 @@ class RetrievalMixin:
             initial_candidates = first_pass["initial_children"]
             candidates = first_pass["final_children"]
             parent_candidates = first_pass["selected_parents"]
+            child_probe_candidates = first_pass.get(
+                "child_probe_candidates", prefilter_candidates
+            )
+            parent_probe_candidates = first_pass.get(
+                "parent_probe_candidates", parent_candidates
+            )
+            selected_parent_pool = first_pass.get(
+                "selected_parent_pool", parent_candidates
+            )
             rollback_metadata = {"enabled": False}
             if getattr(config, "EAES_ROLLBACK_CHECK", False):
                 first_parent_candidates = list(parent_candidates)
@@ -362,6 +648,15 @@ class RetrievalMixin:
                     origin for group in groups for origin in group if origin
                 ])
 
+            def parent_origin_groups_for(items):
+                return [
+                    self.memory.get_eaes_support_origin([
+                        parent.get("parent_id")
+                    ])
+                    for parent in items or []
+                    if parent.get("parent_id")
+                ]
+
             event_ids = self._unique_keep_order([
                 candidate.get("event_id") for candidate in candidates
             ])
@@ -370,10 +665,7 @@ class RetrievalMixin:
             parent_ids = self._unique_keep_order([
                 parent.get("parent_id") for parent in parent_candidates
             ])
-            parent_origin_groups = [
-                self.memory.get_eaes_support_origin([parent_id])
-                for parent_id in parent_ids
-            ]
+            parent_origin_groups = parent_origin_groups_for(parent_candidates)
             parent_origins = self._unique_keep_order([
                 origin
                 for group in parent_origin_groups
@@ -382,9 +674,22 @@ class RetrievalMixin:
             final_groups = child_groups + parent_origin_groups
             final_origins = origins_from_groups(final_groups)
 
+            child_probe_groups = child_origin_groups(child_probe_candidates)
+            parent_probe_groups = parent_origin_groups_for(
+                parent_probe_candidates
+            )
             prefilter_groups = child_origin_groups(prefilter_candidates)
+            selected_parent_groups = parent_origin_groups_for(
+                selected_parent_pool
+            )
             initial_groups = child_origin_groups(initial_candidates)
             stage_origin_groups = {
+                "child_probe_all_views": child_probe_groups,
+                "parent_probe_all_views": parent_probe_groups,
+                "child_selected_views": prefilter_groups,
+                "parent_selected_views": selected_parent_groups,
+                "child_pre_rerank": initial_groups,
+                "parent_final": parent_origin_groups,
                 "prefilter_child": prefilter_groups,
                 "initial_child": initial_groups,
                 "final_child": child_groups,
@@ -406,12 +711,17 @@ class RetrievalMixin:
                 "routing": first_pass["routing"],
                 "counts": first_pass["counts"],
                 "phrase_retrieval": first_pass["phrase_retrieval"],
+                "child_rankings": first_pass.get("child_rankings", []),
+                "parent_rankings": first_pass.get("parent_rankings", []),
                 "initial_retrieval": first_pass["initial_retrieval"],
                 "parent_candidate_scores": first_pass["routing"].get(
                     "parent_candidates", []
                 ),
                 "prefilter_candidates": prefilter_candidates,
                 "initial_candidates": initial_candidates,
+                "child_probe_candidates": child_probe_candidates,
+                "parent_probe_candidates": parent_probe_candidates,
+                "selected_parent_pool": selected_parent_pool,
                 "candidates": candidates,
                 "parent_candidates": parent_candidates,
                 "final_child_ids": [

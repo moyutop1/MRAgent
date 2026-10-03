@@ -17,6 +17,11 @@ def compact_eaes_retrieval(retrieval):
         "memory_id", "event_id", "parent_id", "origin", "tag",
         "rewrite_content", "max_phrase_similarity", "rrf_score",
         "rrf_score_ratio", "rrf_rank", "question_relevance",
+        "local_relevance_score", "weighted_rrf_sum",
+        "best_view_contribution", "normalized_consensus",
+        "normalized_best_view", "fused_score", "fused_score_ratio",
+        "fused_rank", "normalized_mass", "cumulative_mass",
+        "mass_target", "inside_fused_safety_cap",
         "inside_adaptive_prefix", "adaptive_k",
         "base_score", "candidate_score", "score", "score_parts",
         "candidate_sources", "prefilter_rank", "rerank_rank",
@@ -27,6 +32,11 @@ def compact_eaes_retrieval(retrieval):
         "parent_id", "rewrite_content", "raw_similarity",
         "rrf_score", "rrf_score_ratio", "rrf_rank",
         "question_relevance", "inside_adaptive_prefix", "adaptive_k",
+        "local_relevance_score", "weighted_rrf_sum",
+        "best_view_contribution", "normalized_consensus",
+        "normalized_best_view", "fused_score", "fused_score_ratio",
+        "fused_rank", "normalized_mass", "cumulative_mass",
+        "mass_target", "inside_fused_safety_cap",
         "parent_probability", "child_support", "posterior_score",
         "selected", "rank", "score", "matched_query_phase",
     )
@@ -244,6 +254,15 @@ class RetrievalMixin:
             "question_relevance_weight": getattr(
                 config, "EAES_QUESTION_RELEVANCE_WEIGHT", 0.7
             ),
+            "fusion_consensus_weight": getattr(
+                config, "EAES_FUSION_CONSENSUS_WEIGHT", 0.5
+            ),
+            "child_mass_target": getattr(
+                config, "EAES_CHILD_MASS_TARGET", 0.85
+            ),
+            "parent_mass_target": getattr(
+                config, "EAES_PARENT_MASS_TARGET", 0.85
+            ),
             "gold_origins": [],
         }
         for origin in gold_origins:
@@ -269,11 +288,15 @@ class RetrievalMixin:
                 elif memory_id in child_final:
                     drop_reason = "inside_final_child"
                 elif not any_top30:
-                    drop_reason = "outside_all_child_top30"
+                    drop_reason = "outside_local_relevance_top30"
                 elif not selected_top30:
                     drop_reason = "retrieved_only_by_unselected_phrase"
                 elif memory_id not in child_adaptive:
-                    drop_reason = "outside_child_adaptive_prefix"
+                    drop_reason = (
+                        "outside_child_fused_safety_cap"
+                        if not fused.get("inside_fused_safety_cap")
+                        else "outside_child_cumulative_mass_prefix"
+                    )
                 else:
                     drop_reason = "missing_after_child_rerank"
                 child_nodes.append({
@@ -293,14 +316,37 @@ class RetrievalMixin:
                     "rrf_score": fused.get("rrf_score", 0.0),
                     "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
                     "rrf_rank": fused.get("rrf_rank"),
-                    "adaptive_child_k": adaptive.get(
+                    "weighted_rrf_sum": fused.get(
+                        "weighted_rrf_sum", 0.0
+                    ),
+                    "best_view_contribution": fused.get(
+                        "best_view_contribution", 0.0
+                    ),
+                    "normalized_consensus": fused.get(
+                        "normalized_consensus", 0.0
+                    ),
+                    "normalized_best_view": fused.get(
+                        "normalized_best_view", 0.0
+                    ),
+                    "fused_score": fused.get("fused_score", 0.0),
+                    "fused_score_ratio": fused.get(
+                        "fused_score_ratio", 0.0
+                    ),
+                    "fused_rank": fused.get("fused_rank"),
+                    "normalized_mass": fused.get("normalized_mass", 0.0),
+                    "cumulative_mass": fused.get("cumulative_mass"),
+                    "mass_target": fused.get("mass_target"),
+                    "inside_fused_safety_cap": fused.get(
+                        "inside_fused_safety_cap", False
+                    ),
+                    "adaptive_child_k": fused.get(
                         "adaptive_k",
                         (retrieval.get("counts") or {}).get(
                             "adaptive_child_k"
                         ),
                     ),
                     "inside_adaptive_prefix": memory_id in child_adaptive,
-                    "pre_rerank_rank": adaptive.get("rrf_rank"),
+                    "pre_rerank_rank": fused.get("fused_rank"),
                     "rerank_rank": final.get("rerank_rank"),
                     "inside_final_child": memory_id in child_final,
                     "drop_reason": drop_reason,
@@ -327,11 +373,15 @@ class RetrievalMixin:
                 elif parent_id in parent_final:
                     drop_reason = "inside_final_parent"
                 elif not any_top10:
-                    drop_reason = "outside_all_parent_top10"
+                    drop_reason = "outside_local_relevance_parent_top10"
                 elif not selected_top10:
                     drop_reason = "retrieved_only_by_unselected_phrase"
                 else:
-                    drop_reason = "outside_parent_adaptive_prefix"
+                    drop_reason = (
+                        "outside_parent_fused_safety_cap"
+                        if not fused.get("inside_fused_safety_cap")
+                        else "outside_parent_cumulative_mass_prefix"
+                    )
                 parent_nodes.append({
                     "parent_id": parent_id,
                     "rewrite_content": (
@@ -348,7 +398,30 @@ class RetrievalMixin:
                     "rrf_score": fused.get("rrf_score", 0.0),
                     "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
                     "rrf_rank": fused.get("rrf_rank"),
-                    "adaptive_parent_k": final.get(
+                    "weighted_rrf_sum": fused.get(
+                        "weighted_rrf_sum", 0.0
+                    ),
+                    "best_view_contribution": fused.get(
+                        "best_view_contribution", 0.0
+                    ),
+                    "normalized_consensus": fused.get(
+                        "normalized_consensus", 0.0
+                    ),
+                    "normalized_best_view": fused.get(
+                        "normalized_best_view", 0.0
+                    ),
+                    "fused_score": fused.get("fused_score", 0.0),
+                    "fused_score_ratio": fused.get(
+                        "fused_score_ratio", 0.0
+                    ),
+                    "fused_rank": fused.get("fused_rank"),
+                    "normalized_mass": fused.get("normalized_mass", 0.0),
+                    "cumulative_mass": fused.get("cumulative_mass"),
+                    "mass_target": fused.get("mass_target"),
+                    "inside_fused_safety_cap": fused.get(
+                        "inside_fused_safety_cap", False
+                    ),
+                    "adaptive_parent_k": fused.get(
                         "adaptive_k",
                         (retrieval.get("counts") or {}).get(
                             "adaptive_parent_k"

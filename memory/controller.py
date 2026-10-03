@@ -194,6 +194,7 @@ class MemoryController:
             retrieval_phrases,
             top_k=None,
             exclude_memory_ids=None,
+            question_relevance_by_id=None,
     ):
         phrases = [str(value).strip() for value in retrieval_phrases or []]
         top_k = top_k or config.EAES_PHRASE_INITIAL_TOP_K
@@ -211,6 +212,8 @@ class MemoryController:
         if not notes:
             return [[] for _ in phrases]
 
+        relevance_by_id = question_relevance_by_id or {}
+        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
         phrase_rankings = []
         for phrase_index, (phrase, phrase_vector) in enumerate(
                 zip(phrases, phrase_vectors)):
@@ -219,19 +222,32 @@ class MemoryController:
                 tags, tag_vectors = self._eaes_tag_embedding_cache[note.memory_id]
                 similarities = np.dot(tag_vectors, phrase_vector)
                 best_tag_index = int(np.argmax(similarities))
+                phrase_similarity = max(
+                    0.0,
+                    min(1.0, float(similarities[best_tag_index])),
+                )
+                question_relevance = float(
+                    relevance_by_id.get(note.memory_id, 0.0)
+                )
+                local_relevance = (
+                    beta * question_relevance
+                    + (1.0 - beta) * phrase_similarity
+                )
                 scored.append((
                     note,
-                    float(similarities[best_tag_index]),
+                    local_relevance,
+                    phrase_similarity,
+                    question_relevance,
                     tags[best_tag_index],
                     best_tag_index,
                 ))
             scored = sorted(
-                scored,
-                key=lambda item: (-item[1], item[0].memory_id),
+                scored, key=lambda item: (-item[1], item[0].memory_id)
             )[:top_k]
             ranking = []
             for phrase_rank, (
-                    note, similarity, matched_tag, matched_tag_index
+                    note, local_relevance, similarity, question_relevance,
+                    matched_tag, matched_tag_index
             ) in enumerate(scored, start=1):
                 ranking.append({
                     **note.to_dict(include_raw=False),
@@ -240,6 +256,8 @@ class MemoryController:
                     "phrase": phrase,
                     "phrase_rank": phrase_rank,
                     "phrase_similarity": similarity,
+                    "question_relevance": question_relevance,
+                    "local_relevance_score": local_relevance,
                     "matched_tag": matched_tag,
                     "matched_tag_index": matched_tag_index,
                 })
@@ -484,6 +502,7 @@ class MemoryController:
             retrieval_phrases,
             top_k=None,
             exclude_parent_ids=None,
+            question_relevance_by_id=None,
     ):
         """Probe parent summaries independently with the shared phrase pool."""
         phrases = [str(value).strip() for value in retrieval_phrases or []]
@@ -502,6 +521,8 @@ class MemoryController:
             ),
             key=lambda parent: parent.parent_id,
         )
+        relevance_by_id = question_relevance_by_id or {}
+        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
         rankings = []
         for phrase_index, (phrase, phrase_vector) in enumerate(
                 zip(phrases, phrase_vectors)):
@@ -510,9 +531,21 @@ class MemoryController:
                 parent_vector = self._normalize_embedding_rows(
                     parent.retrieval_embedding
                 )[0]
+                phrase_similarity = self._eaes_clipped_cosine(
+                    phrase_vector, parent_vector
+                )
+                question_relevance = float(
+                    relevance_by_id.get(parent.parent_id, 0.0)
+                )
+                local_relevance = (
+                    beta * question_relevance
+                    + (1.0 - beta) * phrase_similarity
+                )
                 scored.append((
                     parent,
-                    float(np.dot(phrase_vector, parent_vector)),
+                    local_relevance,
+                    phrase_similarity,
+                    question_relevance,
                 ))
             scored.sort(key=lambda row: (-row[1], row[0].parent_id))
             rankings.append([
@@ -522,8 +555,12 @@ class MemoryController:
                     "phrase": phrase,
                     "phrase_rank": rank,
                     "phrase_similarity": similarity,
+                    "question_relevance": question_relevance,
+                    "local_relevance_score": local_relevance,
                 }
-                for rank, (parent, similarity) in enumerate(
+                for rank, (
+                    parent, local_relevance, similarity, question_relevance
+                ) in enumerate(
                     scored[:top_k], start=1
                 )
             ])
@@ -545,29 +582,16 @@ class MemoryController:
             return 0.0
         return max(0.0, min(1.0, float(np.dot(left, right))))
 
-    def _score_eaes_view_rankings(
-            self,
-            child_rankings,
-            parent_rankings,
-            retrieval_phrases,
-            question_emb=None,
-            question_text=None,
+    def _eaes_question_relevance_maps(
+            self, question_emb=None, question_text=None
     ):
-        """Attach fidelity, question relevance, and MEG support potential."""
+        """Score every node against the original question before Top-K."""
         self.prepare_eaes_retrieval_embeddings()
         if config.SEMANTIC_HIERARCHY:
             self.prepare_eaes_parent_embeddings()
-        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
         question_vector = self._eaes_question_vector(
             question_emb, question_text
         )
-        fidelities = [
-            self._eaes_clipped_cosine(vector, question_vector)
-            for vector in phrase_vectors
-        ]
-        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
-        rrf_k = float(config.EAES_PHRASE_RRF_K)
-
         child_relevance = {}
         for note in self.memory.eaes_notes.values():
             vector = (
@@ -586,28 +610,43 @@ class MemoryController:
             parent_relevance[parent.parent_id] = self._eaes_clipped_cosine(
                 vector, question_vector
             )
+        return question_vector, child_relevance, parent_relevance
 
-        def attach(rankings, id_field, relevance_by_id):
+    def _score_eaes_view_rankings(
+            self,
+            child_rankings,
+            parent_rankings,
+            retrieval_phrases,
+            question_emb=None,
+            question_text=None,
+    ):
+        """Attach fidelity, question relevance, and MEG support potential."""
+        phrase_vectors = self._eaes_phrase_embeddings(retrieval_phrases)
+        question_vector = self._eaes_question_vector(
+            question_emb, question_text
+        )
+        fidelities = [
+            self._eaes_clipped_cosine(vector, question_vector)
+            for vector in phrase_vectors
+        ]
+        rrf_k = float(config.EAES_PHRASE_RRF_K)
+
+        def attach(rankings):
             for phrase_index, ranking in enumerate(rankings):
                 fidelity = fidelities[phrase_index]
                 for item in ranking:
-                    node_id = item.get(id_field)
                     rank = int(item.get("phrase_rank") or 0)
-                    question_relevance = relevance_by_id.get(node_id, 0.0)
-                    phrase_similarity = max(
-                        0.0,
-                        min(1.0, float(item.get("phrase_similarity") or 0.0)),
+                    local_relevance = float(
+                        item.get("local_relevance_score") or 0.0
                     )
-                    support = fidelity * (
-                        beta * question_relevance
-                        + (1.0 - beta) * phrase_similarity
-                    ) / (rrf_k + rank)
+                    support = (
+                        fidelity * local_relevance / (rrf_k + rank)
+                    )
                     item["phrase_fidelity"] = fidelity
-                    item["question_relevance"] = question_relevance
                     item["support_potential"] = support
 
-        attach(child_rankings, "memory_id", child_relevance)
-        attach(parent_rankings, "parent_id", parent_relevance)
+        attach(child_rankings)
+        attach(parent_rankings)
         return fidelities
 
     @staticmethod
@@ -807,9 +846,15 @@ class MemoryController:
             selected_phrase_indices,
             id_field,
             rrf_k=10.0,
+            consensus_weight=None,
     ):
-        """Fuse selected phrase lists inside one channel without cross-level mixing."""
+        """Fuse one channel with consensus and best-single-view evidence."""
         selected_set = set(selected_phrase_indices)
+        beta = float(config.EAES_QUESTION_RELEVANCE_WEIGHT)
+        consensus_weight = (
+            float(config.EAES_FUSION_CONSENSUS_WEIGHT)
+            if consensus_weight is None else float(consensus_weight)
+        )
         fused = {}
         for phrase_index, ranking in enumerate(phrase_rankings):
             if phrase_index not in selected_set:
@@ -830,8 +875,31 @@ class MemoryController:
                     }
                     fused[node_id]["phrase_matches"] = []
                     fused[node_id]["rrf_score"] = 0.0
-                contribution = 1.0 / (float(rrf_k) + rank)
+                    fused[node_id]["weighted_rrf_sum"] = 0.0
+                    fused[node_id]["best_view_contribution"] = 0.0
+                phrase_similarity = max(
+                    0.0,
+                    min(1.0, float(item.get("phrase_similarity") or 0.0)),
+                )
+                question_relevance = max(
+                    0.0,
+                    min(1.0, float(item.get("question_relevance") or 0.0)),
+                )
+                local_relevance = float(
+                    item.get("local_relevance_score")
+                    if item.get("local_relevance_score") is not None
+                    else (
+                        beta * question_relevance
+                        + (1.0 - beta) * phrase_similarity
+                    )
+                )
+                rank_contribution = 1.0 / (float(rrf_k) + rank)
+                contribution = local_relevance * rank_contribution
                 fused[node_id]["rrf_score"] += contribution
+                fused[node_id]["weighted_rrf_sum"] += contribution
+                fused[node_id]["best_view_contribution"] = max(
+                    fused[node_id]["best_view_contribution"], contribution
+                )
                 fused[node_id]["phrase_matches"].append({
                     "phrase_index": phrase_index,
                     "phrase": item.get("phrase"),
@@ -842,59 +910,127 @@ class MemoryController:
                     "phrase_fidelity": float(
                         item.get("phrase_fidelity") or 0.0
                     ),
-                    "question_relevance": float(
-                        item.get("question_relevance") or 0.0
-                    ),
+                    "question_relevance": question_relevance,
+                    "local_relevance_score": local_relevance,
                     "support_potential": float(
                         item.get("support_potential") or 0.0
                     ),
+                    "rank_rrf_contribution": rank_contribution,
+                    "weighted_rrf_contribution": contribution,
                     "rrf_contribution": contribution,
                 })
         rows = list(fused.values())
+        max_consensus = max(
+            (float(item.get("weighted_rrf_sum") or 0.0) for item in rows),
+            default=0.0,
+        )
+        max_best_view = max(
+            (
+                float(item.get("best_view_contribution") or 0.0)
+                for item in rows
+            ),
+            default=0.0,
+        )
+        for item in rows:
+            normalized_consensus = (
+                float(item.get("weighted_rrf_sum") or 0.0) / max_consensus
+                if max_consensus > 0 else 0.0
+            )
+            normalized_best_view = (
+                float(item.get("best_view_contribution") or 0.0)
+                / max_best_view
+                if max_best_view > 0 else 0.0
+            )
+            fused_score = (
+                consensus_weight * normalized_consensus
+                + (1.0 - consensus_weight) * normalized_best_view
+            )
+            item["normalized_consensus"] = normalized_consensus
+            item["normalized_best_view"] = normalized_best_view
+            item["fused_score"] = fused_score
+            item["candidate_score"] = fused_score
+            item["_candidate_score"] = fused_score
+            item["candidate_sources"] = ["relevance_aware_rrf"]
         rows.sort(key=lambda item: (
-            -float(item.get("rrf_score") or 0.0),
+            -float(item.get("fused_score") or 0.0),
             str(item.get(id_field) or ""),
         ))
-        top_score = float(rows[0]["rrf_score"]) if rows else 0.0
+        top_score = float(rows[0]["fused_score"]) if rows else 0.0
         for rank, item in enumerate(rows, start=1):
             ratio = (
-                float(item["rrf_score"]) / top_score
+                float(item["fused_score"]) / top_score
                 if top_score > 0 else 0.0
             )
             item["rrf_rank"] = rank
+            item["fused_rank"] = rank
             item["prefilter_rank"] = rank
             item["rrf_score_ratio"] = ratio
-            item["candidate_score"] = float(item["rrf_score"])
-            item["_candidate_score"] = float(item["rrf_score"])
-            item["candidate_sources"] = ["selected_phrase_rrf"]
+            item["fused_score_ratio"] = ratio
         return rows
 
     @staticmethod
     def select_eaes_adaptive_prefix(
             candidates,
             max_k,
-            ratio_threshold,
+            mass_target=None,
             min_k=1,
             relevance_floor=None,
+            ratio_threshold=None,
     ):
-        """Keep one RRF prefix; adaptive scores are not a second ranking."""
+        """Keep the smallest fused-score prefix reaching target mass."""
         annotated = [dict(item) for item in candidates]
         if not annotated or max_k <= 0:
             return [], annotated
+        mass_target = float(
+            mass_target if mass_target is not None else 0.85
+        )
+        if not 0.0 < mass_target <= 1.0:
+            raise ValueError("mass_target must be in (0, 1]")
         eligible = True
         if relevance_floor is not None:
             eligible = float(
                 annotated[0].get("question_relevance") or 0.0
             ) >= float(relevance_floor)
         selected_k = 0
-        if eligible:
-            selected_k = sum(
-                1 for item in annotated[:max_k]
-                if float(item.get("rrf_score_ratio") or 0.0)
-                >= float(ratio_threshold)
+        safety_k = min(int(max_k), len(annotated))
+        all_score_values = [
+            max(
+                0.0,
+                float(
+                    item.get("fused_score")
+                    if item.get("fused_score") is not None
+                    else item.get("candidate_score")
+                    if item.get("candidate_score") is not None
+                    else item.get("rrf_score") or 0.0
+                ),
             )
-            selected_k = min(max_k, max(min_k, selected_k))
+            for item in annotated
+        ]
+        total_score = sum(all_score_values)
+        if eligible:
+            if total_score <= 1e-12:
+                selected_k = safety_k
+            else:
+                cumulative = 0.0
+                selected_k = safety_k
+                for index, score in enumerate(
+                        all_score_values[:safety_k], start=1):
+                    cumulative += score / total_score
+                    if cumulative + 1e-12 >= mass_target:
+                        selected_k = index
+                        break
+            selected_k = min(safety_k, max(min_k, selected_k))
+        cumulative_mass = 0.0
         for index, item in enumerate(annotated):
+            normalized_mass = (
+                all_score_values[index] / total_score
+                if total_score > 1e-12 else 1.0 / len(annotated)
+            )
+            cumulative_mass += normalized_mass
+            item["normalized_mass"] = normalized_mass
+            item["cumulative_mass"] = min(1.0, cumulative_mass)
+            item["mass_target"] = mass_target
+            item["inside_fused_safety_cap"] = index < safety_k
             item["inside_adaptive_prefix"] = index < selected_k
             item["adaptive_k"] = selected_k
         return annotated[:selected_k], annotated
@@ -910,6 +1046,9 @@ class MemoryController:
                         "rank": item.get("phrase_rank"),
                         "similarity": item.get("phrase_similarity"),
                         "question_relevance": item.get("question_relevance"),
+                        "local_relevance_score": item.get(
+                            "local_relevance_score"
+                        ),
                         "support_potential": item.get("support_potential"),
                         "selected": item.get("phrase_selected"),
                     }
@@ -927,11 +1066,21 @@ class MemoryController:
     ):
         """Run shared-view, independent-channel retrieval and adaptive depths."""
         phrases = [str(value).strip() for value in retrieval_phrases or []]
+        _, child_relevance, parent_relevance = (
+            self._eaes_question_relevance_maps(
+                question_emb=question_emb,
+                question_text=question_text,
+            )
+        )
         child_rankings = self.rank_eaes_children_per_phrase(
-            phrases, top_k=config.EAES_PHRASE_INITIAL_TOP_K
+            phrases,
+            top_k=config.EAES_PHRASE_INITIAL_TOP_K,
+            question_relevance_by_id=child_relevance,
         )
         parent_rankings = self.rank_eaes_parents_per_phrase(
-            phrases, top_k=config.EAES_PARENT_PHRASE_TOP_K
+            phrases,
+            top_k=config.EAES_PARENT_PHRASE_TOP_K,
+            question_relevance_by_id=parent_relevance,
         )
         fidelities = self._score_eaes_view_rankings(
             child_rankings,
@@ -965,19 +1114,19 @@ class MemoryController:
         adaptive_children, child_scored = self.select_eaes_adaptive_prefix(
             child_fused,
             max_k=config.EAES_RERANK_LIMIT,
-            ratio_threshold=config.EAES_CHILD_ADAPTIVE_THRESHOLD,
+            mass_target=config.EAES_CHILD_MASS_TARGET,
             min_k=1,
         )
         adaptive_parents, parent_scored = self.select_eaes_adaptive_prefix(
             parent_fused,
             max_k=config.PARENT_TOP_K,
-            ratio_threshold=config.EAES_PARENT_ADAPTIVE_THRESHOLD,
+            mass_target=config.EAES_PARENT_MASS_TARGET,
             min_k=1,
             relevance_floor=config.PARENT_RELEVANCE_FLOOR,
         )
         for rank, parent in enumerate(adaptive_parents, start=1):
             parent["rank"] = rank
-            parent["score"] = float(parent.get("rrf_score") or 0.0)
+            parent["score"] = float(parent.get("fused_score") or 0.0)
         return {
             "child_probe_candidates": child_probe,
             "parent_probe_candidates": parent_probe,
@@ -989,6 +1138,11 @@ class MemoryController:
             "parent_rankings": parent_rankings,
             "phrase_retrieval": {
                 **selection,
+                "fusion_consensus_weight": float(
+                    config.EAES_FUSION_CONSENSUS_WEIGHT
+                ),
+                "child_mass_target": float(config.EAES_CHILD_MASS_TARGET),
+                "parent_mass_target": float(config.EAES_PARENT_MASS_TARGET),
                 "child": {
                     "top_k": config.EAES_PHRASE_INITIAL_TOP_K,
                     "phrases": self._eaes_compact_phrase_rankings(
@@ -1044,32 +1198,47 @@ class MemoryController:
                 tags, tag_vectors = self._eaes_tag_embedding_cache[note.memory_id]
                 similarities = np.dot(tag_vectors, phrase_vector)
                 tag_index = int(np.argmax(similarities))
-                scored.append((
-                    float(similarities[tag_index]),
-                    note.memory_id,
-                    tags[tag_index],
-                ))
-            scored.sort(key=lambda row: (-row[0], row[1]))
-            for full_rank, (similarity, memory_id, matched_tag) in enumerate(
-                    scored, start=1):
-                if memory_id not in requested_children:
-                    continue
-                note = self.memory.eaes_notes[memory_id]
+                similarity = max(
+                    0.0,
+                    min(1.0, float(similarities[tag_index])),
+                )
                 node_vector = self._normalize_embedding_rows(
                     note.retrieval_embedding
                 )[0]
                 question_relevance = self._eaes_clipped_cosine(
                     node_vector, question_vector
                 )
-                inside = full_rank <= int(config.EAES_PHRASE_INITIAL_TOP_K)
-                diagnostic_support = fidelities[phrase_index] * (
+                local_relevance = (
                     beta * question_relevance
-                    + (1.0 - beta) * max(0.0, min(1.0, similarity))
-                ) / (rrf_k + full_rank)
+                    + (1.0 - beta) * similarity
+                )
+                scored.append((
+                    local_relevance,
+                    similarity,
+                    question_relevance,
+                    note.memory_id,
+                    tags[tag_index],
+                ))
+            scored.sort(key=lambda row: (-row[0], row[3]))
+            for full_rank, (
+                    local_relevance, similarity, question_relevance,
+                    memory_id, matched_tag
+            ) in enumerate(
+                    scored, start=1):
+                if memory_id not in requested_children:
+                    continue
+                inside = full_rank <= int(config.EAES_PHRASE_INITIAL_TOP_K)
+                diagnostic_support = (
+                    fidelities[phrase_index] * local_relevance
+                    / (rrf_k + full_rank)
+                )
                 actual_support = diagnostic_support if inside else 0.0
                 contribution = (
-                    1.0 / (rrf_k + full_rank)
+                    local_relevance / (rrf_k + full_rank)
                     if inside and phrase_index in selected else 0.0
+                )
+                diagnostic_contribution = (
+                    local_relevance / (rrf_k + full_rank)
                 )
                 row = child_rows.setdefault(memory_id, {
                     "question_relevance": question_relevance,
@@ -1080,12 +1249,21 @@ class MemoryController:
                     "phrase": phrase,
                     "phrase_fidelity": fidelities[phrase_index],
                     "phrase_node_similarity": similarity,
+                    "local_relevance_score": local_relevance,
                     "matched_tag": matched_tag,
                     "full_channel_rank": full_rank,
                     "inside_top30": inside,
+                    "inside_phrase_topk": inside,
                     "phrase_selected": phrase_index in selected,
                     "support_potential": actual_support,
                     "diagnostic_support_potential": diagnostic_support,
+                    "rank_rrf_contribution": 1.0 / (
+                        rrf_k + full_rank
+                    ),
+                    "weighted_rrf_contribution": contribution,
+                    "diagnostic_weighted_rrf_contribution": (
+                        diagnostic_contribution
+                    ),
                     "rrf_contribution": contribution,
                 })
 
@@ -1103,31 +1281,41 @@ class MemoryController:
                 vector = self._normalize_embedding_rows(
                     parent.retrieval_embedding
                 )[0]
+                similarity = self._eaes_clipped_cosine(
+                    phrase_vector, vector
+                )
+                question_relevance = self._eaes_clipped_cosine(
+                    vector, question_vector
+                )
+                local_relevance = (
+                    beta * question_relevance
+                    + (1.0 - beta) * similarity
+                )
                 scored.append((
-                    float(np.dot(phrase_vector, vector)),
+                    local_relevance,
+                    similarity,
+                    question_relevance,
                     parent.parent_id,
                 ))
-            scored.sort(key=lambda row: (-row[0], row[1]))
-            for full_rank, (similarity, parent_id) in enumerate(
+            scored.sort(key=lambda row: (-row[0], row[3]))
+            for full_rank, (
+                    local_relevance, similarity, question_relevance, parent_id
+            ) in enumerate(
                     scored, start=1):
                 if parent_id not in requested_parents:
                     continue
-                parent = self.memory.eaes_parent_nodes[parent_id]
-                node_vector = self._normalize_embedding_rows(
-                    parent.retrieval_embedding
-                )[0]
-                question_relevance = self._eaes_clipped_cosine(
-                    node_vector, question_vector
-                )
                 inside = full_rank <= int(config.EAES_PARENT_PHRASE_TOP_K)
-                diagnostic_support = fidelities[phrase_index] * (
-                    beta * question_relevance
-                    + (1.0 - beta) * max(0.0, min(1.0, similarity))
-                ) / (rrf_k + full_rank)
+                diagnostic_support = (
+                    fidelities[phrase_index] * local_relevance
+                    / (rrf_k + full_rank)
+                )
                 actual_support = diagnostic_support if inside else 0.0
                 contribution = (
-                    1.0 / (rrf_k + full_rank)
+                    local_relevance / (rrf_k + full_rank)
                     if inside and phrase_index in selected else 0.0
+                )
+                diagnostic_contribution = (
+                    local_relevance / (rrf_k + full_rank)
                 )
                 row = parent_rows.setdefault(parent_id, {
                     "question_relevance": question_relevance,
@@ -1138,11 +1326,20 @@ class MemoryController:
                     "phrase": phrase,
                     "phrase_fidelity": fidelities[phrase_index],
                     "phrase_node_similarity": similarity,
+                    "local_relevance_score": local_relevance,
                     "full_channel_rank": full_rank,
                     "inside_top10": inside,
+                    "inside_phrase_topk": inside,
                     "phrase_selected": phrase_index in selected,
                     "support_potential": actual_support,
                     "diagnostic_support_potential": diagnostic_support,
+                    "rank_rrf_contribution": 1.0 / (
+                        rrf_k + full_rank
+                    ),
+                    "weighted_rrf_contribution": contribution,
+                    "diagnostic_weighted_rrf_contribution": (
+                        diagnostic_contribution
+                    ),
                     "rrf_contribution": contribution,
                 })
         return {"child": child_rows, "parent": parent_rows}

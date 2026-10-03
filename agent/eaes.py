@@ -270,14 +270,38 @@ class EAESMixin:
         return plan
 
     @staticmethod
+    def _eaes_phrase_content_tokens(value):
+        text = re.sub(r"['’]s\b", "", str(value or "").casefold())
+        tokens = re.findall(r"[a-z0-9]+", text)
+        stopwords = {
+            "a", "an", "and", "are", "at", "did", "do", "does", "for",
+            "from", "how", "in", "is", "of", "on", "or", "the", "their",
+            "to", "was", "were", "what", "when", "where", "which", "who",
+            "why", "with",
+        }
+        return [token for token in tokens if token not in stopwords]
+
+    @staticmethod
     def _validate_eaes_retrieval_phrases(
-            values, expected_count=None, max_words=None
+            values, expected_count=None, max_words=None, entities=None
     ):
         expected_count = expected_count or getattr(config, "EAES_PHRASE_COUNT", 6)
         max_words = max_words or getattr(config, "EAES_PHRASE_MAX_WORDS", 10)
         if not isinstance(values, list):
             return None, "retrieval_phrases must be an array"
+        if len(values) < expected_count:
+            return None, (
+                f"retrieval_phrases must contain at least {expected_count} "
+                f"valid phrases; got {len(values)}"
+            )
         phrases = []
+        normalized_phrases = set()
+        content_signatures = set()
+        entity_tokens = {
+            token
+            for entity in entities or []
+            for token in EAESMixin._eaes_phrase_content_tokens(entity)
+        }
         for index, value in enumerate(values):
             if len(phrases) >= expected_count:
                 break
@@ -291,6 +315,40 @@ class EAESMixin:
                     f"retrieval_phrases[{index}] must contain no more than "
                     f"{max_words} whitespace-separated words: {value!r}"
                 )
+            normalized = re.sub(r"\s+", " ", phrase).casefold()
+            if normalized in normalized_phrases:
+                return None, (
+                    f"retrieval_phrases[{index}] duplicates an earlier phrase"
+                )
+            content_tokens = EAESMixin._eaes_phrase_content_tokens(phrase)
+            if not content_tokens:
+                return None, (
+                    f"retrieval_phrases[{index}] has no usable content words"
+                )
+            signature = tuple(sorted(content_tokens))
+            if signature in content_signatures:
+                return None, (
+                    f"retrieval_phrases[{index}] only reorders the same "
+                    "normalized content words as an earlier phrase"
+                )
+            if entity_tokens:
+                phrase_entities = entity_tokens.intersection(content_tokens)
+                if not phrase_entities:
+                    return None, (
+                        f"retrieval_phrases[{index}] must retain at least one "
+                        "known entity from the question"
+                    )
+                relation_tokens = [
+                    token for token in content_tokens
+                    if token not in entity_tokens
+                ]
+                if not relation_tokens:
+                    return None, (
+                        f"retrieval_phrases[{index}] is entity-only and loses "
+                        "the question's target relation"
+                    )
+            normalized_phrases.add(normalized)
+            content_signatures.add(signature)
             phrases.append(phrase)
         if len(phrases) < expected_count:
             return None, (
@@ -423,6 +481,7 @@ class EAESMixin:
         phrases, phrase_error = self._validate_eaes_retrieval_phrases(
             raw_retrieval_phrases,
             expected_count=phrase_count,
+            entities=parsed_plan.get("entities"),
         )
         phrase_source = "initial"
         if phrases is None:
@@ -435,6 +494,7 @@ class EAESMixin:
                 repair_out.get("retrieval_phrases")
                 if isinstance(repair_out, dict) else None,
                 expected_count=phrase_count,
+                entities=parsed_plan.get("entities"),
             )
             phrase_source = "regenerated"
         if phrases is None:
@@ -1260,8 +1320,11 @@ class EAESMixin:
             "parent_phrase_top_k": getattr(
                 config, "EAES_PARENT_PHRASE_TOP_K", 10
             ),
-            "parent_adaptive_threshold": getattr(
-                config, "EAES_PARENT_ADAPTIVE_THRESHOLD", 0.55
+            "parent_mass_target": getattr(
+                config, "EAES_PARENT_MASS_TARGET", 0.85
+            ),
+            "child_mass_target": getattr(
+                config, "EAES_CHILD_MASS_TARGET", 0.85
             ),
         }
         routing["selected_parent_k"] = len(selected_parents)

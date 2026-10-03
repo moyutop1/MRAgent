@@ -355,9 +355,11 @@ Rules:
 - Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
 - The same phrases retrieve two independent memory views: concise child-memory tags and parent-memory summaries. Write phrases that preserve the question's entity and relation while remaining useful for either representation.
 - Prioritize the specific action or relation asked about together with its known person/entity, event, or object. Preserve distinctions such as adoption versus ownership, joining versus attending, occurrence date versus duration, and celebration versus winning. Do not replace a concrete relation with a broader topic.
-- Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output questions, explanations, narrative sentences, or question words.
-- Each phrase must independently describe a useful retrieval target. Anchor it with a known person, distinctive entity, event, object, or specific relation when available. Separate query-plan fields do not automatically supply missing context to a phrase. Avoid disconnected name-only, date-only, or generic-topic fragments.
-- For one fact or relation, some phrases may be synonymous access wordings. Allow useful redundancy, but do not make all six differ only in possessives, prepositions, or word order.
+- Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output explanations or narrative sentences.
+- Every phrase must be relation-complete on its own: retain at least one known entity and the specific target relation, action, property, event, or object requested by the question. Separate query-plan fields do not supply missing context to a phrase.
+- Never weaken a specific request into "who is X", "X information", "X details", "X things", or another entity-only/generic-topic phrase. Broad words such as "activities" are valid only when the question itself is broad.
+- Use controlled redundancy. Two or three phrases may be close paraphrases for lexical stability; the remaining phrases should make meaning-preserving access changes such as verb/nominal form, relation wording, or entity-event orientation. Do not create fixed evidence-type slots and do not make all six differ only in possessives, prepositions, or word order.
+- All six phrases must have distinct normalized content wording. A reordered phrase with the same entity and content words is a duplicate, not a new access view.
 - For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute phrases across the stated entities or relations. Preserve the question's relation in each branch.
 - Do not infer question complexity or force the six phrases into six evidence categories. Only decompose requirements explicitly supported by the question.
 - Across the six phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
@@ -369,6 +371,10 @@ Examples illustrate retrieval_phrases only; return the full query-plan schema ab
   retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "when Maya adopted her cat Leo", "date Leo joined Maya's home", "Maya and Leo adoption time"]
 - Question: "What hobbies do Alice and Ben share?"
   retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities", "activities Alice and Ben both enjoy", "shared hobbies of Alice and Ben"]
+- Question: "What is Caroline's identity?"
+  retrieval_phrases: ["Caroline identity", "Caroline personal identity", "Caroline self-identification", "how Caroline identifies herself", "Caroline identity description", "Caroline gender identity"]
+- Question: "What kind of writings does Joanna do?"
+  retrieval_phrases: ["Joanna writing genres", "types of writing Joanna does", "Joanna authored content types", "Joanna forms of writing", "Joanna kinds of written work", "Joanna writing categories"]
 - For an adoption-date question, "Leo adoption date" preserves the relation; "Maya pet information" loses it. For a question about celebrating a tournament win, "tournament victory celebration" preserves the relation; "tournament information" loses it.
 - "What new activity did Lena start?" does not justify guessing volunteering or a shelter. "What did Alex do for Riley?" does not justify guessing a gift unless the question mentions giving or receiving one."""
 
@@ -380,9 +386,11 @@ Every phrase must be a normal retrieval expression containing no more than ten w
 Retrieval phrases do not use the child-memory "prefix.facet" format. Do not add an artificial canonical head or period delimiter merely to imitate a memory tag.
 The same phrases retrieve concise child-memory tags and parent-memory summaries. Preserve the question's known entity and relation in wording useful for either representation.
 Prioritize the specific action or relation asked about together with its known person/entity, event, or object. Preserve distinctions such as adoption versus ownership, joining versus attending, occurrence date versus duration, and celebration versus winning. Do not replace a concrete relation with a broader topic.
-Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output questions, explanations, narrative sentences, or question words.
-Each phrase must independently describe a useful retrieval target. Anchor it with a known person, distinctive entity, event, object, or specific relation when available. Separate query-plan fields do not automatically supply missing context to a phrase. Avoid disconnected name-only, date-only, or generic-topic fragments.
-For one fact or relation, some phrases may be synonymous access wordings. Allow useful redundancy, but do not make all six differ only in possessives, prepositions, or word order.
+Use compact noun phrases or telegraphic entity-action-object expressions, such as "Leo adoption date" or "Maya adopted Leo" when supported by the question. Do not output explanations or narrative sentences.
+Every phrase must be relation-complete on its own: retain at least one known entity and the specific target relation, action, property, event, or object requested by the question. Separate query-plan fields do not supply missing context to a phrase.
+Never weaken a specific request into "who is X", "X information", "X details", "X things", or another entity-only/generic-topic phrase. Broad words such as "activities" are valid only when the question itself is broad.
+Use controlled redundancy. Two or three phrases may be close paraphrases for lexical stability; the remaining phrases should make meaning-preserving access changes such as verb/nominal form, relation wording, or entity-event orientation. Do not create fixed evidence-type slots and do not make all six differ only in possessives, prepositions, or word order.
+All six phrases must have distinct normalized content wording. A reordered phrase with the same entity and content words is a duplicate, not a new access view.
 For questions explicitly requiring comparison, shared attributes, or multiple conditions, distribute phrases across the stated entities or relations while preserving the requested relation.
 Do not infer question complexity or force the six phrases into six evidence categories. Only decompose requirements explicitly supported by the question.
 Across the six phrases, preserve useful known entities, events, objects, relations, and explicit time/place/occasion constraints. Do not replace event retrieval with a bare date or assume that a conversation date is an event occurrence date.
@@ -394,6 +402,10 @@ Examples illustrate retrieval_phrases only; return the repair schema below and n
   retrieval_phrases: ["Maya adopted Leo", "Leo adoption date", "Maya cat adoption", "when Maya adopted her cat Leo", "date Leo joined Maya's home", "Maya and Leo adoption time"]
 - Question: "What hobbies do Alice and Ben share?"
   retrieval_phrases: ["Alice hobbies", "Alice leisure activities", "Ben hobbies", "Ben leisure activities", "activities Alice and Ben both enjoy", "shared hobbies of Alice and Ben"]
+- Question: "What is Caroline's identity?"
+  retrieval_phrases: ["Caroline identity", "Caroline personal identity", "Caroline self-identification", "how Caroline identifies herself", "Caroline identity description", "Caroline gender identity"]
+- Question: "What kind of writings does Joanna do?"
+  retrieval_phrases: ["Joanna writing genres", "types of writing Joanna does", "Joanna authored content types", "Joanna forms of writing", "Joanna kinds of written work", "Joanna writing categories"]
 - For an adoption-date question, "Leo adoption date" preserves the relation; "Maya pet information" loses it. For a question about celebrating a tournament win, "tournament victory celebration" preserves the relation; "tournament information" loses it.
 - "What new activity did Lena start?" does not justify guessing volunteering or a shelter. "What did Alex do for Riley?" does not justify guessing a gift unless the question mentions giving or receiving one.
 Schema:

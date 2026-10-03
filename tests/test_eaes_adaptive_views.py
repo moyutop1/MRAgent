@@ -49,13 +49,14 @@ class _Store:
     episode_events = {}
 
 
-def _item(node_id, support, rank=1):
+def _item(node_id, support, rank=1, local_relevance=0.77):
     return {
         "memory_id": node_id,
         "phrase_rank": rank,
         "phrase_similarity": 0.8,
         "phrase_fidelity": 0.9,
         "question_relevance": 0.7,
+        "local_relevance_score": local_relevance,
         "support_potential": support,
         "phrase": node_id,
         "phrase_index": 0,
@@ -101,7 +102,7 @@ class AdaptiveViewTests(unittest.TestCase):
             "below_marginal_gain_threshold",
         )
 
-    def test_rrf_prefix_has_no_second_adaptive_score(self):
+    def test_fused_score_mass_selects_a_bounded_prefix(self):
         rankings = [
             [_item("A", 0.1, 1), _item("B", 0.08, 5)],
             [_item("A", 0.09, 2), _item("C", 0.07, 6)],
@@ -110,17 +111,53 @@ class AdaptiveViewTests(unittest.TestCase):
             rankings, [0, 1], "memory_id", rrf_k=10.0
         )
         retained, annotated = MemoryController.select_eaes_adaptive_prefix(
-            fused, max_k=2, ratio_threshold=0.4, min_k=1
+            fused, max_k=2, mass_target=0.75, min_k=1
         )
 
         self.assertEqual(retained[0]["memory_id"], "A")
         self.assertLessEqual(len(retained), 2)
         self.assertTrue(all("adaptive_score" not in row for row in annotated))
-        self.assertTrue(all("rrf_score_ratio" in row for row in annotated))
+        self.assertTrue(all("fused_score_ratio" in row for row in annotated))
+        self.assertTrue(all("normalized_mass" in row for row in annotated))
+        self.assertTrue(all("cumulative_mass" in row for row in annotated))
         self.assertEqual(
             [row["inside_adaptive_prefix"] for row in annotated],
             [index < len(retained) for index in range(len(annotated))],
         )
+
+    def test_mass_is_normalized_over_all_fused_candidates_before_cap(self):
+        candidates = [
+            {"memory_id": "A", "fused_score": 0.4},
+            {"memory_id": "B", "fused_score": 0.3},
+            {"memory_id": "C", "fused_score": 0.2},
+            {"memory_id": "D", "fused_score": 0.1},
+        ]
+
+        retained, annotated = MemoryController.select_eaes_adaptive_prefix(
+            candidates, max_k=2, mass_target=0.85, min_k=1
+        )
+
+        self.assertEqual([row["memory_id"] for row in retained], ["A", "B"])
+        self.assertAlmostEqual(annotated[1]["cumulative_mass"], 0.7)
+        self.assertFalse(annotated[2]["inside_fused_safety_cap"])
+        self.assertAlmostEqual(annotated[-1]["cumulative_mass"], 1.0)
+
+    def test_fusion_preserves_a_strong_single_view_candidate(self):
+        rankings = [
+            [_item("single", 0.1, 1, 1.0), _item("repeat", 0.1, 8, 0.3)],
+            [_item("repeat", 0.1, 8, 0.3)],
+            [_item("repeat", 0.1, 8, 0.3)],
+        ]
+
+        fused = MemoryController.fuse_eaes_channel_rankings(
+            rankings, [0, 1, 2], "memory_id", rrf_k=10.0,
+            consensus_weight=0.5,
+        )
+
+        self.assertEqual(fused[0]["memory_id"], "single")
+        single = fused[0]
+        self.assertEqual(single["normalized_best_view"], 1.0)
+        self.assertGreater(single["fused_score"], fused[1]["fused_score"])
 
     def test_parent_and_child_fusion_do_not_deduplicate_each_other(self):
         child = MemoryController.fuse_eaes_channel_rankings(
@@ -233,6 +270,16 @@ class GoldDiagnosticTests(unittest.TestCase):
             "rrf_score": 1 / 11,
             "rrf_score_ratio": 1.0,
             "rrf_rank": 1,
+            "weighted_rrf_sum": 1 / 11,
+            "best_view_contribution": 1 / 11,
+            "normalized_consensus": 1.0,
+            "normalized_best_view": 1.0,
+            "fused_score": 1.0,
+            "fused_score_ratio": 1.0,
+            "fused_rank": 1,
+            "normalized_mass": 1.0,
+            "cumulative_mass": 1.0,
+            "inside_fused_safety_cap": True,
             "adaptive_k": 1,
             "rerank_rank": 1,
         }
@@ -241,6 +288,16 @@ class GoldDiagnosticTests(unittest.TestCase):
             "rrf_score": 1 / 11,
             "rrf_score_ratio": 1.0,
             "rrf_rank": 1,
+            "weighted_rrf_sum": 1 / 11,
+            "best_view_contribution": 1 / 11,
+            "normalized_consensus": 1.0,
+            "normalized_best_view": 1.0,
+            "fused_score": 1.0,
+            "fused_score_ratio": 1.0,
+            "fused_rank": 1,
+            "normalized_mass": 1.0,
+            "cumulative_mass": 1.0,
+            "inside_fused_safety_cap": True,
             "adaptive_k": 1,
         }
         retrieval = {
@@ -269,6 +326,9 @@ class GoldDiagnosticTests(unittest.TestCase):
 
         self.assertEqual(child_row["question_relevance"], 0.77)
         self.assertEqual(child_row["rrf_score_ratio"], 1.0)
+        self.assertEqual(child_row["fused_score"], 1.0)
+        self.assertEqual(child_row["cumulative_mass"], 1.0)
+        self.assertTrue(child_row["inside_fused_safety_cap"])
         self.assertTrue(child_row["inside_adaptive_prefix"])
         self.assertEqual(len(child_row["phrase_scores"]), 6)
         self.assertEqual(gold["final_path"], "child_and_parent")

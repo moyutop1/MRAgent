@@ -159,15 +159,20 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--workers` | concurrent question workers per selected sample | `10` |
 | `--eaes` | enable the required EAES retrieval/answer pipeline | required |
 | `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
-| `--eaes_phrase_count` | retrieval phrases generated for each question (fixed policy) | `4` |
-| `--eaes_phrase_initial_top_k` | tag-similarity candidates inspected independently per phrase before dynamic TopK selection | `30` |
-| `--eaes_phrase_protected_top_k` | original similarity-ranked candidates protected per phrase | `5` |
-| `--eaes_phrase_final_top_k` | candidates retained per phrase after RRF selection | `10` |
+| `--eaes_phrase_count` | relation-complete retrieval phrases generated for each question | `6` |
+| `--eaes_phrase_max_words` | maximum whitespace-separated words in each retrieval phrase | `10` |
+| `--eaes_phrase_initial_top_k` | child candidates retained per phrase after question/phrase relevance scoring | `30` |
+| `--eaes_parent_phrase_top_k` | parent candidates retained per phrase after question/phrase relevance scoring | `10` |
+| `--eaes_min_selected_views` / `--eaes_max_selected_views` | phrase views selected by marginal evidence gain | `1` / `4` |
+| `--eaes_question_relevance_weight` | original-question weight in local node relevance | `0.7` |
+| `--eaes_fusion_consensus_weight` | consensus weight in consensus/best-view RRF fusion | `0.5` |
+| `--eaes_child_mass_target` / `--eaes_parent_mass_target` | cumulative fused-score mass targets | `0.85` / `0.85` |
+| `--eaes_phrase_protected_top_k` / `--eaes_phrase_final_top_k` | deprecated compatibility options, unused by adaptive-view retrieval | `5` / `10` |
 | `--eaes_phrase_rrf_k` | RRF denominator constant | `10` |
 | `--eaes_phrase_rerank_limit` | children retained by the query-only LLM reranker | `15` |
 | `--eaes_prefilter_limit` | legacy combined-score pool used by rollback/compatibility paths | `120` |
-| `--eaes_rerank_limit` | children retained by the compatibility attribute reranker | `16` |
-| `--parent_top_k` | independently retrieved parent memories sent to the final reader | `4` |
+| `--eaes_rerank_limit` | child-channel safety cap after fused-score mass selection | `30` |
+| `--parent_top_k` | parent-channel safety cap after fused-score mass selection | `10` |
 | `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
@@ -191,22 +196,22 @@ python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_qu
 python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26 --eaes
 
-# entity-attribute-memory retrieval diagnostics with the default 15-child + 4-parent budget
-python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm --parent_top_k 4
+# entity-attribute-memory retrieval diagnostics with adaptive child/parent depths
+python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50 --sample conv-26 --eaes --semantic_hierarchy
 
 # semantic-property scoring ablation (rewrite memories must first be regenerated with semantic_properties)
-python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --semantic_hierarchy --eaes_index_mode llm
 python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file semantic50_q50 --sample conv-26 --eaes --semantic_score --semantic_hierarchy
 
 # answer-stage ablation: bypass the EAES evidence selector
-python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm
 
 # pre-reader S2G controller; up to two rounds of 27 unseen children + 3 unseen parents -> additive LLM Top0-3 supplements
-python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 41 --workers 1 --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 41 --workers 1 --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm
 
 # the same S2G/rollback flow in retrieval-only mode; no answer reader is called
-python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm --eaes_prefilter_limit 120 --eaes_rerank_limit 16 --parent_top_k 4
+python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm
 
 ```
 

@@ -63,7 +63,7 @@ class _QueuedLLM:
 
 
 class PhrasePlanTests(unittest.TestCase):
-    def test_normalizer_requires_six_but_does_not_deduplicate(self):
+    def test_normalizer_requires_six_and_rejects_duplicate_views(self):
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases([
                 "Caroline event", "event attendance", "joined event",
@@ -85,7 +85,7 @@ class PhrasePlanTests(unittest.TestCase):
                 ]
             )
         )
-        self.assertEqual(
+        self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases(
                 [
                     "Caroline support group",
@@ -96,15 +96,19 @@ class PhrasePlanTests(unittest.TestCase):
                     "reading collection",
                     "ignored seventh phrase",
                 ]
-            ),
-            [
-                "Caroline support group",
-                "Caroline support group",
-                "career interest",
-                "pottery class",
-                "camping location",
-                "reading collection",
-            ],
+            )
+        )
+        phrases = [
+            "Caroline event attendance",
+            "Caroline joined support group",
+            "Caroline community gathering",
+            "Caroline participation history",
+            "Caroline attended local event",
+            "Caroline group involvement",
+        ]
+        self.assertEqual(
+            EAESMixin._normalize_eaes_retrieval_phrases(phrases),
+            phrases,
         )
 
     def test_parse_repairs_wrong_count_or_overlong_phrase_once(self):
@@ -118,12 +122,12 @@ class PhrasePlanTests(unittest.TestCase):
             ]),
             {
                 "retrieval_phrases": [
-                    "Caroline support group",
-                    "career interest",
-                    "pottery class",
-                    "camping location",
-                    "reading collection",
-                    "family hiking trips",
+                    "Caroline event attendance",
+                    "Caroline joined support group",
+                    "Caroline community gathering",
+                    "Caroline participation history",
+                    "Caroline attended local event",
+                    "Caroline group involvement",
                 ]
             },
         ])
@@ -133,12 +137,12 @@ class PhrasePlanTests(unittest.TestCase):
         self.assertEqual(
             plan["retrieval_phrases"],
             [
-                "Caroline support group",
-                "career interest",
-                "pottery class",
-                "camping location",
-                "reading collection",
-                "family hiking trips",
+                "Caroline event attendance",
+                "Caroline joined support group",
+                "Caroline community gathering",
+                "Caroline participation history",
+                "Caroline attended local event",
+                "Caroline group involvement",
             ],
         )
         self.assertEqual(plan["retrieval_phrase_source"], "regenerated")
@@ -187,12 +191,12 @@ class PhrasePlanTests(unittest.TestCase):
 
     def test_deprecated_temporal_fields_are_never_kept_in_query_plan(self):
         output = _query_output([
-            "Caroline support group",
-            "career interest",
-            "pottery class",
-            "camping location",
-            "reading collection",
-            "family hiking trips",
+            "Caroline event attendance",
+            "Caroline joined support group",
+            "Caroline community gathering",
+            "Caroline participation history",
+            "Caroline attended local event",
+            "Caroline group involvement",
         ])
         output.update({
             "temporal_intent": "historical_event",
@@ -218,17 +222,18 @@ class PhrasePlanTests(unittest.TestCase):
                 prompt,
             )
             self.assertIn("no more than ten whitespace-separated words", prompt)
-            self.assertIn("useful redundancy", prompt)
+            self.assertIn("controlled redundancy", prompt)
+            self.assertIn("relation-complete", prompt)
 
     def test_breadth_and_detail_labels_are_normalized_for_routing_only(self):
         mixin = _TestEAES()
         mixin.llm = _QueuedLLM([_query_output([
-            "Caroline support group",
-            "career interest",
-            "pottery class",
-            "camping location",
-            "reading collection",
-            "family hiking trips",
+            "Caroline event attendance",
+            "Caroline joined support group",
+            "Caroline community gathering",
+            "Caroline participation history",
+            "Caroline attended local event",
+            "Caroline group involvement",
         ])])
 
         plan = mixin.parse_eaes_query("What events did Caroline join?")

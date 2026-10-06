@@ -145,6 +145,8 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
                 "evidence": evidence_labels, "question": qa.get("question"),
                 "prediction_context": [], "sample": sample_id,
                 "question_index": i,
+                "error_type": type(e).__name__,
+                "error": str(e),
             }
 
         evaluation = {

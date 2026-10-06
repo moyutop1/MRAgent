@@ -48,12 +48,6 @@ class _FakeController:
     def retrieve_eaes_candidates(self, query_plan, *_args, **_kwargs):
         return list(self.candidates)
 
-    def retrieve_eaes_phrase_candidates(self, retrieval_phrases, **_kwargs):
-        self.child_retrieval_phrases.append(list(retrieval_phrases))
-        candidates = list(self.candidates)
-        diagnostics = {"phrases": [{"selected_k": len(candidates)}] * 4}
-        return (candidates, diagnostics) if _kwargs.get("include_diagnostics") else candidates
-
     def route_eaes_parent_candidates(self, query_plan, *_args, **_kwargs):
         self.parent_query_plans.append(dict(query_plan))
         parents = [{
@@ -78,9 +72,10 @@ class _FakeController:
         for rank, candidate in enumerate(self.candidates, start=1):
             children.append({
                 **candidate,
-                "rrf_score": 1.0 / (10 + rank),
-                "rrf_score_ratio": 11.0 / (10 + rank),
-                "rrf_rank": rank,
+                "joint_relevance": 1.0 / rank,
+                "fused_score": 1.0 / rank,
+                "fused_score_ratio": 1.0 / rank,
+                "fused_rank": rank,
                 "prefilter_rank": rank,
                 "inside_adaptive_prefix": rank <= config.EAES_RERANK_LIMIT,
                 "adaptive_k": min(
@@ -93,9 +88,10 @@ class _FakeController:
             parents = [{
                 "parent_id": f"1-{i}",
                 "rewrite_content": f"Parent memory {i} about Caroline and dogs.",
-                "rrf_score": 1.0 / (10 + i),
-                "rrf_score_ratio": 11.0 / (10 + i),
-                "rrf_rank": i,
+                "joint_relevance": 1.0 / i,
+                "fused_score": 1.0 / i,
+                "fused_score_ratio": 1.0 / i,
+                "fused_rank": i,
                 "rank": i,
                 "score": 1.0 / (10 + i),
                 "inside_adaptive_prefix": True,
@@ -112,7 +108,8 @@ class _FakeController:
             "parent_rankings": [],
             "phrase_retrieval": {
                 "phrases": [],
-                "selected_phrase_indices": [0],
+                "child_selected_phrase_indices": [0],
+                "parent_selected_phrase_indices": [0],
             },
         }
 
@@ -206,7 +203,8 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         )
         self.assertTrue(all(
             set(item["evidence"][0]) == {
-                "memory_id", "conversation_time", "rewrite_content"
+                "memory_id", "conversation_time", "rewrite_content",
+                "retrieval_score", "rerank_rank",
             }
             for item in package["answer_items"]
         ))
@@ -260,7 +258,10 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             [f"M_{i}" for i in range(1, 13)],
         )
         self.assertTrue(all(
-            set(item) == {"memory_id", "conversation_time", "rewrite_content"}
+            set(item) == {
+                "memory_id", "conversation_time", "rewrite_content",
+                "retrieval_score", "rerank_rank",
+            }
             for item in reader_input["backup_candidates"]
         ))
 

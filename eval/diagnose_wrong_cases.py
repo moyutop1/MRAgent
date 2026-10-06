@@ -251,14 +251,8 @@ def compact_candidate(cand, rank):
         "origin": cand.get("origin"),
         "tag": cand.get("tag"),
         "max_phrase_similarity": cand.get("max_phrase_similarity"),
-        "rrf_score": cand.get("rrf_score"),
-        "rrf_score_ratio": cand.get("rrf_score_ratio"),
-        "rrf_rank": cand.get("rrf_rank"),
         "question_relevance": cand.get("question_relevance"),
-        "weighted_rrf_sum": cand.get("weighted_rrf_sum"),
-        "best_view_contribution": cand.get("best_view_contribution"),
-        "normalized_consensus": cand.get("normalized_consensus"),
-        "normalized_best_view": cand.get("normalized_best_view"),
+        "joint_relevance": cand.get("joint_relevance"),
         "fused_score": cand.get("fused_score"),
         "fused_score_ratio": cand.get("fused_score_ratio"),
         "fused_rank": cand.get("fused_rank"),
@@ -335,6 +329,8 @@ def build_case(row, judge_row, retrieval_row, topk):
         "gold_evidence": row.get("evidence"),
         "prediction": row.get("prediction"),
         "prediction_context": row.get("prediction_context"),
+        "answer_error_type": row.get("error_type"),
+        "answer_error": row.get("error"),
         "f1": round(f1, 4),
         "judge_score": None if judge_row is None else judge_row.get("llm_score"),
         "hit_at_20": None if judge_row is None else judge_row.get("hit_at_20"),
@@ -353,6 +349,7 @@ def build_case(row, judge_row, retrieval_row, topk):
         ]
         case.update({
             "retrieval_file": retrieval_row.get("_file"),
+            "retrieval_error": retrieval_row.get("error"),
             "retrieval_metrics": retrieval_row.get("metrics"),
             "query_plan": retrieval.get("query_plan"),
             "top_candidates": [
@@ -391,10 +388,20 @@ def write_md(path, cases):
             f.write(f"**Gold:** {case.get('gold_answer')}\n\n")
             f.write(f"**Gold Evidence:** `{case.get('gold_evidence')}`\n\n")
             f.write(f"**Prediction:** {case.get('prediction')}\n\n")
+            if case.get("answer_error"):
+                f.write(
+                    "**Answer Error:** "
+                    f"`{case.get('answer_error_type')}: "
+                    f"{case.get('answer_error')}`\n\n"
+                )
             f.write(f"**Answer-run Hit@20:** `{case.get('hit_at_20')}`\n\n")
             f.write(f"**Prediction Context:** `{case.get('prediction_context')}`\n\n")
             if "retrieval_metrics" in case:
                 f.write(f"**Retrieval Metrics:** `{case.get('retrieval_metrics')}`\n\n")
+                if case.get("retrieval_error"):
+                    f.write(
+                        f"**Retrieval Error:** `{case.get('retrieval_error')}`\n\n"
+                    )
                 f.write("<details><summary>Query Plan</summary>\n\n")
                 f.write(f"```json\n{md_json(case.get('query_plan'))}\n```\n\n</details>\n\n")
                 f.write("<details><summary>Top Candidates</summary>\n\n")

@@ -59,17 +59,6 @@ class _Controller:
     def retrieve_eaes_candidates(self, query_plan, *_args, **_kwargs):
         return _children()
 
-    def retrieve_eaes_phrase_candidates(
-            self, retrieval_phrases, include_diagnostics=False, **_kwargs
-    ):
-        self.child_plans.append(list(retrieval_phrases))
-        candidates = _children()
-        diagnostics = {
-            "phrases": [{"selected_k": len(candidates)}] * 4,
-            "prefilter_candidate_ids": [item["memory_id"] for item in candidates],
-        }
-        return (candidates, diagnostics) if include_diagnostics else candidates
-
     def route_eaes_parent_candidates(self, query_plan, *_args, **kwargs):
         self.parent_plans.append(dict(query_plan))
         parents = [{
@@ -95,9 +84,10 @@ class _Controller:
         for rank, candidate in enumerate(raw_children, start=1):
             children.append({
                 **candidate,
-                "rrf_score": 1.0 / (10 + rank),
-                "rrf_score_ratio": 11.0 / (10 + rank),
-                "rrf_rank": rank,
+                "joint_relevance": 1.0 / rank,
+                "fused_score": 1.0 / rank,
+                "fused_score_ratio": 1.0 / rank,
+                "fused_rank": rank,
                 "prefilter_rank": rank,
                 "inside_adaptive_prefix": rank <= config.EAES_RERANK_LIMIT,
                 "adaptive_k": min(config.EAES_RERANK_LIMIT, len(raw_children)),
@@ -108,9 +98,10 @@ class _Controller:
             parents = [{
                 "parent_id": f"1-{index}",
                 "rewrite_content": f"Parent memory {index}",
-                "rrf_score": 1.0 / (10 + index),
-                "rrf_score_ratio": 11.0 / (10 + index),
-                "rrf_rank": index,
+                "joint_relevance": 1.0 / index,
+                "fused_score": 1.0 / index,
+                "fused_score_ratio": 1.0 / index,
+                "fused_rank": index,
                 "rank": index,
                 "score": 1.0 / (10 + index),
                 "inside_adaptive_prefix": True,
@@ -127,7 +118,8 @@ class _Controller:
             "parent_rankings": [],
             "phrase_retrieval": {
                 "phrases": [],
-                "selected_phrase_indices": [0],
+                "child_selected_phrase_indices": [0],
+                "parent_selected_phrase_indices": [0],
             },
         }
 

@@ -1,6 +1,12 @@
 import unittest
 
-from eval.diagnose_wrong_cases import add_case, case_key, find_case, is_hit20
+from eval.diagnose_wrong_cases import (
+    add_case,
+    build_case,
+    case_key,
+    find_case,
+    is_hit20,
+)
 
 
 class DiagnoseWrongCasesTest(unittest.TestCase):
@@ -50,6 +56,24 @@ class DiagnoseWrongCasesTest(unittest.TestCase):
         self.assertTrue(is_hit20({"hit_at_20": 1}))
         self.assertFalse(is_hit20({"hit_at_20": False}))
         self.assertFalse(is_hit20(None))
+
+    def test_build_case_preserves_answer_and_retrieval_errors(self):
+        case = build_case(
+            {
+                "sample": "conv-26",
+                "question_index": 2,
+                "prediction": "ERROR",
+                "error_type": "APIStatusError",
+                "error": "Error code: 400",
+            },
+            None,
+            {"error": "phrase generation failed", "retrieval": {}},
+            8,
+        )
+
+        self.assertEqual(case["answer_error_type"], "APIStatusError")
+        self.assertEqual(case["answer_error"], "Error code: 400")
+        self.assertEqual(case["retrieval_error"], "phrase generation failed")
 
 
 if __name__ == "__main__":

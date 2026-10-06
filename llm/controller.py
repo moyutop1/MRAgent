@@ -87,8 +87,6 @@ class LLM:
                 if status in (429, 500, 502, 503, 504) and attempt < max_retries:
                     time.sleep(backoff ** attempt)
                     continue
-                elif status == 400:
-                    return "400"
                 last_exc = e
                 break
 

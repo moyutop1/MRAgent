@@ -15,11 +15,8 @@ def compact_eaes_retrieval(retrieval):
     """Serialize one non-duplicated retrieval-only diagnostic payload."""
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
-        "rewrite_content", "max_phrase_similarity", "rrf_score",
-        "rrf_score_ratio", "rrf_rank", "question_relevance",
-        "local_relevance_score", "weighted_rrf_sum",
-        "best_view_contribution", "normalized_consensus",
-        "normalized_best_view", "fused_score", "fused_score_ratio",
+        "rewrite_content", "max_phrase_similarity", "question_relevance",
+        "joint_relevance", "fused_score", "fused_score_ratio",
         "fused_rank", "normalized_mass", "cumulative_mass",
         "mass_target", "inside_fused_safety_cap",
         "inside_adaptive_prefix", "adaptive_k",
@@ -30,11 +27,8 @@ def compact_eaes_retrieval(retrieval):
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",
-        "rrf_score", "rrf_score_ratio", "rrf_rank",
         "question_relevance", "inside_adaptive_prefix", "adaptive_k",
-        "local_relevance_score", "weighted_rrf_sum",
-        "best_view_contribution", "normalized_consensus",
-        "normalized_best_view", "fused_score", "fused_score_ratio",
+        "joint_relevance", "fused_score", "fused_score_ratio",
         "fused_rank", "normalized_mass", "cumulative_mass",
         "mass_target", "inside_fused_safety_cap",
         "parent_probability", "child_support", "posterior_score",
@@ -162,8 +156,11 @@ class RetrievalMixin:
             (retrieval.get("query_plan") or {}).get("retrieval_phrases")
         )
         phrase_retrieval = retrieval.get("phrase_retrieval") or {}
-        selected_phrase_indices = self._as_list(
-            phrase_retrieval.get("selected_phrase_indices")
+        selected_child_phrase_indices = self._as_list(
+            phrase_retrieval.get("child_selected_phrase_indices")
+        )
+        selected_parent_phrase_indices = self._as_list(
+            phrase_retrieval.get("parent_selected_phrase_indices")
         )
         gold_origins = self._normalize_evidence_ids(gold_evidence)
 
@@ -199,7 +196,8 @@ class RetrievalMixin:
 
         node_scores = self.memory_controller.diagnose_eaes_nodes_against_phrases(
             phrases,
-            selected_phrase_indices,
+            selected_child_phrase_indices,
+            selected_parent_phrase_indices,
             question_emb=question_emb,
             child_memory_ids=self._unique_keep_order(requested_memory_ids),
             parent_ids=self._unique_keep_order(requested_parent_ids),
@@ -244,7 +242,8 @@ class RetrievalMixin:
 
         diagnostics = {
             "candidate_phrase_count": len(phrases),
-            "selected_phrase_indices": selected_phrase_indices,
+            "selected_child_phrase_indices": selected_child_phrase_indices,
+            "selected_parent_phrase_indices": selected_parent_phrase_indices,
             "child_phrase_top_k": getattr(
                 config, "EAES_PHRASE_INITIAL_TOP_K", 30
             ),
@@ -253,9 +252,6 @@ class RetrievalMixin:
             ),
             "question_relevance_weight": getattr(
                 config, "EAES_QUESTION_RELEVANCE_WEIGHT", 0.7
-            ),
-            "fusion_consensus_weight": getattr(
-                config, "EAES_FUSION_CONSENSUS_WEIGHT", 0.5
             ),
             "child_mass_target": getattr(
                 config, "EAES_CHILD_MASS_TARGET", 0.85
@@ -288,7 +284,7 @@ class RetrievalMixin:
                 elif memory_id in child_final:
                     drop_reason = "inside_final_child"
                 elif not any_top30:
-                    drop_reason = "outside_local_relevance_top30"
+                    drop_reason = "outside_joint_relevance_top30"
                 elif not selected_top30:
                     drop_reason = "retrieved_only_by_unselected_phrase"
                 elif memory_id not in child_adaptive:
@@ -313,21 +309,6 @@ class RetrievalMixin:
                     "phrase_scores": phrase_scores,
                     "inside_all_view_probe": memory_id in child_probe,
                     "inside_selected_view_union": memory_id in child_selected,
-                    "rrf_score": fused.get("rrf_score", 0.0),
-                    "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
-                    "rrf_rank": fused.get("rrf_rank"),
-                    "weighted_rrf_sum": fused.get(
-                        "weighted_rrf_sum", 0.0
-                    ),
-                    "best_view_contribution": fused.get(
-                        "best_view_contribution", 0.0
-                    ),
-                    "normalized_consensus": fused.get(
-                        "normalized_consensus", 0.0
-                    ),
-                    "normalized_best_view": fused.get(
-                        "normalized_best_view", 0.0
-                    ),
                     "fused_score": fused.get("fused_score", 0.0),
                     "fused_score_ratio": fused.get(
                         "fused_score_ratio", 0.0
@@ -373,7 +354,7 @@ class RetrievalMixin:
                 elif parent_id in parent_final:
                     drop_reason = "inside_final_parent"
                 elif not any_top10:
-                    drop_reason = "outside_local_relevance_parent_top10"
+                    drop_reason = "outside_joint_relevance_parent_top10"
                 elif not selected_top10:
                     drop_reason = "retrieved_only_by_unselected_phrase"
                 else:
@@ -395,21 +376,6 @@ class RetrievalMixin:
                     "phrase_scores": phrase_scores,
                     "inside_all_view_probe": parent_id in parent_probe,
                     "inside_selected_view_union": parent_id in parent_selected,
-                    "rrf_score": fused.get("rrf_score", 0.0),
-                    "rrf_score_ratio": fused.get("rrf_score_ratio", 0.0),
-                    "rrf_rank": fused.get("rrf_rank"),
-                    "weighted_rrf_sum": fused.get(
-                        "weighted_rrf_sum", 0.0
-                    ),
-                    "best_view_contribution": fused.get(
-                        "best_view_contribution", 0.0
-                    ),
-                    "normalized_consensus": fused.get(
-                        "normalized_consensus", 0.0
-                    ),
-                    "normalized_best_view": fused.get(
-                        "normalized_best_view", 0.0
-                    ),
                     "fused_score": fused.get("fused_score", 0.0),
                     "fused_score_ratio": fused.get(
                         "fused_score_ratio", 0.0

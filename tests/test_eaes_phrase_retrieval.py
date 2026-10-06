@@ -10,6 +10,7 @@ dotenv_module.load_dotenv = lambda: None
 sys.modules.setdefault("dotenv", dotenv_module)
 
 from agent.eaes import EAESMixin
+from common import config
 from prompts.prompts import Prompts
 
 HAS_RETRIEVAL_RUNTIME = all(
@@ -63,7 +64,7 @@ class _QueuedLLM:
 
 
 class PhrasePlanTests(unittest.TestCase):
-    def test_normalizer_requires_six_and_rejects_duplicate_views(self):
+    def test_normalizer_requires_six_but_accepts_duplicate_views_by_default(self):
         self.assertIsNone(
             EAESMixin._normalize_eaes_retrieval_phrases([
                 "Caroline event", "event attendance", "joined event",
@@ -85,18 +86,18 @@ class PhrasePlanTests(unittest.TestCase):
                 ]
             )
         )
-        self.assertIsNone(
-            EAESMixin._normalize_eaes_retrieval_phrases(
-                [
-                    "Caroline support group",
-                    "Caroline support group",
-                    "career interest",
-                    "pottery class",
-                    "camping location",
-                    "reading collection",
-                    "ignored seventh phrase",
-                ]
-            )
+        duplicate_phrases = [
+            "Caroline support group",
+            "Caroline support group",
+            "career interest",
+            "pottery class",
+            "camping location",
+            "reading collection",
+            "ignored seventh phrase",
+        ]
+        self.assertEqual(
+            EAESMixin._normalize_eaes_retrieval_phrases(duplicate_phrases),
+            duplicate_phrases[:6],
         )
         phrases = [
             "Caroline event attendance",
@@ -110,6 +111,20 @@ class PhrasePlanTests(unittest.TestCase):
             EAESMixin._normalize_eaes_retrieval_phrases(phrases),
             phrases,
         )
+
+    def test_strict_phrase_validator_remains_available_for_ablation(self):
+        phrases = [
+            "Caroline support group",
+            "Caroline support group",
+            "Caroline career interest",
+            "Caroline pottery class",
+            "Caroline camping location",
+            "Caroline reading collection",
+        ]
+        with patch.object(config, "EAES_STRICT_PHRASE_VALIDATION", True):
+            self.assertIsNone(
+                EAESMixin._normalize_eaes_retrieval_phrases(phrases)
+            )
 
     def test_parse_repairs_wrong_count_or_overlong_phrase_once(self):
         mixin = _TestEAES()
@@ -249,67 +264,8 @@ class PhrasePlanTests(unittest.TestCase):
             self.assertNotIn(key, child_plan)
 
 
-def _ranking(phrase_index):
-    items = []
-    for rank in range(1, 16):
-        memory_id = "SHARED" if rank == 15 else f"P{phrase_index}_{rank}"
-        items.append({
-            "memory_id": memory_id,
-            "event_id": memory_id,
-            "origin": memory_id,
-            "tag": [memory_id, f"alternate {memory_id}"],
-            "rewrite_content": memory_id,
-            "phrase_index": phrase_index,
-            "phrase": f"phrase {phrase_index}",
-            "phrase_rank": rank,
-            "phrase_similarity": 1.0 / rank,
-        })
-    return items
-
-
 @unittest.skipUnless(HAS_RETRIEVAL_RUNTIME, "retrieval runtime dependencies are unavailable")
-class PhraseFusionTests(unittest.TestCase):
-    def test_fusion_keeps_dynamic_phrase_lists_and_uses_rrf_as_soft_feature(self):
-        rankings = [_ranking(index) for index in range(4)]
-
-        fused, diagnostics = MemoryController.fuse_eaes_phrase_rankings(
-            rankings,
-            rrf_k=10,
-        )
-
-        self.assertEqual(len(fused), 57)
-        self.assertIn("SHARED", diagnostics["prefilter_candidate_ids"])
-        by_id = {item["memory_id"]: item for item in fused}
-        self.assertGreater(
-            by_id["SHARED"]["rrf_score"],
-            by_id["P0_6"]["rrf_score"],
-        )
-        self.assertTrue(all("candidate_score" in item for item in fused))
-
-    def test_dynamic_phrase_topk_uses_top30_probability_mass(self):
-        sharp = [
-            {"memory_id": f"S{i}", "phrase_rank": i + 1,
-             "phrase_similarity": 1.0 if i == 0 else 0.0}
-            for i in range(30)
-        ]
-        flat = [
-            {"memory_id": f"F{i}", "phrase_rank": i + 1,
-             "phrase_similarity": 0.0}
-            for i in range(30)
-        ]
-
-        selected, diagnostics = (
-            MemoryController.select_eaes_dynamic_phrase_rankings(
-                [sharp, flat, sharp, flat]
-            )
-        )
-
-        self.assertEqual([len(items) for items in selected], [15, 24, 15, 24])
-        self.assertEqual(
-            [item["selected_k"] for item in diagnostics],
-            [15, 24, 15, 24],
-        )
-
+class PhraseRankingTests(unittest.TestCase):
     def test_ranker_uses_each_childs_maximum_tag_similarity(self):
         store = MemorySystem()
         for index, (tags, vector) in enumerate(
@@ -396,8 +352,7 @@ class PhraseRerankerTests(unittest.TestCase):
                     "Person profile.alpha", "Person profile.alpha topic",
                 ],
                 "rewrite_content": "Alpha memory",
-                "_rrf_score": 0.9,
-                "_rrf_rank": 1,
+                "_internal_score": 0.9,
                 "phrase": "hidden",
                 "phrase_rank": 1,
             },
@@ -408,8 +363,7 @@ class PhraseRerankerTests(unittest.TestCase):
                     "Person profile.beta", "Person profile.beta topic",
                 ],
                 "rewrite_content": "Beta memory",
-                "_rrf_score": 0.4,
-                "_rrf_rank": 2,
+                "_internal_score": 0.4,
             },
         ]
 
@@ -425,8 +379,7 @@ class PhraseRerankerTests(unittest.TestCase):
             {"memory_id", "origin", "tag", "rewrite_content"},
         )
         for item in result:
-            self.assertNotIn("_rrf_score", item)
-            self.assertNotIn("_rrf_rank", item)
+            self.assertNotIn("_internal_score", item)
 
 
 if __name__ == "__main__":

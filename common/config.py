@@ -39,14 +39,22 @@ parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("E
 parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Child-channel safety cap after relevance-aware fusion and cumulative-mass selection.")
 parser.add_argument("--eaes_phrase_count", type=int, default=int(os.getenv("EAES_PHRASE_COUNT", "6")), help="Number of candidate retrieval views generated per question.")
 parser.add_argument("--eaes_phrase_max_words", type=int, default=int(os.getenv("EAES_PHRASE_MAX_WORDS", "10")), help="Maximum whitespace-separated words allowed in one retrieval phrase.")
+parser.add_argument(
+    "--eaes_strict_phrase_validation",
+    action="store_true",
+    default=os.getenv("EAES_STRICT_PHRASE_VALIDATION", "false").lower()
+    in {"1", "true", "yes", "on"},
+    help=(
+        "Enable experimental duplicate, token-order, and entity/relation "
+        "checks for generated retrieval phrases. Disabled by default."
+    ),
+)
 parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Child candidates probed per phrase before view selection.")
 parser.add_argument("--eaes_parent_phrase_top_k", type=int, default=int(os.getenv("EAES_PARENT_PHRASE_TOP_K", "10")), help="Parent candidates probed per phrase before view selection.")
 parser.add_argument("--eaes_min_selected_views", type=int, default=int(os.getenv("EAES_MIN_SELECTED_VIEWS", "1")), help="Minimum retrieval phrases selected by marginal evidence gain.")
 parser.add_argument("--eaes_max_selected_views", type=int, default=int(os.getenv("EAES_MAX_SELECTED_VIEWS", "4")), help="Maximum retrieval phrases selected by marginal evidence gain.")
-parser.add_argument("--eaes_question_relevance_weight", type=float, default=float(os.getenv("EAES_QUESTION_RELEVANCE_WEIGHT", "0.7")), help="Question-node relevance weight beta in phrase support potential.")
-parser.add_argument("--eaes_child_gain_weight", type=float, default=float(os.getenv("EAES_CHILD_GAIN_WEIGHT", "0.7")), help="Child-channel weight when combining normalized marginal view gains.")
-parser.add_argument("--eaes_view_gain_threshold", type=float, default=float(os.getenv("EAES_VIEW_GAIN_THRESHOLD", "0.10")), help="Minimum normalized marginal gain for selecting an additional retrieval phrase.")
-parser.add_argument("--eaes_fusion_consensus_weight", type=float, default=float(os.getenv("EAES_FUSION_CONSENSUS_WEIGHT", "0.5")), help="Weight lambda assigned to multi-view consensus versus the best single-view contribution.")
+parser.add_argument("--eaes_question_relevance_weight", type=float, default=float(os.getenv("EAES_QUESTION_RELEVANCE_WEIGHT", "0.7")), help="Exponent beta in geometric question/phrase relevance gating.")
+parser.add_argument("--eaes_view_gain_threshold", type=float, default=float(os.getenv("EAES_VIEW_GAIN_THRESHOLD", "0.10")), help="Minimum normalized saturating marginal gain for selecting an additional retrieval phrase.")
 parser.add_argument("--eaes_child_mass_target", type=float, default=float(os.getenv("EAES_CHILD_MASS_TARGET", "0.85")), help="Cumulative fused-score mass retained in the Child channel.")
 parser.add_argument("--eaes_parent_mass_target", type=float, default=float(os.getenv("EAES_PARENT_MASS_TARGET", "0.85")), help="Cumulative fused-score mass retained in the Parent channel.")
 parser.add_argument("--eaes_child_adaptive_threshold", type=float, default=float(os.getenv("EAES_CHILD_ADAPTIVE_THRESHOLD", "0.35")), help="Deprecated compatibility option; cumulative score mass now controls Child depth.")
@@ -215,14 +223,13 @@ if EAES_RERANK_LIMIT <= 0 or EAES_RERANK_LIMIT > EAES_CANDIDATE_LIMIT:
     raise ValueError("--eaes_rerank_limit must be positive and no larger than --eaes_prefilter_limit.")
 EAES_PHRASE_COUNT = args.eaes_phrase_count
 EAES_PHRASE_MAX_WORDS = args.eaes_phrase_max_words
+EAES_STRICT_PHRASE_VALIDATION = args.eaes_strict_phrase_validation
 EAES_PHRASE_INITIAL_TOP_K = args.eaes_phrase_initial_top_k
 EAES_PARENT_PHRASE_TOP_K = args.eaes_parent_phrase_top_k
 EAES_MIN_SELECTED_VIEWS = args.eaes_min_selected_views
 EAES_MAX_SELECTED_VIEWS = args.eaes_max_selected_views
 EAES_QUESTION_RELEVANCE_WEIGHT = args.eaes_question_relevance_weight
-EAES_CHILD_GAIN_WEIGHT = args.eaes_child_gain_weight
 EAES_VIEW_GAIN_THRESHOLD = args.eaes_view_gain_threshold
-EAES_FUSION_CONSENSUS_WEIGHT = args.eaes_fusion_consensus_weight
 EAES_CHILD_MASS_TARGET = args.eaes_child_mass_target
 EAES_PARENT_MASS_TARGET = args.eaes_parent_mass_target
 EAES_CHILD_ADAPTIVE_THRESHOLD = args.eaes_child_adaptive_threshold
@@ -246,14 +253,10 @@ if not 1 <= EAES_MIN_SELECTED_VIEWS <= EAES_MAX_SELECTED_VIEWS <= EAES_PHRASE_CO
     raise ValueError(
         "EAES selected-view limits must satisfy 1 <= min <= max <= phrase_count."
     )
-if not 0.0 <= EAES_QUESTION_RELEVANCE_WEIGHT <= 1.0:
-    raise ValueError("--eaes_question_relevance_weight must be between 0 and 1.")
-if not 0.0 <= EAES_CHILD_GAIN_WEIGHT <= 1.0:
-    raise ValueError("--eaes_child_gain_weight must be between 0 and 1.")
+if not 0.0 < EAES_QUESTION_RELEVANCE_WEIGHT < 1.0:
+    raise ValueError("--eaes_question_relevance_weight must be strictly between 0 and 1.")
 if EAES_VIEW_GAIN_THRESHOLD < 0.0:
     raise ValueError("--eaes_view_gain_threshold must be non-negative.")
-if not 0.0 <= EAES_FUSION_CONSENSUS_WEIGHT <= 1.0:
-    raise ValueError("--eaes_fusion_consensus_weight must be between 0 and 1.")
 if not 0.0 < EAES_CHILD_MASS_TARGET <= 1.0:
     raise ValueError("--eaes_child_mass_target must be in (0, 1].")
 if not 0.0 < EAES_PARENT_MASS_TARGET <= 1.0:

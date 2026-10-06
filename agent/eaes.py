@@ -295,6 +295,9 @@ class EAESMixin:
                 f"valid phrases; got {len(values)}"
             )
         phrases = []
+        strict_validation = bool(
+            getattr(config, "EAES_STRICT_PHRASE_VALIDATION", False)
+        )
         normalized_phrases = set()
         content_signatures = set()
         entity_tokens = {
@@ -315,6 +318,9 @@ class EAESMixin:
                     f"retrieval_phrases[{index}] must contain no more than "
                     f"{max_words} whitespace-separated words: {value!r}"
                 )
+            if not strict_validation:
+                phrases.append(phrase)
+                continue
             normalized = re.sub(r"\s+", " ", phrase).casefold()
             if normalized in normalized_phrases:
                 return None, (
@@ -1087,11 +1093,24 @@ class EAESMixin:
 
     @staticmethod
     def _eaes_reader_child_memory(candidate):
-        """Expose only answer content plus the ID required for support citation."""
+        """Expose answer content and compact within-child retrieval priority."""
+        retrieval_score = candidate.get("fused_score_ratio")
+        if retrieval_score is None:
+            retrieval_score = candidate.get("fused_score")
+        if retrieval_score is None:
+            retrieval_score = candidate.get("candidate_score")
+        if retrieval_score is None:
+            retrieval_score = candidate.get("score")
         return {
             "memory_id": candidate.get("memory_id"),
             "conversation_time": candidate.get("conversation_time"),
             "rewrite_content": candidate.get("rewrite_content"),
+            "retrieval_score": retrieval_score,
+            "rerank_rank": (
+                candidate.get("rerank_rank")
+                if candidate.get("rerank_rank") is not None
+                else candidate.get("rank")
+            ),
         }
 
     def _eaes_reader_evidence_package(self, package):
@@ -1366,8 +1385,15 @@ class EAESMixin:
                 "candidate_phrase_k": len(
                     query_plan.get("retrieval_phrases") or []
                 ),
-                "selected_phrase_k": len(
-                    phrase_retrieval.get("selected_phrase_indices") or []
+                "selected_child_phrase_k": len(
+                    phrase_retrieval.get(
+                        "child_selected_phrase_indices"
+                    ) or []
+                ),
+                "selected_parent_phrase_k": len(
+                    phrase_retrieval.get(
+                        "parent_selected_phrase_indices"
+                    ) or []
                 ),
                 "child_probe_k": len(child_probe),
                 "parent_probe_k": len(parent_probe),

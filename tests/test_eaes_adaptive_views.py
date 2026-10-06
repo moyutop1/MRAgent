@@ -56,7 +56,7 @@ def _item(node_id, support, rank=1, local_relevance=0.77):
         "phrase_similarity": 0.8,
         "phrase_fidelity": 0.9,
         "question_relevance": 0.7,
-        "local_relevance_score": local_relevance,
+        "joint_relevance": local_relevance,
         "support_potential": support,
         "phrase": node_id,
         "phrase_index": 0,
@@ -64,13 +64,35 @@ def _item(node_id, support, rank=1, local_relevance=0.77):
 
 
 class AdaptiveViewTests(unittest.TestCase):
+    def test_geometric_relevance_requires_both_question_and_phrase_support(self):
+        self.assertAlmostEqual(
+            MemoryController._eaes_joint_relevance(0.8, 0.6, 0.7),
+            0.8 ** 0.7 * 0.6 ** 0.3,
+        )
+        self.assertEqual(
+            MemoryController._eaes_joint_relevance(0.8, 0.0, 0.7),
+            0.0,
+        )
+
+    def test_phrase_node_contribution_is_bounded_and_rank_discounted(self):
+        top = MemoryController._eaes_phrase_node_contribution(
+            0.9, 0.8, 1, 10.0
+        )
+        tail = MemoryController._eaes_phrase_node_contribution(
+            0.9, 0.8, 30, 10.0
+        )
+
+        self.assertAlmostEqual(top, 0.72)
+        self.assertGreater(top, tail)
+        self.assertGreaterEqual(tail, 0.0)
+
     def test_meg_selects_complementary_view_and_stops_on_low_gain(self):
         controller = MemoryController(_Store())
         phrases = [f"view {index}" for index in range(6)]
         child_rankings = [
-            [_item("A", 0.10), _item("B", 0.05, 2)],
-            [_item("A", 0.09), _item("B", 0.04, 2)],
-            [_item("C", 0.08)],
+            [_item("A", 0.90), _item("B", 0.80, 2)],
+            [_item("A", 0.85), _item("B", 0.75, 2)],
+            [_item("C", 0.40)],
             [_item("D", 0.001)],
             [],
             [],
@@ -82,25 +104,47 @@ class AdaptiveViewTests(unittest.TestCase):
         with (
             patch.object(config, "EAES_MIN_SELECTED_VIEWS", 1),
             patch.object(config, "EAES_MAX_SELECTED_VIEWS", 4),
-            patch.object(config, "EAES_VIEW_GAIN_THRESHOLD", 0.10),
-            patch.object(config, "EAES_CHILD_GAIN_WEIGHT", 0.7),
+            patch.object(config, "EAES_VIEW_GAIN_THRESHOLD", 0.15),
         ):
-            selected, diagnostics = controller.select_eaes_views_by_meg(
+            selection = controller.select_eaes_views_by_meg(
                 phrases,
                 [0.9] * 6,
                 child_rankings,
                 [[] for _ in phrases],
             )
 
-        self.assertEqual(selected, [0, 2])
         self.assertEqual(
-            diagnostics["phrases"][1]["decision"],
-            "redundant_with_selected_views",
+            selection["child_selected_phrase_indices"], [0, 2]
         )
         self.assertEqual(
-            diagnostics["selection_history"][-1]["stop_reason"],
+            selection["parent_selected_phrase_indices"], []
+        )
+        self.assertEqual(
+            selection["child"]["selection_history"][-1]["stop_reason"],
             "below_marginal_gain_threshold",
         )
+
+    def test_parent_and_child_select_phrase_views_independently(self):
+        controller = MemoryController(_Store())
+        phrases = ["child view", "parent view"]
+        child_rankings = [[_item("C", 0.9)], [_item("C", 0.1)]]
+        parent_rankings = [
+            [{**_item("unused", 0.1), "parent_id": "P"}],
+            [{**_item("unused", 0.9), "parent_id": "P"}],
+        ]
+        with (
+            patch.object(config, "EAES_MIN_SELECTED_VIEWS", 1),
+            patch.object(config, "EAES_MAX_SELECTED_VIEWS", 1),
+        ):
+            selection = controller.select_eaes_views_by_meg(
+                phrases,
+                [0.9, 0.9],
+                child_rankings,
+                parent_rankings,
+            )
+
+        self.assertEqual(selection["child_selected_phrase_indices"], [0])
+        self.assertEqual(selection["parent_selected_phrase_indices"], [1])
 
     def test_fused_score_mass_selects_a_bounded_prefix(self):
         rankings = [
@@ -108,7 +152,7 @@ class AdaptiveViewTests(unittest.TestCase):
             [_item("A", 0.09, 2), _item("C", 0.07, 6)],
         ]
         fused = MemoryController.fuse_eaes_channel_rankings(
-            rankings, [0, 1], "memory_id", rrf_k=10.0
+            rankings, [0, 1], "memory_id"
         )
         retained, annotated = MemoryController.select_eaes_adaptive_prefix(
             fused, max_k=2, mass_target=0.75, min_k=1
@@ -144,24 +188,23 @@ class AdaptiveViewTests(unittest.TestCase):
 
     def test_fusion_preserves_a_strong_single_view_candidate(self):
         rankings = [
-            [_item("single", 0.1, 1, 1.0), _item("repeat", 0.1, 8, 0.3)],
+            [_item("single", 0.8, 1, 1.0), _item("repeat", 0.1, 8, 0.3)],
             [_item("repeat", 0.1, 8, 0.3)],
             [_item("repeat", 0.1, 8, 0.3)],
         ]
 
         fused = MemoryController.fuse_eaes_channel_rankings(
-            rankings, [0, 1, 2], "memory_id", rrf_k=10.0,
-            consensus_weight=0.5,
+            rankings, [0, 1, 2], "memory_id"
         )
 
         self.assertEqual(fused[0]["memory_id"], "single")
         single = fused[0]
-        self.assertEqual(single["normalized_best_view"], 1.0)
+        self.assertAlmostEqual(single["fused_score"], 0.8)
         self.assertGreater(single["fused_score"], fused[1]["fused_score"])
 
     def test_parent_and_child_fusion_do_not_deduplicate_each_other(self):
         child = MemoryController.fuse_eaes_channel_rankings(
-            [[_item("shared", 0.1)]], [0], "memory_id", rrf_k=10.0
+            [[_item("shared", 0.1)]], [0], "memory_id"
         )
         parent_item = {
             "parent_id": "shared",
@@ -174,7 +217,7 @@ class AdaptiveViewTests(unittest.TestCase):
             "phrase_index": 0,
         }
         parent = MemoryController.fuse_eaes_channel_rankings(
-            [[parent_item]], [0], "parent_id", rrf_k=10.0
+            [[parent_item]], [0], "parent_id"
         )
 
         self.assertEqual(len(child), 1)
@@ -227,7 +270,7 @@ class _GoldController:
             "phrase_selected": index == 0,
             "support_potential": 0.05 if index == 0 else 0.0,
             "diagnostic_support_potential": 0.05 - index * 0.005,
-            "rrf_contribution": 1 / 11 if index == 0 else 0.0,
+            "rank_discount": 11 / (10 + index + 1),
         } for index in range(6)]
         parent_scores = [{
             **{
@@ -264,16 +307,9 @@ class _GoldAgent(RetrievalMixin):
 
 
 class GoldDiagnosticTests(unittest.TestCase):
-    def test_gold_child_exposes_question_rrf_prefix_and_phrase_parts(self):
+    def test_gold_child_exposes_saturating_fusion_and_phrase_parts(self):
         child = {
             "memory_id": "M_1",
-            "rrf_score": 1 / 11,
-            "rrf_score_ratio": 1.0,
-            "rrf_rank": 1,
-            "weighted_rrf_sum": 1 / 11,
-            "best_view_contribution": 1 / 11,
-            "normalized_consensus": 1.0,
-            "normalized_best_view": 1.0,
             "fused_score": 1.0,
             "fused_score_ratio": 1.0,
             "fused_rank": 1,
@@ -285,13 +321,6 @@ class GoldDiagnosticTests(unittest.TestCase):
         }
         parent = {
             "parent_id": "P_1",
-            "rrf_score": 1 / 11,
-            "rrf_score_ratio": 1.0,
-            "rrf_rank": 1,
-            "weighted_rrf_sum": 1 / 11,
-            "best_view_contribution": 1 / 11,
-            "normalized_consensus": 1.0,
-            "normalized_best_view": 1.0,
             "fused_score": 1.0,
             "fused_score_ratio": 1.0,
             "fused_rank": 1,
@@ -305,7 +334,10 @@ class GoldDiagnosticTests(unittest.TestCase):
             "query_plan": {
                 "retrieval_phrases": [f"view {index}" for index in range(6)]
             },
-            "phrase_retrieval": {"selected_phrase_indices": [0]},
+            "phrase_retrieval": {
+                "child_selected_phrase_indices": [0],
+                "parent_selected_phrase_indices": [0],
+            },
             "child_rankings": [],
             "parent_rankings": [],
             "child_probe_candidates": [child],
@@ -325,7 +357,6 @@ class GoldDiagnosticTests(unittest.TestCase):
         child_row = gold["child_nodes"][0]
 
         self.assertEqual(child_row["question_relevance"], 0.77)
-        self.assertEqual(child_row["rrf_score_ratio"], 1.0)
         self.assertEqual(child_row["fused_score"], 1.0)
         self.assertEqual(child_row["cumulative_mass"], 1.0)
         self.assertTrue(child_row["inside_fused_safety_cap"])

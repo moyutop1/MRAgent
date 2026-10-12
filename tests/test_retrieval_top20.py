@@ -509,5 +509,41 @@ class RetrievalTopTwentyTests(unittest.TestCase):
         self.assertIn("2-99", compact["final_parent_ids"])
 
 
+class LocalSelectorRetrievalIntegrationTests(unittest.TestCase):
+    def test_retrieval_only_selects_after_rollback_and_retains_both_stages(self):
+        agent = _RetrievalAgent()
+        agent.retained_rollback_child = {
+            "memory_id": "M_ROLLBACK", "event_id": "D9:1-1", "origin": "D9:1",
+            "rewrite_content": "A complementary fact from rollback.",
+        }
+        trace = {"enabled": True, "backend": "local", "stop_reason": "minimum_gain"}
+
+        def selection(_question, _plan, children, parents):
+            self.assertIn("M_ROLLBACK", [node["memory_id"] for node in children])
+            return {"answer_items": [{"evidence": [children[-1]]}],
+                    "selected_parent_memories": [], "selector_diagnostics": trace}
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", True),
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
+            patch.object(config, "EVIDENCE_SELECTOR_BACKEND", "local"),
+            patch.object(agent, "select_eaes_evidence", side_effect=selection) as selector,
+        ):
+            result = agent.retrieve_question_evidence("Question")
+        selector.assert_called_once()
+        self.assertEqual(agent.reader_calls, 0)
+        self.assertEqual(result["stage_origin_groups"]["pre_selector"],
+                         result["stage_origin_groups"]["final_combined"])
+        self.assertEqual(result["stage_origin_groups"]["post_selector"], [["D9:1"]])
+        self.assertEqual(result["counts"]["post_selector_k"], 1)
+        self.assertGreater(result["counts"]["pre_selector_k"], 1)
+        compact = compact_eaes_retrieval(result)
+        self.assertEqual(compact["selector"], trace)
+        self.assertEqual(compact["selector_selected_children"][0]["memory_id"], "M_ROLLBACK")
+        self.assertEqual(compact["selector_selected_parents"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,17 +22,29 @@ def parse_args():
     )
     p.add_argument("--allfile", action="store_true", help="Aggregate all matching samples")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
+    p.add_argument("--evidence_selector_backend", choices=["llm", "local"], default="llm")
+    p.add_argument("--disable_evidence_selector", action="store_true")
+    p.add_argument("--max_questions", type=int, default=None)
+    p.add_argument("--exclude_categories", default="")
     return p.parse_args()
 
 
 def load_rows(args):
     if args.semantic_score and not args.eaes:
         raise ValueError("--semantic_score requires --eaes.")
+    max_questions = getattr(args, "max_questions", None)
+    excluded = sorted({c.strip() for c in getattr(args, "exclude_categories", "").split(",") if c.strip()})
+    disabled = getattr(args, "disable_evidence_selector", False)
+    local = getattr(args, "evidence_selector_backend", "llm") == "local" and not disabled
     suffix = (
         f"{args.model}_{args.file}"
+        f"{'_q' + str(max_questions) if max_questions is not None else ''}"
+        f"{'_xcat' + '-'.join(excluded) if excluded else ''}"
         f"{'_eaes' if args.eaes else ''}"
         f"{'_semantic' if args.semantic_score else ''}"
         f"{'_hierarchy' if args.semantic_hierarchy else ''}"
+        f"{'_no_selector' if disabled else ''}"
+        f"{'_local_selector' if local else ''}"
         "_retrieval"
     )
     root = Path(f"result/{args.data}")
@@ -133,6 +145,10 @@ def main():
         "final_child": "final_child_k",
         "selected_parent": "final_parent_k",
         "final_combined": "final_total_k",
+        "pre_selector": "pre_selector_k",
+        "post_selector_child": "post_selector_child_k",
+        "post_selector_parent": "post_selector_parent_k",
+        "post_selector": "post_selector_k",
     }
     if any("metrics" in row for row in rows):
         for stage, count_field in stages.items():

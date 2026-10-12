@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import argparse
 from dotenv import load_dotenv
@@ -84,6 +85,16 @@ parser.add_argument(
     help="Bypass the EAES evidence selector and pass all retrieved candidates directly to the final answer reader.",
 )
 parser.add_argument("--retrieval_only", action="store_true", help="Only save retrieval evidence and skip the final answer reader. Enabled rollback decisions and supplemental retrievals still run.")
+parser.add_argument("--evidence_selector_backend", choices=["llm", "local"], default="llm", help="Legacy LLM selector or offline conditional marginal-value selector.")
+parser.add_argument("--selector_model_path", default=os.getenv("SELECTOR_MODEL_PATH", ""), help="Existing local Qwen3-Reranker directory; never downloaded automatically.")
+parser.add_argument("--selector_device", default="cuda", help="Local selector device, e.g. cuda:0 or cpu.")
+parser.add_argument("--selector_batch_size", type=int, default=2)
+parser.add_argument("--selector_max_length", type=int, default=8192, help="Full scorer input limit; overlength inputs are rejected, not truncated.")
+parser.add_argument("--selector_token_budget", type=int, default=2048, help="Reader evidence budget measured with the local selector tokenizer.")
+parser.add_argument("--selector_redundancy_weight", type=float, default=0.2)
+parser.add_argument("--selector_cost_weight", type=float, default=0.1)
+parser.add_argument("--selector_min_gain", type=float, default=0.1, help="Stop when the best net gain is at most this threshold.")
+parser.add_argument("--selector_similarity_threshold", type=float, default=0.85, help="Only cosine similarity above this threshold incurs soft redundancy cost.")
 
 # parse_known_args (not parse_args) so importing this module under a foreign argv
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
@@ -209,6 +220,23 @@ SEMANTIC_HIERARCHY = args.semantic_hierarchy
 SEMANTIC_MATCH_WEIGHT = 0.1
 RETRIEVAL_ONLY = args.retrieval_only
 DISABLE_EVIDENCE_SELECTOR = args.disable_evidence_selector
+EVIDENCE_SELECTOR_BACKEND = args.evidence_selector_backend
+SELECTOR_MODEL_PATH = args.selector_model_path
+SELECTOR_DEVICE = args.selector_device
+SELECTOR_BATCH_SIZE = args.selector_batch_size
+SELECTOR_MAX_LENGTH = args.selector_max_length
+SELECTOR_TOKEN_BUDGET = args.selector_token_budget
+SELECTOR_REDUNDANCY_WEIGHT = args.selector_redundancy_weight
+SELECTOR_COST_WEIGHT = args.selector_cost_weight
+SELECTOR_MIN_GAIN = args.selector_min_gain
+SELECTOR_SIMILARITY_THRESHOLD = args.selector_similarity_threshold
+if min(SELECTOR_BATCH_SIZE, SELECTOR_MAX_LENGTH, SELECTOR_TOKEN_BUDGET) <= 0:
+    raise ValueError("Selector batch size, input length and evidence budget must be positive.")
+if any(not math.isfinite(value) or value < 0 for value in (
+        SELECTOR_REDUNDANCY_WEIGHT, SELECTOR_COST_WEIGHT, SELECTOR_MIN_GAIN)):
+    raise ValueError("Selector weights and minimum gain must be finite and nonnegative.")
+if not 0 <= SELECTOR_SIMILARITY_THRESHOLD < 1:
+    raise ValueError("--selector_similarity_threshold must be in [0, 1).")
 if DISABLE_EVIDENCE_SELECTOR and not EAES_MODE:
     raise ValueError("--disable_evidence_selector requires --eaes.")
 if EAES_SEMANTIC_SCORE and not EAES_MODE:
@@ -355,6 +383,7 @@ ADDITIONAL_RE = (
     f"{'_semantic' if EAES_SEMANTIC_SCORE else ''}"
     f"{HIERARCHY_SUFFIX}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
+    f"{'_local_selector' if EVIDENCE_SELECTOR_BACKEND == 'local' and not DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"

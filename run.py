@@ -136,8 +136,9 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
                 lm_current_date = qdr.split(" ")[0].replace("/", "-")  # "2023-04-01"
         try:
             question_emb = question_embeddings[i - 1]
-            results, evidence_support = q_agent.answer_question(
-                question, category, question_emb, override_question_time, lm_current_date)
+            results, evidence_support, selector_details = q_agent.answer_question(
+                question, category, question_emb, override_question_time, lm_current_date,
+                return_details=True)
         except Exception as e:
             logger.error(f"question{i} failed: {e}", exc_info=True)
             return i, {
@@ -155,6 +156,8 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
             "prediction_context": evidence_support, "sample": sample_id,
             "question_index": i,
         }
+        if selector_details is not None:
+            evaluation["selector"] = selector_details
         return i, evaluation
 
     # multithreaded execution: store results in a dict by index i, then read in order when writing
@@ -226,7 +229,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 )
                 raw_stage_metrics[stage] = raw_metrics
                 stage_metrics[stage] = _metric_scalars(raw_metrics)
-            final_metrics = raw_stage_metrics.get("final_combined") or (
+            final_metrics = raw_stage_metrics.get("post_selector") or raw_stage_metrics.get("final_combined") or (
                 _retrieval_metrics(
                     qa.get("evidence"),
                     retrieval.get("retrieved_origins"),
@@ -273,6 +276,10 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         "final_child": "final_child_k",
         "selected_parent": "final_parent_k",
         "final_combined": "final_total_k",
+        "pre_selector": "pre_selector_k",
+        "post_selector_child": "post_selector_child_k",
+        "post_selector_parent": "post_selector_parent_k",
+        "post_selector": "post_selector_k",
     }
     for stage, count_field in count_fields.items():
         valid_rows = [

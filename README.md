@@ -257,6 +257,8 @@ normalized gold evidence do not enter this metric.
 
 ## 7. Notes
 
+- Optional local marginal-value selector: see [setup, diagnostics and validation limits](docs/local_selector.md). Enable with `--evidence_selector_backend local --selector_model_path /path/to/Qwen3-Reranker-4B`. The default remains the legacy `llm` selector; `--disable_evidence_selector` bypasses both. The local backend jointly selects children and parents, re-scores each candidate conditioned on the original question and current selection, and enforces a reader-evidence token budget. No memory/query-plan schema changes or model downloads are performed. Real model loading/inference has **not** been verified on the development machine.
+
 - The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.

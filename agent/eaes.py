@@ -1,6 +1,8 @@
 ﻿import json
 import logging
+import math
 import re
+import time
 
 from common import config
 from memory.system import EAESMemoryNote, EAESParentNode
@@ -1138,7 +1140,7 @@ class EAESMixin:
             "rank": candidate.get("rank"),
         }
 
-    def _eaes_prediction_context(self, reader_input, candidates, limit=20):
+    def _eaes_prediction_context(self, reader_input, candidates, limit=None):
         """Return one provenance entry per unique memory node shown to the reader."""
         visible_child_ids = []
 
@@ -1158,25 +1160,15 @@ class EAESMixin:
             if isinstance(evidence, dict):
                 add_child(evidence.get("memory_id"))
 
-        # Preserve reranker order even when the selector emitted answer items
-        # in a different grouping order.
-        visible_set = set(visible_child_ids)
-        ordered_child_ids = [
-            candidate.get("memory_id")
-            for candidate in candidates or []
-            if candidate.get("memory_id") in visible_set
-        ]
-        ordered_child_ids.extend(
-            memory_id for memory_id in visible_child_ids
-            if memory_id not in ordered_child_ids
-        )
         parent_ids = [
             parent.get("parent_id")
             for parent in self._as_list(
                 (reader_input or {}).get("parent_memories"))
             if isinstance(parent, dict) and parent.get("parent_id")
         ]
-        memory_ids = (ordered_child_ids + parent_ids)[:limit]
+        # Follow actual reader order; do not silently drop nodes after the 20th.
+        memory_ids = ([("child", mid) for mid in visible_child_ids]
+                      + [("parent", pid) for pid in dict.fromkeys(parent_ids)])[:limit]
         candidate_by_id = {
             candidate.get("memory_id"): candidate
             for candidate in candidates or []
@@ -1184,8 +1176,8 @@ class EAESMixin:
         }
 
         context = []
-        for memory_id in memory_ids:
-            candidate = candidate_by_id.get(memory_id)
+        for kind, memory_id in memory_ids:
+            candidate = candidate_by_id.get(memory_id) if kind == "child" else None
             origin = candidate.get("origin") if candidate else None
             if origin:
                 context.append(str(origin))
@@ -1200,7 +1192,160 @@ class EAESMixin:
             context.append(",".join(origins) if origins else str(memory_id))
         return context
 
-    def select_eaes_evidence(self, question, query_plan, candidates):
+    def select_eaes_evidence(self, question, query_plan, candidates, parent_candidates=None):
+        """Local backend selects child/parent nodes jointly; legacy backend unchanged."""
+        if config.EVIDENCE_SELECTOR_BACKEND == "local":
+            from llm.evidence_scorer import get_local_evidence_scorer
+
+            started = time.perf_counter()
+            scorer = get_local_evidence_scorer()
+            tokenizer = scorer.tokenizer
+            budget = config.SELECTOR_TOKEN_BUDGET
+            nodes, vectors, seen = [], {}, set()
+            for kind, items in (("child", candidates), ("parent", parent_candidates or [])):
+                for candidate in items:
+                    node_id = candidate.get("memory_id" if kind == "child" else "parent_id")
+                    key = (kind, node_id)
+                    if not node_id or key in seen:
+                        continue
+                    seen.add(key)
+                    payload = (self._eaes_reader_child_memory(candidate) if kind == "child"
+                               else self._eaes_reader_parent_memory(candidate))
+                    # Cost is measured where it is used, not through a token-count wrapper.
+                    unit = {"evidence": [payload]} if kind == "child" else payload
+                    cost = len(tokenizer.encode(json.dumps(unit, ensure_ascii=False),
+                                                add_special_tokens=False))
+                    nodes.append({"kind": kind, "id": node_id, "candidate": candidate,
+                                  "payload": payload, "token_cost": cost})
+                    # Reuse existing retrieval vectors. Missing/invalid vectors are
+                    # neutral, never trigger new embedding API calls or hard pruning.
+                    table = getattr(self.memory, "eaes_notes" if kind == "child"
+                                    else "eaes_parent_nodes", {})
+                    vector = getattr(table.get(node_id), "retrieval_embedding", None)
+                    if vector is not None:
+                        vector = [float(value) for value in vector]
+                        norm = math.sqrt(sum(value * value for value in vector))
+                        if norm > 0 and math.isfinite(norm):
+                            vectors[key] = [value / norm for value in vector]
+
+            def evidence_payload(items):
+                # Exactly the evidence projection sent to the reader (same JSON
+                # separators). Question/plan/system prompt are outside this budget.
+                return {
+                    "evidence_package": {"answer_items": [
+                        {"evidence": [node["payload"]]} for node in items
+                        if node["kind"] == "child"
+                    ]},
+                    "parent_memories": [node["payload"] for node in items
+                                        if node["kind"] == "parent"],
+                }
+
+            selected, remaining = [], list(nodes)
+            used = len(tokenizer.encode(json.dumps(evidence_payload([]), ensure_ascii=False),
+                                        add_special_tokens=False))
+            if used > budget:
+                raise ValueError("Selector token budget is smaller than the empty evidence container")
+            trace = {
+                "enabled": True, "backend": "local", "score_kind": "conditional_yes_no_proxy",
+                "model_path": config.SELECTOR_MODEL_PATH,
+                "tokenizer": "selector_tokenizer_proxy_for_reader", "token_budget": budget,
+                "container_tokens": used, "candidate_count": len(nodes),
+                "redundancy_weight": config.SELECTOR_REDUNDANCY_WEIGHT,
+                "cost_weight": config.SELECTOR_COST_WEIGHT,
+                "min_gain": config.SELECTOR_MIN_GAIN,
+                "similarity_threshold": config.SELECTOR_SIMILARITY_THRESHOLD,
+                "scorer_max_length": config.SELECTOR_MAX_LENGTH,
+                "scorer_batch_size": config.SELECTOR_BATCH_SIZE,
+                "candidates_without_vectors": [
+                    {"kind": node["kind"], "id": node["id"]} for node in nodes
+                    if (node["kind"], node["id"]) not in vectors
+                ],
+                "input_evidence_tokens": len(tokenizer.encode(
+                    json.dumps(evidence_payload(nodes), ensure_ascii=False), add_special_tokens=False)),
+                "steps": [], "scorer_calls": 0, "forward_batches": 0,
+            }
+            stop_reason = "candidates_exhausted"
+            while remaining:
+                step = {"round": len(selected) + 1, "tokens_before": used, "candidates": []}
+                feasible = []
+                for node in remaining:
+                    # Check the entire proposed evidence block: summing independent
+                    # token costs alone can undercount JSON/boundary tokens.
+                    proposed_tokens = len(tokenizer.encode(json.dumps(
+                        evidence_payload(selected + [node]), ensure_ascii=False),
+                        add_special_tokens=False))
+                    row = {"kind": node["kind"], "id": node["id"],
+                           "token_cost": node["token_cost"], "proposed_tokens": proposed_tokens}
+                    step["candidates"].append(row)
+                    if proposed_tokens > budget:
+                        row["rejected"] = "token_budget"
+                    else:
+                        feasible.append((node, row))
+                trace["steps"].append(step)
+                if not feasible:
+                    stop_reason = "token_budget"
+                    break
+                result = scorer.score_added_value(
+                    self._eaes_query_question(question),
+                    [node["payload"] for node in selected],
+                    [node["payload"] for node, _ in feasible],
+                )
+                trace["scorer_calls"] += 1
+                trace["forward_batches"] += result["forward_batches"]
+                if len(result["scores"]) != len(feasible) or len(result["input_tokens"]) != len(feasible):
+                    raise ValueError("Selector returned a different number of scores than candidates")
+                best = None
+                for (node, row), gain, input_tokens in zip(
+                        feasible, result["scores"], result["input_tokens"]):
+                    row["scorer_input_tokens"] = input_tokens
+                    if gain is None:
+                        row["rejected"] = "scorer_input_length"
+                        continue
+                    if not math.isfinite(gain) or not 0 <= gain <= 1:
+                        raise ValueError("Selector conditional score must be finite and in [0, 1]")
+                    vector = vectors.get((node["kind"], node["id"]))
+                    similarities = []
+                    if vector is not None:
+                        for other in selected:
+                            other_vector = vectors.get((other["kind"], other["id"]))
+                            if other_vector is not None and len(other_vector) == len(vector):
+                                similarities.append(sum(a * b for a, b in zip(vector, other_vector)))
+                    similarity = max(similarities, default=0.0)
+                    threshold = config.SELECTOR_SIMILARITY_THRESHOLD
+                    redundancy = max(0.0, (min(1.0, similarity) - threshold) / (1.0 - threshold))
+                    cost_penalty = config.SELECTOR_COST_WEIGHT * node["token_cost"] / budget
+                    utility = gain - config.SELECTOR_REDUNDANCY_WEIGHT * redundancy - cost_penalty
+                    row.update(gain=gain, redundancy=redundancy, cost_penalty=cost_penalty,
+                               utility=utility)
+                    if best is None or utility > best[1]["utility"]:
+                        best = (node, row)  # Stable ties follow upstream candidate order.
+                if best is None:
+                    stop_reason = "scorer_input_length"
+                    break
+                if best[1]["utility"] <= config.SELECTOR_MIN_GAIN:
+                    stop_reason = "minimum_gain"
+                    break
+                node, row = best
+                selected.append(node)
+                remaining.remove(node)
+                used = row["proposed_tokens"]
+                step.update(selected={"kind": node["kind"], "id": node["id"]}, tokens_after=used)
+                # Every surviving candidate is re-scored against the NEW full S.
+
+            trace.update(
+                stop_reason=stop_reason, selected_evidence_tokens=used,
+                selected_nodes=[{"kind": node["kind"], "id": node["id"],
+                                 "token_cost": node["token_cost"]} for node in selected],
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            return {
+                "answer_items": [{"evidence": [node["candidate"]]} for node in selected
+                                 if node["kind"] == "child"],
+                "selected_parent_memories": [node["candidate"] for node in selected
+                                             if node["kind"] == "parent"],
+                "selector_diagnostics": trace,
+            }
+
         selection_input = {
             "question": question,
             "query_plan": query_plan,
@@ -1239,8 +1384,12 @@ class EAESMixin:
             candidates,
             parent_candidates,
             lm_current_date=None,
+            return_details=False,
     ):
         """Generate one reader answer from an already selected child/parent set."""
+        local_selector = (not config.DISABLE_EVIDENCE_SELECTOR
+                          and config.EVIDENCE_SELECTOR_BACKEND == "local")
+        selector_details = None
         if config.DISABLE_EVIDENCE_SELECTOR:
             evidence_package = self._fallback_eaes_package(
                 candidates,
@@ -1249,6 +1398,12 @@ class EAESMixin:
                 role="reranked_candidate",
                 rationale="Reranked memory passed directly to the final reader.",
             )
+        elif local_selector:
+            evidence_package = self.select_eaes_evidence(
+                question, child_query_plan, candidates, parent_candidates
+            )
+            parent_candidates = evidence_package["selected_parent_memories"]
+            selector_details = evidence_package["selector_diagnostics"]
         else:
             evidence_package = self.select_eaes_evidence(
                 question, child_query_plan, candidates
@@ -1260,12 +1415,12 @@ class EAESMixin:
                 evidence_package
             ),
         }
-        if parent_candidates:
+        if parent_candidates or local_selector:
             final_input["parent_memories"] = [
                 self._eaes_reader_parent_memory(parent)
                 for parent in parent_candidates
             ]
-        if not config.DISABLE_EVIDENCE_SELECTOR:
+        if not config.DISABLE_EVIDENCE_SELECTOR and not local_selector:
             final_input["backup_candidates"] = [
                 self._eaes_reader_child_memory(candidate)
                 for candidate in candidates[:12]
@@ -1281,13 +1436,11 @@ class EAESMixin:
         )
         reader_input = final_input
         if not isinstance(answer_obj, dict):
-            evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
-            fallback_input = {
-                **final_input,
-                "evidence_package": self._eaes_reader_evidence_package(
-                    evidence_package
-                ),
-            }
+            # A reader format retry must not reintroduce rejected local evidence.
+            fallback_input = dict(final_input)
+            if not local_selector:
+                evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
+                fallback_input["evidence_package"] = self._eaes_reader_evidence_package(evidence_package)
             reader_input = fallback_input
             answer_obj = self.llm.chat_text(
                 messages=[
@@ -1300,18 +1453,20 @@ class EAESMixin:
                 context = self._eaes_prediction_context(
                     reader_input, candidates
                 )
-                return "no information available", context, None
+                result = ("no information available", context, None)
+                return result + (selector_details,) if return_details else result
         raw_answer = answer_obj.get("answer")
         answer = (
             raw_answer
             if raw_answer is not None
             else "no information available"
         )
-        return (
+        result = (
             answer,
             self._eaes_prediction_context(reader_input, candidates),
             raw_answer,
         )
+        return result + (selector_details,) if return_details else result
 
     def _retrieve_eaes_first_pass(self, question, question_emb=None):
         """Shared adaptive-view first pass for answering and retrieval-only."""
@@ -1413,7 +1568,7 @@ class EAESMixin:
 
     def answer_question_eaes(
             self, question, category=0, question_emb=None,
-            lm_current_date=None
+            lm_current_date=None, return_details=False
     ):
         """Answer through one reader; category is API-only evaluation metadata."""
         first_pass = self._retrieve_eaes_first_pass(question, question_emb)
@@ -1433,15 +1588,20 @@ class EAESMixin:
                 question_emb,
             )
         if not candidates and not parent_candidates and not rollback_enabled:
-            return "no information available", []
+            result = ("no information available", [])
+            return result + ({"enabled": not config.DISABLE_EVIDENCE_SELECTOR,
+                              "backend": config.EVIDENCE_SELECTOR_BACKEND,
+                              "stop_reason": "no_candidates"},) if return_details else result
 
-        answer, context, _ = self._read_eaes_candidates(
+        reader_result = self._read_eaes_candidates(
             question,
             child_query_plan,
             candidates,
             parent_candidates,
             lm_current_date=lm_current_date,
+            **({"return_details": True} if return_details else {}),
         )
-        return answer, context
+        answer, context = reader_result[:2]
+        return (answer, context, reader_result[3]) if return_details else (answer, context)
 
 

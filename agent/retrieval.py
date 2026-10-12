@@ -50,7 +50,7 @@ def compact_eaes_retrieval(retrieval):
             "post_second_rollback_sufficiency", "final"):
         if key in rollback:
             compact_rollback[key] = rollback[key]
-    return {
+    compact = {
         "mode": "eaes",
         "query_plan": query_plan,
         "routing": routing,
@@ -96,6 +96,17 @@ def compact_eaes_retrieval(retrieval):
         "counts": retrieval.get("counts") or {},
         "rollback_check": compact_rollback,
     }
+    if retrieval.get("selector") is not None:
+        compact["selector"] = retrieval["selector"]
+        compact["selector_selected_children"] = [
+            {key: item.get(key) for key in child_fields if key in item}
+            for item in retrieval.get("selector_selected_children") or []
+        ]
+        compact["selector_selected_parents"] = [
+            {key: item.get(key) for key in parent_fields if key in item}
+            for item in retrieval.get("selector_selected_parents") or []
+        ]
+    return compact
 
 
 class RetrievalMixin:
@@ -735,6 +746,37 @@ class RetrievalMixin:
                 "selected_parent": parent_origin_groups,
                 "final_combined": final_groups,
             }
+            # Preserve upstream metrics and gold diagnostics. Report the actual
+            # local-selector output as additional pre/post stages, without a reader call.
+            selector_details = None
+            selector_children, selector_parents = [], []
+            if (not config.DISABLE_EVIDENCE_SELECTOR
+                    and config.EVIDENCE_SELECTOR_BACKEND == "local"):
+                if candidates or parent_candidates:
+                    selection = self.select_eaes_evidence(
+                        question, self._eaes_child_query_plan(query_plan),
+                        candidates, parent_candidates,
+                    )
+                    selector_children = [node for item in selection["answer_items"]
+                                         for node in item["evidence"]]
+                    selector_parents = selection["selected_parent_memories"]
+                    selector_details = selection["selector_diagnostics"]
+                else:
+                    selector_details = {"enabled": True, "backend": "local",
+                                        "stop_reason": "no_candidates", "selected_nodes": []}
+                stage_origin_groups["pre_selector"] = final_groups
+                stage_origin_groups["post_selector_child"] = child_origin_groups(selector_children)
+                stage_origin_groups["post_selector_parent"] = parent_origin_groups_for(selector_parents)
+                stage_origin_groups["post_selector"] = (
+                    stage_origin_groups["post_selector_child"]
+                    + stage_origin_groups["post_selector_parent"]
+                )
+                first_pass["counts"].update(
+                    pre_selector_k=len(candidates) + len(parent_candidates),
+                    post_selector_child_k=len(selector_children),
+                    post_selector_parent_k=len(selector_parents),
+                    post_selector_k=len(selector_children) + len(selector_parents),
+                )
             stage_origins = {
                 key: origins_from_groups(groups)
                 for key, groups in stage_origin_groups.items()
@@ -790,6 +832,9 @@ class RetrievalMixin:
                 "initial_origin_groups": initial_groups,
                 "initial_k": len(initial_candidates),
                 "rollback_check": rollback_metadata,
+                "selector": selector_details,
+                "selector_selected_children": selector_children,
+                "selector_selected_parents": selector_parents,
             }
 
         raise RuntimeError(
@@ -797,10 +842,11 @@ class RetrievalMixin:
         )
 
 
-    def answer_question(self, question: str, category=0, question_emb=None, override_question_time=None, lm_current_date=None) -> Dict[str, Any]:
+    def answer_question(self, question: str, category=0, question_emb=None, override_question_time=None, lm_current_date=None, return_details=False):
         if not config.EAES_MODE:
             raise RuntimeError("Non-EAES keyword retrieval has been removed; run with --eaes.")
         return self.answer_question_eaes(
-            question, category, question_emb, lm_current_date
+            question, category, question_emb, lm_current_date,
+            **({"return_details": True} if return_details else {}),
         )
 

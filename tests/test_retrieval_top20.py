@@ -435,8 +435,9 @@ class RetrievalTopTwentyTests(unittest.TestCase):
             "child_probe_candidates", "selected_view_child_candidates",
             "parent_probe_candidates", "selected_view_parent_candidates",
             "final_child_candidates", "final_parent_candidates",
+            "parent_routed_children", "selector_input_child_ids",
             "final_child_ids", "final_parent_ids", "counts",
-            "rollback_check",
+            "rollback_check", "parent_child_routing",
         })
         self.assertNotIn("retrieved_origins", compact)
         self.assertNotIn("prefilter_candidates", compact)
@@ -543,6 +544,79 @@ class LocalSelectorRetrievalIntegrationTests(unittest.TestCase):
         self.assertEqual(compact["selector"], trace)
         self.assertEqual(compact["selector_selected_children"][0]["memory_id"], "M_ROLLBACK")
         self.assertEqual(compact["selector_selected_parents"], [])
+
+    def test_parent_route_augments_selector_pool_after_direct_retrieval(self):
+        agent = _RetrievalAgent()
+        routed = {
+            "memory_id": "M_PARENT_ROUTE",
+            "event_id": "D7:7-1",
+            "origin": "D7:7",
+            "parent_id": "1-1",
+            "rewrite_content": "The missing answer-bearing child.",
+            "retrieval_source": "parent_routed_child",
+            "routed_parent_id": "1-1",
+            "parent_route_score": 0.8,
+            "parent_route_rank": 1,
+        }
+
+        def route(parents, **kwargs):
+            self.assertTrue(parents)
+            self.assertIn("M_1", kwargs["exclude_memory_ids"])
+            return [routed], {
+                "enabled": True,
+                "route_limit": kwargs["limit"],
+                "source_parent_ids": ["1-1"],
+                "selected_child_ids": ["M_PARENT_ROUTE"],
+                "selected_child_k": 1,
+            }
+
+        def selection(_question, _plan, children, _parents):
+            self.assertEqual(children[-1]["memory_id"], "M_PARENT_ROUTE")
+            return {
+                "answer_items": [{"evidence": [children[-1]]}],
+                "selected_parent_memories": [],
+                "selector_diagnostics": {
+                    "enabled": True,
+                    "backend": "local",
+                    "stop_reason": "minimum_gain",
+                },
+            }
+
+        with (
+            patch.object(config, "EAES_MODE", True),
+            patch.object(config, "SEMANTIC_HIERARCHY", True),
+            patch.object(config, "EAES_ROLLBACK_CHECK", False),
+            patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False),
+            patch.object(config, "EVIDENCE_SELECTOR_BACKEND", "local"),
+            patch.object(config, "EAES_PARENT_CHILD_ROUTING", True),
+            patch.object(config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30),
+            patch.object(
+                agent.memory_controller,
+                "retrieve_eaes_parent_routed_children",
+                side_effect=route,
+                create=True,
+            ),
+            patch.object(
+                agent, "select_eaes_evidence", side_effect=selection
+            ),
+        ):
+            result = agent.retrieve_question_evidence("Question")
+
+        self.assertEqual(
+            result["stage_origin_groups"]["parent_routed_child"],
+            [["D7:7"]],
+        )
+        self.assertIn(
+            ["D7:7"], result["stage_origin_groups"]["pre_selector"]
+        )
+        self.assertEqual(
+            result["stage_origin_groups"]["post_selector"], [["D7:7"]]
+        )
+        self.assertEqual(result["counts"]["parent_routed_child_k"], 1)
+        self.assertEqual(
+            result["parent_child_routing"]["selector_input_child_k"],
+            len(result["candidates"]) + 1,
+        )
 
 
 if __name__ == "__main__":

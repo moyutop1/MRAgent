@@ -40,13 +40,14 @@ class _Store:
 
 
 class _Note:
-    def __init__(self, index, parent_id="1-1"):
+    def __init__(self, index, parent_id="1-1", retrieval_embedding=None):
         self.memory_id = f"M_{index}"
         self.event_id = f"E_{index}"
         self.parent_id = parent_id
         self.attribute_paths = []
         self.rewrite_content = f"memory {index}"
         self.origin = f"D1:{index}"
+        self.retrieval_embedding = retrieval_embedding
 
     def to_dict(self, include_raw=False):
         return {
@@ -142,7 +143,7 @@ class HierarchicalRouterTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(diagnostics["selected_parent_k"], 0)
 
-    def test_parent_local_child_retrieval_has_been_removed(self):
+    def test_legacy_parent_local_merger_stays_removed(self):
         controller = MemoryController(_Store())
 
         self.assertFalse(hasattr(
@@ -151,6 +152,59 @@ class HierarchicalRouterTests(unittest.TestCase):
         self.assertFalse(hasattr(
             controller, "merge_eaes_hierarchical_candidates"
         ))
+        self.assertTrue(hasattr(
+            controller, "retrieve_eaes_parent_routed_children"
+        ))
+
+    def test_parent_route_adds_only_unseen_children_under_global_limit(self):
+        store = _Store()
+        store.eaes_notes = {
+            "M_1": _Note(1, retrieval_embedding=[1.0, 0.0]),
+            "M_2": _Note(2, retrieval_embedding=[0.8, 0.6]),
+            "M_3": _Note(3, retrieval_embedding=[0.1, 0.99]),
+        }
+        store.eaes_parent_nodes = {
+            "1-1": types.SimpleNamespace(
+                parent_id="1-1",
+                child_ids=["M_1", "M_2", "M_3"],
+            ),
+        }
+        controller = MemoryController(store)
+
+        with (
+            patch.object(
+                controller, "_eaes_question_vector",
+                return_value=[1.0, 0.0],
+            ),
+            patch.object(
+                controller, "_normalize_embedding_rows",
+                side_effect=lambda values: [values],
+            ),
+            patch.object(
+                controller, "_eaes_clipped_cosine",
+                side_effect=lambda left, right: max(
+                    0.0, min(1.0, sum(
+                        a * b for a, b in zip(left, right)
+                    ))
+                ),
+            ),
+        ):
+            routed, diagnostics = (
+                controller.retrieve_eaes_parent_routed_children(
+                    [{"parent_id": "1-1", "fused_score_ratio": 1.0}],
+                    question_emb=[1.0, 0.0],
+                    exclude_memory_ids={"M_1"},
+                    limit=1,
+                )
+            )
+
+        self.assertEqual([item["memory_id"] for item in routed], ["M_2"])
+        self.assertEqual(routed[0]["retrieval_source"], "parent_routed_child")
+        self.assertEqual(routed[0]["routed_parent_id"], "1-1")
+        self.assertEqual(routed[0]["parent_route_rank"], 1)
+        self.assertEqual(diagnostics["eligible_child_k"], 2)
+        self.assertEqual(diagnostics["selected_child_k"], 1)
+        self.assertEqual(diagnostics["stop_reason"], "route_limit")
 
     @unittest.skip("legacy parent router is outside the adaptive-view main path")
     def test_parent_routing_does_not_mutate_child_scores(self):

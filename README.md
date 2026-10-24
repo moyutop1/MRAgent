@@ -172,6 +172,8 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_prefilter_limit` | legacy combined-score pool used by rollback/compatibility paths | `120` |
 | `--eaes_rerank_limit` | child-channel safety cap after fused-score mass selection | `30` |
 | `--parent_top_k` | parent-channel safety cap after fused-score mass selection | `10` |
+| `--eaes_parent_child_routing` | after rollback, use selected parents to recover unseen children into the selector pool; direct child scores and MEG output stay unchanged | off |
+| `--eaes_parent_child_route_limit` | global cap on supplemental children recovered through selected parents | `30` |
 | `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
@@ -211,6 +213,10 @@ python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 4
 
 # the same S2G/rollback flow in retrieval-only mode; no answer reader is called
 python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm
+
+# local selector with bounded parent-to-child supplemental routing
+python run.py --data locomo --model deepseek-pro --file parent_route_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend local --selector_model_path /root/autodl-tmp/models/Qwen3-Reranker-4B --eaes_parent_child_routing --eaes_parent_child_route_limit 30
+python eval/evaluate_retrieval.py --data locomo --model deepseek-pro --file parent_route_s42 --sample conv-42 --eaes --semantic_hierarchy --evidence_selector_backend local --eaes_parent_child_routing
 
 ```
 

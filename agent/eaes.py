@@ -1215,7 +1215,12 @@ class EAESMixin:
                     unit = {"evidence": [payload]} if kind == "child" else payload
                     cost = len(tokenizer.encode(json.dumps(unit, ensure_ascii=False),
                                                 add_special_tokens=False))
-                    nodes.append({"kind": kind, "id": node_id, "candidate": candidate,
+                    source = (
+                        candidate.get("retrieval_source", "direct_child")
+                        if kind == "child" else "parent"
+                    )
+                    nodes.append({"kind": kind, "id": node_id,
+                                  "source": source, "candidate": candidate,
                                   "payload": payload, "token_cost": cost})
                     # Reuse existing retrieval vectors. Missing/invalid vectors are
                     # neutral, never trigger new embedding API calls or hard pruning.
@@ -1275,6 +1280,7 @@ class EAESMixin:
                         evidence_payload(selected + [node]), ensure_ascii=False),
                         add_special_tokens=False))
                     row = {"kind": node["kind"], "id": node["id"],
+                           "source": node["source"],
                            "token_cost": node["token_cost"], "proposed_tokens": proposed_tokens}
                     step["candidates"].append(row)
                     if proposed_tokens > budget:
@@ -1329,12 +1335,14 @@ class EAESMixin:
                 selected.append(node)
                 remaining.remove(node)
                 used = row["proposed_tokens"]
-                step.update(selected={"kind": node["kind"], "id": node["id"]}, tokens_after=used)
+                step.update(selected={"kind": node["kind"], "id": node["id"],
+                                      "source": node["source"]}, tokens_after=used)
                 # Every surviving candidate is re-scored against the NEW full S.
 
             trace.update(
                 stop_reason=stop_reason, selected_evidence_tokens=used,
                 selected_nodes=[{"kind": node["kind"], "id": node["id"],
+                                  "source": node["source"],
                                  "token_cost": node["token_cost"]} for node in selected],
                 elapsed_seconds=time.perf_counter() - started,
             )
@@ -1376,6 +1384,64 @@ class EAESMixin:
         if not enriched.get("answer_items"):
             return self._fallback_eaes_package(candidates)
         return enriched
+
+    def _prepare_eaes_selector_children(
+            self,
+            question,
+            question_emb,
+            direct_children,
+            parent_candidates,
+    ):
+        """Add bounded parent-routed children without touching direct results."""
+        direct_children = list(direct_children or [])
+        base_diagnostics = {
+            "enabled": False,
+            "route_limit": getattr(
+                config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30
+            ),
+            "direct_child_k": len(direct_children),
+            "routed_child_k": 0,
+            "selector_input_child_k": len(direct_children),
+            "source_parent_ids": [],
+            "selected_child_ids": [],
+        }
+        if not getattr(config, "EAES_PARENT_CHILD_ROUTING", False):
+            base_diagnostics["stop_reason"] = "disabled"
+            return direct_children, [], base_diagnostics
+        if config.DISABLE_EVIDENCE_SELECTOR:
+            base_diagnostics["stop_reason"] = "selector_disabled"
+            return direct_children, [], base_diagnostics
+
+        direct_ids = {
+            candidate.get("memory_id") for candidate in direct_children
+            if candidate.get("memory_id")
+        }
+        routed_children, diagnostics = (
+            self.memory_controller.retrieve_eaes_parent_routed_children(
+                parent_candidates,
+                question_emb=question_emb,
+                question_text=self._eaes_query_question(question),
+                exclude_memory_ids=direct_ids,
+                limit=getattr(
+                    config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30
+                ),
+            )
+        )
+        merged = list(direct_children)
+        seen = set(direct_ids)
+        for candidate in routed_children:
+            memory_id = candidate.get("memory_id")
+            if not memory_id or memory_id in seen:
+                continue
+            seen.add(memory_id)
+            merged.append(candidate)
+        diagnostics.update(
+            enabled=True,
+            direct_child_k=len(direct_children),
+            routed_child_k=len(merged) - len(direct_children),
+            selector_input_child_k=len(merged),
+        )
+        return merged, routed_children, diagnostics
 
     def _read_eaes_candidates(
             self,
@@ -1587,6 +1653,14 @@ class EAESMixin:
                 parent_candidates,
                 question_emb,
             )
+        candidates, _, route_diagnostics = (
+            self._prepare_eaes_selector_children(
+                question,
+                question_emb,
+                candidates,
+                parent_candidates,
+            )
+        )
         if not candidates and not parent_candidates and not rollback_enabled:
             result = ("no information available", [])
             return result + ({"enabled": not config.DISABLE_EVIDENCE_SELECTOR,
@@ -1602,6 +1676,11 @@ class EAESMixin:
             **({"return_details": True} if return_details else {}),
         )
         answer, context = reader_result[:2]
-        return (answer, context, reader_result[3]) if return_details else (answer, context)
+        if return_details:
+            selector_details = reader_result[3]
+            if selector_details is not None:
+                selector_details["parent_child_routing"] = route_diagnostics
+            return answer, context, selector_details
+        return answer, context
 
 

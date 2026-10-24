@@ -951,6 +951,134 @@ class MemoryController:
             },
         }
 
+    def retrieve_eaes_parent_routed_children(
+            self,
+            parent_candidates,
+            question_emb=None,
+            question_text=None,
+            exclude_memory_ids=None,
+            limit=None,
+    ):
+        """Recover a bounded set of children through already selected parents.
+
+        This is a supplemental route only: it neither filters nor changes the
+        scores of children produced by the direct adaptive-view channel.
+        Existing memory and question embeddings are reused; no memory schema or
+        LLM call is introduced here.
+        """
+        limit = int(
+            limit
+            if limit is not None
+            else getattr(config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30)
+        )
+        if limit <= 0:
+            raise ValueError("Parent-child route limit must be positive.")
+
+        excluded = set(exclude_memory_ids or [])
+        parents = []
+        seen_parent_ids = set()
+        for candidate in parent_candidates or []:
+            parent_id = candidate.get("parent_id")
+            if not parent_id or parent_id in seen_parent_ids:
+                continue
+            parent = self.memory.eaes_parent_nodes.get(parent_id)
+            if parent is None:
+                continue
+            seen_parent_ids.add(parent_id)
+            parents.append((candidate, parent))
+
+        diagnostics = {
+            "enabled": True,
+            "route_limit": limit,
+            "source_parent_ids": [
+                candidate.get("parent_id") for candidate, _ in parents
+            ],
+            "excluded_direct_child_k": len(excluded),
+            "eligible_child_k": 0,
+            "selected_child_k": 0,
+            "selected_child_ids": [],
+        }
+        if not parents:
+            diagnostics["stop_reason"] = "no_selected_parents"
+            return [], diagnostics
+
+        question_vector = self._eaes_question_vector(
+            question_emb=question_emb,
+            question_text=question_text,
+        )
+        routed_by_child = {}
+        for parent_candidate, parent in parents:
+            parent_support = None
+            for field in (
+                    "fused_score_ratio", "joint_relevance",
+                    "question_relevance", "score"):
+                value = parent_candidate.get(field)
+                if value is not None:
+                    parent_support = float(value)
+                    break
+            if parent_support is None:
+                rank = max(1, int(parent_candidate.get("rank") or 1))
+                parent_support = 1.0 / rank
+            parent_support = max(0.0, min(1.0, parent_support))
+
+            for child_id in parent.child_ids:
+                if child_id in excluded:
+                    continue
+                note = self.memory.eaes_notes.get(child_id)
+                if note is None:
+                    continue
+                child_vector = (
+                    self._normalize_embedding_rows(
+                        note.retrieval_embedding
+                    )[0]
+                    if note.retrieval_embedding is not None else None
+                )
+                question_relevance = self._eaes_clipped_cosine(
+                    child_vector, question_vector
+                )
+                route_score = self._eaes_joint_relevance(
+                    question_relevance,
+                    parent_support,
+                )
+                candidate = {
+                    **note.to_dict(include_raw=False),
+                    "question_relevance": question_relevance,
+                    "parent_route_support": parent_support,
+                    "parent_route_score": route_score,
+                    "candidate_score": route_score,
+                    "score": route_score,
+                    "retrieval_source": "parent_routed_child",
+                    "routed_parent_id": parent.parent_id,
+                }
+                previous = routed_by_child.get(child_id)
+                if previous is None or route_score > previous[
+                        "parent_route_score"]:
+                    routed_by_child[child_id] = candidate
+
+        ranked = sorted(
+            routed_by_child.values(),
+            key=lambda candidate: (
+                -float(candidate.get("parent_route_score") or 0.0),
+                -float(candidate.get("question_relevance") or 0.0),
+                str(candidate.get("memory_id") or ""),
+            ),
+        )
+        diagnostics["eligible_child_k"] = len(ranked)
+        selected = ranked[:limit]
+        for rank, candidate in enumerate(selected, start=1):
+            candidate["parent_route_rank"] = rank
+        diagnostics.update(
+            selected_child_k=len(selected),
+            selected_child_ids=[
+                candidate.get("memory_id") for candidate in selected
+            ],
+            stop_reason=(
+                "route_limit" if len(ranked) > limit
+                else "candidates_exhausted"
+            ),
+        )
+        return selected, diagnostics
+
     def diagnose_eaes_nodes_against_phrases(
             self,
             retrieval_phrases,

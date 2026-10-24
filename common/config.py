@@ -52,6 +52,22 @@ parser.add_argument(
 )
 parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Child candidates probed per phrase before view selection.")
 parser.add_argument("--eaes_parent_phrase_top_k", type=int, default=int(os.getenv("EAES_PARENT_PHRASE_TOP_K", "10")), help="Parent candidates probed per phrase before view selection.")
+parser.add_argument(
+    "--eaes_parent_child_routing",
+    action="store_true",
+    default=os.getenv("EAES_PARENT_CHILD_ROUTING", "false").lower()
+    in {"1", "true", "yes", "on"},
+    help=(
+        "After rollback, use selected parents as a bounded route to their "
+        "children and add the new children to the evidence-selector pool."
+    ),
+)
+parser.add_argument(
+    "--eaes_parent_child_route_limit",
+    type=int,
+    default=int(os.getenv("EAES_PARENT_CHILD_ROUTE_LIMIT", "30")),
+    help="Global maximum number of supplemental children recovered through selected parents.",
+)
 parser.add_argument("--eaes_min_selected_views", type=int, default=int(os.getenv("EAES_MIN_SELECTED_VIEWS", "1")), help="Minimum retrieval phrases selected by marginal evidence gain.")
 parser.add_argument("--eaes_max_selected_views", type=int, default=int(os.getenv("EAES_MAX_SELECTED_VIEWS", "4")), help="Maximum retrieval phrases selected by marginal evidence gain.")
 parser.add_argument("--eaes_question_relevance_weight", type=float, default=float(os.getenv("EAES_QUESTION_RELEVANCE_WEIGHT", "0.7")), help="Exponent beta in geometric question/phrase relevance gating.")
@@ -254,6 +270,8 @@ EAES_PHRASE_MAX_WORDS = args.eaes_phrase_max_words
 EAES_STRICT_PHRASE_VALIDATION = args.eaes_strict_phrase_validation
 EAES_PHRASE_INITIAL_TOP_K = args.eaes_phrase_initial_top_k
 EAES_PARENT_PHRASE_TOP_K = args.eaes_parent_phrase_top_k
+EAES_PARENT_CHILD_ROUTING = args.eaes_parent_child_routing
+EAES_PARENT_CHILD_ROUTE_LIMIT = args.eaes_parent_child_route_limit
 EAES_MIN_SELECTED_VIEWS = args.eaes_min_selected_views
 EAES_MAX_SELECTED_VIEWS = args.eaes_max_selected_views
 EAES_QUESTION_RELEVANCE_WEIGHT = args.eaes_question_relevance_weight
@@ -277,6 +295,12 @@ if EAES_PHRASE_INITIAL_TOP_K <= 0:
     raise ValueError("--eaes_phrase_initial_top_k must be positive.")
 if EAES_PARENT_PHRASE_TOP_K <= 0:
     raise ValueError("--eaes_parent_phrase_top_k must be positive.")
+if EAES_PARENT_CHILD_ROUTE_LIMIT <= 0:
+    raise ValueError("--eaes_parent_child_route_limit must be positive.")
+if EAES_PARENT_CHILD_ROUTING and not SEMANTIC_HIERARCHY:
+    raise ValueError(
+        "--eaes_parent_child_routing requires --semantic_hierarchy."
+    )
 if not 1 <= EAES_MIN_SELECTED_VIEWS <= EAES_MAX_SELECTED_VIEWS <= EAES_PHRASE_COUNT:
     raise ValueError(
         "EAES selected-view limits must satisfy 1 <= min <= max <= phrase_count."
@@ -384,6 +408,7 @@ ADDITIONAL_RE = (
     f"{HIERARCHY_SUFFIX}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_local_selector' if EVIDENCE_SELECTOR_BACKEND == 'local' and not DISABLE_EVIDENCE_SELECTOR else ''}"
+    f"{'_parent_route' if EAES_PARENT_CHILD_ROUTING else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"

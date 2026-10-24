@@ -23,7 +23,9 @@ def compact_eaes_retrieval(retrieval):
         "base_score", "candidate_score", "score", "score_parts",
         "candidate_sources", "prefilter_rank", "rerank_rank",
         "rerank_source", "matched_tag", "phrase_matches",
-        "matched_query_phase",
+        "matched_query_phase", "retrieval_source", "routed_parent_id",
+        "parent_route_support", "parent_route_score",
+        "parent_route_rank",
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",
@@ -83,6 +85,17 @@ def compact_eaes_retrieval(retrieval):
             {key: item.get(key) for key in child_fields if key in item}
             for item in retrieval.get("candidates") or []
         ],
+        "parent_routed_children": [
+            {key: item.get(key) for key in child_fields if key in item}
+            for item in retrieval.get("parent_routed_children") or []
+        ],
+        # Direct children are already serialized above; keep only IDs for the
+        # merged selector pool so retrieval-only files do not duplicate it.
+        "selector_input_child_ids": [
+            item.get("memory_id")
+            for item in retrieval.get("selector_input_children") or []
+            if item.get("memory_id")
+        ],
         "final_parent_candidates": [
             {key: item.get(key) for key in parent_fields if key in item}
             for item in retrieval.get("parent_candidates") or []
@@ -95,6 +108,9 @@ def compact_eaes_retrieval(retrieval):
         ],
         "counts": retrieval.get("counts") or {},
         "rollback_check": compact_rollback,
+        "parent_child_routing": retrieval.get(
+            "parent_child_routing"
+        ) or {"enabled": False},
     }
     if retrieval.get("selector") is not None:
         compact["selector"] = retrieval["selector"]
@@ -230,6 +246,15 @@ class RetrievalMixin:
             retrieval.get("initial_candidates"), "memory_id"
         )
         child_final = by_id(retrieval.get("candidates"), "memory_id")
+        parent_routed_child = by_id(
+            retrieval.get("parent_routed_children"), "memory_id"
+        )
+        selector_input_child = by_id(
+            retrieval.get("selector_input_children"), "memory_id"
+        )
+        post_selector_child = by_id(
+            retrieval.get("selector_selected_children"), "memory_id"
+        )
         parent_probe = by_id(
             retrieval.get("parent_probe_candidates"), "parent_id"
         )
@@ -239,6 +264,10 @@ class RetrievalMixin:
         parent_final = by_id(
             retrieval.get("parent_candidates"), "parent_id"
         )
+        post_selector_parent = by_id(
+            retrieval.get("selector_selected_parents"), "parent_id"
+        )
+        selector_ran = retrieval.get("selector") is not None
 
         def best_phrase_index(scores):
             if not scores:
@@ -270,6 +299,9 @@ class RetrievalMixin:
             "parent_mass_target": getattr(
                 config, "EAES_PARENT_MASS_TARGET", 0.85
             ),
+            "parent_child_routing": retrieval.get(
+                "parent_child_routing"
+            ) or {"enabled": False},
             "gold_origins": [],
         }
         for origin in gold_origins:
@@ -283,6 +315,7 @@ class RetrievalMixin:
                 fused = child_selected.get(memory_id) or {}
                 adaptive = child_adaptive.get(memory_id) or {}
                 final = child_final.get(memory_id) or {}
+                routed = parent_routed_child.get(memory_id) or {}
                 any_top30 = any(
                     row.get("inside_top30") for row in phrase_scores
                 )
@@ -341,6 +374,29 @@ class RetrievalMixin:
                     "pre_rerank_rank": fused.get("fused_rank"),
                     "rerank_rank": final.get("rerank_rank"),
                     "inside_final_child": memory_id in child_final,
+                    "inside_parent_route": (
+                        memory_id in parent_routed_child
+                    ),
+                    "inside_selector_input": (
+                        memory_id in selector_input_child
+                    ),
+                    "inside_post_selector_child": (
+                        memory_id in post_selector_child
+                    ),
+                    "selector_input_source": (
+                        "child" if memory_id in child_final
+                        else "parent_routed_child"
+                        if memory_id in parent_routed_child else None
+                    ),
+                    "routed_parent_id": routed.get(
+                        "routed_parent_id"
+                    ),
+                    "parent_route_score": routed.get(
+                        "parent_route_score"
+                    ),
+                    "parent_route_rank": routed.get(
+                        "parent_route_rank"
+                    ),
                     "drop_reason": drop_reason,
                 })
 
@@ -406,23 +462,62 @@ class RetrievalMixin:
                     ),
                     "inside_adaptive_prefix": parent_id in parent_final,
                     "inside_final_parent": parent_id in parent_final,
+                    "inside_post_selector_parent": (
+                        parent_id in post_selector_parent
+                    ),
                     "drop_reason": drop_reason,
                 })
 
-            covered_by_child = any(
+            covered_by_direct_child = any(
                 node["inside_final_child"] for node in child_nodes
+            )
+            covered_by_parent_routed_child = any(
+                node["inside_parent_route"] for node in child_nodes
+            )
+            covered_by_child = (
+                covered_by_direct_child
+                or covered_by_parent_routed_child
             )
             covered_by_parent = any(
                 node["inside_final_parent"] for node in parent_nodes
             )
-            if covered_by_child and covered_by_parent:
-                final_path = "child_and_parent"
-            elif covered_by_child:
-                final_path = "child"
-            elif covered_by_parent:
-                final_path = "parent"
-            else:
-                final_path = None
+
+            def evidence_path(direct_child, routed_child, parent):
+                if direct_child:
+                    return "child_and_parent" if parent else "child"
+                if routed_child:
+                    # The parent is a route prerequisite; the answer-bearing
+                    # node that reaches the selector is still the child.
+                    return "parent_routed_child"
+                return "parent" if parent else None
+
+            final_path = evidence_path(
+                covered_by_direct_child,
+                covered_by_parent_routed_child,
+                covered_by_parent,
+            )
+            post_direct_child = any(
+                node["inside_post_selector_child"]
+                and node["inside_final_child"]
+                for node in child_nodes
+            )
+            post_routed_child = any(
+                node["inside_post_selector_child"]
+                and node["inside_parent_route"]
+                for node in child_nodes
+            )
+            post_parent = any(
+                node["inside_post_selector_parent"]
+                for node in parent_nodes
+            )
+            post_selector_path = (
+                evidence_path(
+                    post_direct_child,
+                    post_routed_child,
+                    post_parent,
+                )
+                if selector_ran else None
+            )
             if final_path:
                 origin_drop_reason = None
             elif not origin_event_ids.get(origin):
@@ -442,10 +537,19 @@ class RetrievalMixin:
                 "memory_ids": origin_memory_ids.get(origin, []),
                 "linked_parent_ids": origin_parent_ids.get(origin, []),
                 "covered_by_retrieval": bool(final_path),
-                "covered_by_final": bool(final_path),
+                "covered_by_final": (
+                    bool(post_selector_path)
+                    if selector_ran else bool(final_path)
+                ),
                 "covered_by_child": covered_by_child,
+                "covered_by_direct_child": covered_by_direct_child,
+                "covered_by_parent_routed_child": (
+                    covered_by_parent_routed_child
+                ),
                 "covered_by_parent": covered_by_parent,
                 "final_path": final_path,
+                "selector_input_path": final_path,
+                "post_selector_path": post_selector_path,
                 "drop_reason": origin_drop_reason,
                 "child_nodes": child_nodes,
                 "parent_nodes": parent_nodes,
@@ -685,6 +789,30 @@ class RetrievalMixin:
                         for candidate in first_parent_candidates
                     ],
                 }
+            run_local_selector = (
+                not config.DISABLE_EVIDENCE_SELECTOR
+                and config.EVIDENCE_SELECTOR_BACKEND == "local"
+            )
+            selector_input_candidates = list(candidates)
+            parent_routed_children = []
+            parent_child_routing = {
+                "enabled": False,
+                "stop_reason": "selector_not_run_in_retrieval_only",
+                "direct_child_k": len(candidates),
+                "routed_child_k": 0,
+                "selector_input_child_k": len(candidates),
+            }
+            if run_local_selector:
+                (
+                    selector_input_candidates,
+                    parent_routed_children,
+                    parent_child_routing,
+                ) = self._prepare_eaes_selector_children(
+                    question,
+                    question_emb,
+                    candidates,
+                    parent_candidates,
+                )
             def child_origin_groups(items):
                 return [
                     [candidate.get("origin")]
@@ -733,6 +861,12 @@ class RetrievalMixin:
                 selected_parent_pool
             )
             initial_groups = child_origin_groups(initial_candidates)
+            parent_routed_groups = child_origin_groups(
+                parent_routed_children
+            )
+            selector_input_child_groups = child_origin_groups(
+                selector_input_candidates
+            )
             stage_origin_groups = {
                 "child_probe_all_views": child_probe_groups,
                 "parent_probe_all_views": parent_probe_groups,
@@ -745,17 +879,18 @@ class RetrievalMixin:
                 "final_child": child_groups,
                 "selected_parent": parent_origin_groups,
                 "final_combined": final_groups,
+                "parent_routed_child": parent_routed_groups,
+                "selector_input_child": selector_input_child_groups,
             }
             # Preserve upstream metrics and gold diagnostics. Report the actual
             # local-selector output as additional pre/post stages, without a reader call.
             selector_details = None
             selector_children, selector_parents = [], []
-            if (not config.DISABLE_EVIDENCE_SELECTOR
-                    and config.EVIDENCE_SELECTOR_BACKEND == "local"):
-                if candidates or parent_candidates:
+            if run_local_selector:
+                if selector_input_candidates or parent_candidates:
                     selection = self.select_eaes_evidence(
                         question, self._eaes_child_query_plan(query_plan),
-                        candidates, parent_candidates,
+                        selector_input_candidates, parent_candidates,
                     )
                     selector_children = [node for item in selection["answer_items"]
                                          for node in item["evidence"]]
@@ -764,7 +899,9 @@ class RetrievalMixin:
                 else:
                     selector_details = {"enabled": True, "backend": "local",
                                         "stop_reason": "no_candidates", "selected_nodes": []}
-                stage_origin_groups["pre_selector"] = final_groups
+                stage_origin_groups["pre_selector"] = (
+                    selector_input_child_groups + parent_origin_groups
+                )
                 stage_origin_groups["post_selector_child"] = child_origin_groups(selector_children)
                 stage_origin_groups["post_selector_parent"] = parent_origin_groups_for(selector_parents)
                 stage_origin_groups["post_selector"] = (
@@ -772,7 +909,14 @@ class RetrievalMixin:
                     + stage_origin_groups["post_selector_parent"]
                 )
                 first_pass["counts"].update(
-                    pre_selector_k=len(candidates) + len(parent_candidates),
+                    parent_routed_child_k=len(parent_routed_children),
+                    selector_input_child_k=len(
+                        selector_input_candidates
+                    ),
+                    pre_selector_k=(
+                        len(selector_input_candidates)
+                        + len(parent_candidates)
+                    ),
                     post_selector_child_k=len(selector_children),
                     post_selector_parent_k=len(selector_parents),
                     post_selector_k=len(selector_children) + len(selector_parents),
@@ -785,6 +929,12 @@ class RetrievalMixin:
             first_pass["counts"]["final_parent_k"] = len(parent_candidates)
             first_pass["counts"]["final_total_k"] = (
                 len(candidates) + len(parent_candidates)
+            )
+            first_pass["counts"].setdefault(
+                "parent_routed_child_k", len(parent_routed_children)
+            )
+            first_pass["counts"].setdefault(
+                "selector_input_child_k", len(selector_input_candidates)
             )
             return {
                 "mode": "eaes",
@@ -804,6 +954,8 @@ class RetrievalMixin:
                 "parent_probe_candidates": parent_probe_candidates,
                 "selected_parent_pool": selected_parent_pool,
                 "candidates": candidates,
+                "parent_routed_children": parent_routed_children,
+                "selector_input_children": selector_input_candidates,
                 "parent_candidates": parent_candidates,
                 "final_child_ids": [
                     candidate.get("memory_id") for candidate in candidates
@@ -832,6 +984,7 @@ class RetrievalMixin:
                 "initial_origin_groups": initial_groups,
                 "initial_k": len(initial_candidates),
                 "rollback_check": rollback_metadata,
+                "parent_child_routing": parent_child_routing,
                 "selector": selector_details,
                 "selector_selected_children": selector_children,
                 "selector_selected_parents": selector_parents,

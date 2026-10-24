@@ -368,6 +368,62 @@ class GoldDiagnosticTests(unittest.TestCase):
             "child_membership_proxy",
         )
 
+    def test_parent_routed_gold_child_has_distinct_final_path(self):
+        routed_child = {
+            "memory_id": "M_1",
+            "event_id": "D1:1-1",
+            "origin": "D1:1",
+            "parent_id": "P_1",
+            "rewrite_content": "Caroline adopted a dog.",
+            "retrieval_source": "parent_routed_child",
+            "routed_parent_id": "P_1",
+            "parent_route_score": 0.72,
+            "parent_route_rank": 1,
+        }
+        parent = {"parent_id": "P_1", "rewrite_content": "Dog history."}
+        retrieval = {
+            "mode": "eaes",
+            "query_plan": {
+                "retrieval_phrases": [f"view {index}" for index in range(6)]
+            },
+            "phrase_retrieval": {
+                "child_selected_phrase_indices": [0],
+                "parent_selected_phrase_indices": [0],
+            },
+            "child_rankings": [],
+            "parent_rankings": [],
+            "child_probe_candidates": [],
+            "prefilter_candidates": [],
+            "initial_candidates": [],
+            "candidates": [],
+            "parent_routed_children": [routed_child],
+            "selector_input_children": [routed_child],
+            "selector_selected_children": [routed_child],
+            "parent_probe_candidates": [parent],
+            "selected_parent_pool": [parent],
+            "parent_candidates": [parent],
+            "selector_selected_parents": [],
+            "selector": {"enabled": True, "backend": "local"},
+            "parent_child_routing": {"enabled": True},
+            "counts": {"adaptive_child_k": 0, "adaptive_parent_k": 1},
+        }
+
+        diagnostics = _GoldAgent().diagnose_eaes_gold_memories(
+            ["D1:1"], retrieval
+        )
+        gold = diagnostics["gold_origins"][0]
+
+        self.assertEqual(gold["final_path"], "parent_routed_child")
+        self.assertEqual(
+            gold["selector_input_path"], "parent_routed_child"
+        )
+        self.assertEqual(
+            gold["post_selector_path"], "parent_routed_child"
+        )
+        self.assertTrue(gold["covered_by_parent_routed_child"])
+        self.assertFalse(gold["covered_by_direct_child"])
+        self.assertTrue(gold["child_nodes"][0]["inside_parent_route"])
+
 
 if __name__ == "__main__":
     unittest.main()

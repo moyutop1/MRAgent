@@ -20,6 +20,11 @@ def parse_args():
         action="store_true",
         help="Read retrieval files produced with --semantic_hierarchy",
     )
+    p.add_argument(
+        "--eaes_parent_child_routing",
+        action="store_true",
+        help="Read files produced with --eaes_parent_child_routing",
+    )
     p.add_argument("--allfile", action="store_true", help="Aggregate all matching samples")
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
     p.add_argument("--evidence_selector_backend", choices=["llm", "local"], default="llm")
@@ -45,6 +50,7 @@ def load_rows(args):
         f"{'_hierarchy' if args.semantic_hierarchy else ''}"
         f"{'_no_selector' if disabled else ''}"
         f"{'_local_selector' if local else ''}"
+        f"{'_parent_route' if args.eaes_parent_child_routing else ''}"
         "_retrieval"
     )
     root = Path(f"result/{args.data}")
@@ -145,6 +151,8 @@ def main():
         "final_child": "final_child_k",
         "selected_parent": "final_parent_k",
         "final_combined": "final_total_k",
+        "parent_routed_child": "parent_routed_child_k",
+        "selector_input_child": "selector_input_child_k",
         "pre_selector": "pre_selector_k",
         "post_selector_child": "post_selector_child_k",
         "post_selector_parent": "post_selector_parent_k",

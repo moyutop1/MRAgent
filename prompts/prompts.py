@@ -572,7 +572,11 @@ Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
 - State the answer directly. Never preface it with phrases such as "The original text states", "the memory says", "the rewrite says", "according to the evidence", or similar source-reporting language.
-- Each child evidence object contains memory_id, conversation_time, rewrite_content, retrieval_score, and rerank_rank. memory_id is only for supports; conversation_time is a dialogue anchor, not automatically the event occurrence time.
+- Each child evidence object contains memory_id, conversation_time, rewrite_content, retrieval_score, and rerank_rank. memory_id is only for supports.
+- conversation_time anchors explicit relative-time expressions; it is not automatically the event occurrence time.
+- For temporal answers, preserve the source precision: convert day offsets such as yesterday or tomorrow to calendar dates; express weekdays, weeks, and weekends relative to conversation_time with before, of, or after; convert month or year offsets only to month or year.
+- Preserve numeric offsets, keep durations for "how long" questions, and never invent finer time precision than the evidence supports.
+- For vague cues such as just or recently, use month and year when supported.
 - retrieval_score is a soft within-child retrieval weight (higher is better), while rerank_rank is the final child reranker position (lower is better). Use them to prioritize attention and break ties, but let direct entity/relation/constraint matching override either signal.
 - parent_memories, when present, are independently retrieved coarse-grained rewrite memories. Their score/rank are meaningful only within the parent channel. Never compare parent and child numeric scores directly, and do not let parents restrict the child evidence package.
 - A relevant parent memory may support the answer even when its children are absent from the child candidate list. Cite its parent_id in supports when used.

@@ -31,13 +31,12 @@ parser.add_argument(
     default=float(os.getenv("CHILD_DUPLICATE_SIMILARITY_THRESHOLD", "0.55")),
     help="Fuse adjacent semantic-hierarchy child memories when cosine similarity is strictly above this threshold.",
 )
-parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "10")), help="Parent-channel safety cap after relevance-aware fusion and cumulative-mass selection.")
-parser.add_argument("--parent_relevance_floor", type=float, default=float(os.getenv("PARENT_RELEVANCE_FLOOR", "0.05")), help="Minimum original-question relevance required for the leading parent candidate.")
+parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "10")), help="Parent-channel safety cap after all-view relevance-aware fusion.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
 parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
 parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
-parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Combined-score candidates kept before EAES LLM reranking.")
-parser.add_argument("--eaes_rerank_limit", type=int, default=int(os.getenv("EAES_RERANK_LIMIT", "30")), help="Child-channel safety cap after relevance-aware fusion and cumulative-mass selection.")
+parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Global child retrieval safety bound.")
+parser.add_argument("--eaes_child_candidate_limit", type=int, default=int(os.getenv("EAES_CHILD_CANDIDATE_LIMIT", "30")), help="Child-channel safety cap after all-view relevance-aware fusion.")
 parser.add_argument("--eaes_phrase_count", type=int, default=int(os.getenv("EAES_PHRASE_COUNT", "6")), help="Number of candidate retrieval views generated per question.")
 parser.add_argument("--eaes_phrase_max_words", type=int, default=int(os.getenv("EAES_PHRASE_MAX_WORDS", "10")), help="Maximum whitespace-separated words allowed in one retrieval phrase.")
 parser.add_argument(
@@ -50,8 +49,8 @@ parser.add_argument(
         "checks for generated retrieval phrases. Disabled by default."
     ),
 )
-parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Child candidates probed per phrase before view selection.")
-parser.add_argument("--eaes_parent_phrase_top_k", type=int, default=int(os.getenv("EAES_PARENT_PHRASE_TOP_K", "10")), help="Parent candidates probed per phrase before view selection.")
+parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Child candidates probed per retrieval phrase before all-view fusion.")
+parser.add_argument("--eaes_parent_phrase_top_k", type=int, default=int(os.getenv("EAES_PARENT_PHRASE_TOP_K", "10")), help="Parent candidates probed per retrieval phrase before all-view fusion.")
 parser.add_argument(
     "--eaes_parent_child_routing",
     action="store_true",
@@ -68,18 +67,8 @@ parser.add_argument(
     default=int(os.getenv("EAES_PARENT_CHILD_ROUTE_LIMIT", "30")),
     help="Global maximum number of supplemental children recovered through selected parents.",
 )
-parser.add_argument("--eaes_min_selected_views", type=int, default=int(os.getenv("EAES_MIN_SELECTED_VIEWS", "1")), help="Minimum retrieval phrases selected by marginal evidence gain.")
-parser.add_argument("--eaes_max_selected_views", type=int, default=int(os.getenv("EAES_MAX_SELECTED_VIEWS", "4")), help="Maximum retrieval phrases selected by marginal evidence gain.")
 parser.add_argument("--eaes_question_relevance_weight", type=float, default=float(os.getenv("EAES_QUESTION_RELEVANCE_WEIGHT", "0.7")), help="Exponent beta in geometric question/phrase relevance gating.")
-parser.add_argument("--eaes_view_gain_threshold", type=float, default=float(os.getenv("EAES_VIEW_GAIN_THRESHOLD", "0.10")), help="Minimum normalized saturating marginal gain for selecting an additional retrieval phrase.")
-parser.add_argument("--eaes_child_mass_target", type=float, default=float(os.getenv("EAES_CHILD_MASS_TARGET", "0.85")), help="Cumulative fused-score mass retained in the Child channel.")
-parser.add_argument("--eaes_parent_mass_target", type=float, default=float(os.getenv("EAES_PARENT_MASS_TARGET", "0.85")), help="Cumulative fused-score mass retained in the Parent channel.")
-parser.add_argument("--eaes_child_adaptive_threshold", type=float, default=float(os.getenv("EAES_CHILD_ADAPTIVE_THRESHOLD", "0.35")), help="Deprecated compatibility option; cumulative score mass now controls Child depth.")
-parser.add_argument("--eaes_parent_adaptive_threshold", type=float, default=float(os.getenv("EAES_PARENT_ADAPTIVE_THRESHOLD", "0.55")), help="Deprecated compatibility option; cumulative score mass now controls Parent depth.")
-parser.add_argument("--eaes_phrase_protected_top_k", type=int, default=int(os.getenv("EAES_PHRASE_PROTECTED_TOP_K", "5")), help="Deprecated compatibility option; dynamic retrieval no longer protects a fixed prefix.")
-parser.add_argument("--eaes_phrase_final_top_k", type=int, default=int(os.getenv("EAES_PHRASE_FINAL_TOP_K", "10")), help="Deprecated compatibility option; dynamic retrieval no longer applies per-phrase Top10 pruning.")
 parser.add_argument("--eaes_phrase_rrf_k", type=float, default=float(os.getenv("EAES_PHRASE_RRF_K", "10")), help="Reciprocal-rank-fusion denominator constant for child-tag retrieval.")
-parser.add_argument("--eaes_phrase_rerank_limit", type=int, default=int(os.getenv("EAES_PHRASE_RERANK_LIMIT", "15")), help="Final child memories retained by the query-only phrase-candidate reranker.")
 parser.add_argument(
     "--eaes_rollback_check",
     action="store_true",
@@ -101,11 +90,11 @@ parser.add_argument(
     help="Bypass the EAES evidence selector and pass all retrieved candidates directly to the final answer reader.",
 )
 parser.add_argument("--retrieval_only", action="store_true", help="Only save retrieval evidence and skip the final answer reader. Enabled rollback decisions and supplemental retrievals still run.")
-parser.add_argument("--evidence_selector_backend", choices=["llm", "local"], default="llm", help="Legacy LLM selector or offline conditional marginal-value selector.")
-parser.add_argument("--selector_model_path", default=os.getenv("SELECTOR_MODEL_PATH", ""), help="Existing local Qwen3-Reranker directory; never downloaded automatically.")
+parser.add_argument("--evidence_selector_backend", choices=["llm", "local", "setwise"], default="llm", help="Legacy LLM selector, iterative local baseline, or one-pass setwise local selector.")
+parser.add_argument("--selector_model_path", default=os.getenv("SELECTOR_MODEL_PATH", ""), help="Existing local selector model directory; never downloaded automatically.")
 parser.add_argument("--selector_device", default="cuda", help="Local selector device, e.g. cuda:0 or cpu.")
 parser.add_argument("--selector_batch_size", type=int, default=2)
-parser.add_argument("--selector_max_length", type=int, default=8192, help="Full scorer input limit; overlength inputs are rejected, not truncated.")
+parser.add_argument("--selector_max_length", type=int, default=16384, help="Full local-selector input limit; overlength inputs are rejected, not truncated.")
 parser.add_argument("--selector_token_budget", type=int, default=2048, help="Reader evidence budget measured with the local selector tokenizer.")
 parser.add_argument("--selector_redundancy_weight", type=float, default=0.2)
 parser.add_argument("--selector_cost_weight", type=float, default=0.1)
@@ -262,9 +251,9 @@ if SEMANTIC_HIERARCHY and not EAES_MODE:
 EAES_CANDIDATE_LIMIT = args.eaes_prefilter_limit
 if EAES_CANDIDATE_LIMIT <= 0:
     raise ValueError("--eaes_prefilter_limit must be a positive integer.")
-EAES_RERANK_LIMIT = args.eaes_rerank_limit
-if EAES_RERANK_LIMIT <= 0 or EAES_RERANK_LIMIT > EAES_CANDIDATE_LIMIT:
-    raise ValueError("--eaes_rerank_limit must be positive and no larger than --eaes_prefilter_limit.")
+EAES_CHILD_CANDIDATE_LIMIT = args.eaes_child_candidate_limit
+if EAES_CHILD_CANDIDATE_LIMIT <= 0 or EAES_CHILD_CANDIDATE_LIMIT > EAES_CANDIDATE_LIMIT:
+    raise ValueError("--eaes_child_candidate_limit must be positive and no larger than --eaes_prefilter_limit.")
 EAES_PHRASE_COUNT = args.eaes_phrase_count
 EAES_PHRASE_MAX_WORDS = args.eaes_phrase_max_words
 EAES_STRICT_PHRASE_VALIDATION = args.eaes_strict_phrase_validation
@@ -272,21 +261,8 @@ EAES_PHRASE_INITIAL_TOP_K = args.eaes_phrase_initial_top_k
 EAES_PARENT_PHRASE_TOP_K = args.eaes_parent_phrase_top_k
 EAES_PARENT_CHILD_ROUTING = args.eaes_parent_child_routing
 EAES_PARENT_CHILD_ROUTE_LIMIT = args.eaes_parent_child_route_limit
-EAES_MIN_SELECTED_VIEWS = args.eaes_min_selected_views
-EAES_MAX_SELECTED_VIEWS = args.eaes_max_selected_views
 EAES_QUESTION_RELEVANCE_WEIGHT = args.eaes_question_relevance_weight
-EAES_VIEW_GAIN_THRESHOLD = args.eaes_view_gain_threshold
-EAES_CHILD_MASS_TARGET = args.eaes_child_mass_target
-EAES_PARENT_MASS_TARGET = args.eaes_parent_mass_target
-EAES_CHILD_ADAPTIVE_THRESHOLD = args.eaes_child_adaptive_threshold
-EAES_PARENT_ADAPTIVE_THRESHOLD = args.eaes_parent_adaptive_threshold
-EAES_PHRASE_PROTECTED_TOP_K = args.eaes_phrase_protected_top_k
-EAES_PHRASE_FINAL_TOP_K = args.eaes_phrase_final_top_k
 EAES_PHRASE_RRF_K = args.eaes_phrase_rrf_k
-EAES_PHRASE_RERANK_LIMIT = args.eaes_phrase_rerank_limit
-# Deprecated compatibility constants. The adaptive-view main path does not use
-# a global union cap or this separate rerank limit.
-EAES_PHRASE_UNION_LIMIT = 60
 if EAES_PHRASE_COUNT <= 0:
     raise ValueError("--eaes_phrase_count must be positive.")
 if EAES_PHRASE_MAX_WORDS <= 0:
@@ -301,26 +277,10 @@ if EAES_PARENT_CHILD_ROUTING and not SEMANTIC_HIERARCHY:
     raise ValueError(
         "--eaes_parent_child_routing requires --semantic_hierarchy."
     )
-if not 1 <= EAES_MIN_SELECTED_VIEWS <= EAES_MAX_SELECTED_VIEWS <= EAES_PHRASE_COUNT:
-    raise ValueError(
-        "EAES selected-view limits must satisfy 1 <= min <= max <= phrase_count."
-    )
 if not 0.0 < EAES_QUESTION_RELEVANCE_WEIGHT < 1.0:
     raise ValueError("--eaes_question_relevance_weight must be strictly between 0 and 1.")
-if EAES_VIEW_GAIN_THRESHOLD < 0.0:
-    raise ValueError("--eaes_view_gain_threshold must be non-negative.")
-if not 0.0 < EAES_CHILD_MASS_TARGET <= 1.0:
-    raise ValueError("--eaes_child_mass_target must be in (0, 1].")
-if not 0.0 < EAES_PARENT_MASS_TARGET <= 1.0:
-    raise ValueError("--eaes_parent_mass_target must be in (0, 1].")
-if not 0.0 <= EAES_CHILD_ADAPTIVE_THRESHOLD <= 1.0:
-    raise ValueError("--eaes_child_adaptive_threshold must be between 0 and 1.")
-if not 0.0 <= EAES_PARENT_ADAPTIVE_THRESHOLD <= 1.0:
-    raise ValueError("--eaes_parent_adaptive_threshold must be between 0 and 1.")
 if EAES_PHRASE_RRF_K <= 0:
     raise ValueError("--eaes_phrase_rrf_k must be positive.")
-if EAES_PHRASE_RERANK_LIMIT <= 0:
-    raise ValueError("--eaes_phrase_rerank_limit must be positive.")
 EAES_ROLLBACK_CHECK = args.eaes_rollback_check
 EAES_ROLLBACK_CHILD_PREFILTER_LIMIT = 27
 EAES_ROLLBACK_PARENT_PREFILTER_LIMIT = 3
@@ -363,7 +323,6 @@ CHILD_MAX_TURNS = args.child_max_turns
 CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
 CHILD_DUPLICATE_SIMILARITY_THRESHOLD = args.child_duplicate_similarity_threshold
 PARENT_TOP_K = args.parent_top_k
-PARENT_RELEVANCE_FLOOR = args.parent_relevance_floor
 if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
     raise ValueError("parent turn limits must satisfy 0 < min <= max.")
 if SEMANTIC_HIERARCHY and PARENT_MAX_TURNS > 10:
@@ -385,9 +344,6 @@ if PARENT_TOP_K <= 0 or PARENT_TOP_K > EAES_CANDIDATE_LIMIT:
         "--parent_top_k must be positive and no larger than "
         "--eaes_prefilter_limit."
     )
-if not -1.0 <= PARENT_RELEVANCE_FLOOR <= 1.0:
-    raise ValueError("--parent_relevance_floor must be between -1 and 1.")
-
 dataset = args.data
 DATASET = dataset
 datapath = f"data/dataset_{dataset}.json"
@@ -408,6 +364,7 @@ ADDITIONAL_RE = (
     f"{HIERARCHY_SUFFIX}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_local_selector' if EVIDENCE_SELECTOR_BACKEND == 'local' and not DISABLE_EVIDENCE_SELECTOR else ''}"
+    f"{'_setwise_selector' if EVIDENCE_SELECTOR_BACKEND == 'setwise' and not DISABLE_EVIDENCE_SELECTOR else ''}"
     f"{'_parent_route' if EAES_PARENT_CHILD_ROUTING else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"

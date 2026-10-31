@@ -462,29 +462,6 @@ Schema:
     def eaes_index_prompt(cls, memories: str) -> str:
         return cls.EAES_INDEX_USER_PROMPT.format(MEMORIES=memories)
 
-    EAES_ATTRIBUTE_RERANK_PROMPT = """You rerank memory candidates using structured attributes. Only output valid JSON.
-Use only the question, query_attributes, memory attribute_paths, and prefilter rank/score.
-Do not answer the question. Do not invent memory IDs.
-Prefer memories whose attributes directly contain the relation needed to fill the question's answer slot.
-Keep complementary attribute evidence for multi-hop and list questions.
-Return memory IDs in descending relevance order, with at most the requested limit.
-Schema:
-{
-  "ranked_memory_ids": ["M_D1_2_1"]
-}"""
-
-    EAES_PHRASE_CANDIDATE_RERANK_PROMPT = """You rerank child memory candidates for a long-term conversational-memory question. Only output valid JSON.
-Use only the original question and each candidate's tag and rewrite_content.
-Rank candidates solely by how useful their stored content is for answering the question.
-The retrieval phrases and retrieval scores are intentionally hidden and must not be inferred as required evidence categories.
-Do not enforce diversity or phrase coverage. Select complementary memories only when the original question itself requires multiple facts.
-Do not answer the question and do not invent memory IDs.
-Return every supplied memory ID exactly once in descending relevance order. The requested limit equals the number of supplied candidates; do not filter or omit candidates.
-Schema:
-{
-  "ranked_memory_ids": ["M_D1_2_1"]
-}"""
-
     EAES_ROLLBACK_QUERY_PROMPT = """You are an evidence-sufficiency controller for long-term conversational memory. Only output valid JSON.
 The input contains the original question, only the rewrite_content strings currently available as evidence, the four initial query phases, any previous rollback decisions, and the number of rollback retrievals still available.
 
@@ -572,13 +549,12 @@ Use the structured evidence package as the primary context.
 Rules:
 - Give the minimal answer requested by the question.
 - State the answer directly. Never preface it with phrases such as "The original text states", "the memory says", "the rewrite says", "according to the evidence", or similar source-reporting language.
-- Each child evidence object contains memory_id, conversation_time, rewrite_content, retrieval_score, and rerank_rank. memory_id is only for supports.
+- Each child evidence object contains memory_id, parent_id, conversation_time, and rewrite_content. memory_id is only for supports.
 - conversation_time anchors explicit relative-time expressions; it is not automatically the event occurrence time.
 - For temporal answers, preserve the source precision: convert day offsets such as yesterday or tomorrow to calendar dates; express weekdays, weeks, and weekends relative to conversation_time with before, of, or after; convert month or year offsets only to month or year.
 - Preserve numeric offsets, keep durations for "how long" questions, and never invent finer time precision than the evidence supports.
 - For vague cues such as just or recently, use month and year when supported.
-- retrieval_score is a soft within-child retrieval weight (higher is better), while rerank_rank is the final child reranker position (lower is better). Use them to prioritize attention and break ties, but let direct entity/relation/constraint matching override either signal.
-- parent_memories, when present, are independently retrieved coarse-grained rewrite memories. Their score/rank are meaningful only within the parent channel. Never compare parent and child numeric scores directly, and do not let parents restrict the child evidence package.
+- parent_memories, when present, are independently retrieved coarse-grained rewrite memories containing parent_id and rewrite_content. Do not let parents restrict the child evidence package.
 - A relevant parent memory may support the answer even when its children are absent from the child candidate list. Cite its parent_id in supports when used.
 - For list questions, return a concise comma-separated list.
 - Treat evidence_package as primary evidence. Use backup_candidates only when evidence_package is empty or clearly insufficient.

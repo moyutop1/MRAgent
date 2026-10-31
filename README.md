@@ -163,20 +163,19 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_phrase_max_words` | maximum whitespace-separated words in each retrieval phrase | `10` |
 | `--eaes_phrase_initial_top_k` | child candidates retained per phrase after question/phrase relevance scoring | `30` |
 | `--eaes_parent_phrase_top_k` | parent candidates retained per phrase after question/phrase relevance scoring | `10` |
-| `--eaes_min_selected_views` / `--eaes_max_selected_views` | phrase views selected by marginal evidence gain | `1` / `4` |
 | `--eaes_question_relevance_weight` | exponent beta in geometric question/phrase relevance gating | `0.7` |
-| `--eaes_child_mass_target` / `--eaes_parent_mass_target` | cumulative fused-score mass targets | `0.85` / `0.85` |
-| `--eaes_phrase_protected_top_k` / `--eaes_phrase_final_top_k` | deprecated compatibility options, unused by adaptive-view retrieval | `5` / `10` |
 | `--eaes_phrase_rrf_k` | smoothing constant in the normalized reciprocal-rank discount | `10` |
-| `--eaes_phrase_rerank_limit` | children retained by the query-only LLM reranker | `15` |
-| `--eaes_prefilter_limit` | legacy combined-score pool used by rollback/compatibility paths | `120` |
-| `--eaes_rerank_limit` | child-channel safety cap after fused-score mass selection | `30` |
-| `--parent_top_k` | parent-channel safety cap after fused-score mass selection | `10` |
-| `--eaes_parent_child_routing` | after rollback, use selected parents to recover unseen children into the selector pool; direct child scores and MEG output stay unchanged | off |
+| `--eaes_prefilter_limit` | global child retrieval safety bound | `120` |
+| `--eaes_child_candidate_limit` | child-channel safety cap after all-view fusion | `30` |
+| `--parent_top_k` | parent-channel safety cap after all-view fusion | `10` |
+| `--eaes_parent_child_routing` | use selected parents to recover unseen children into a joint local-selector pool | off |
 | `--eaes_parent_child_route_limit` | global cap on supplemental children recovered through selected parents | `30` |
 | `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
+| `--evidence_selector_backend` | `llm`, iterative `local` baseline, or one-pass `setwise` selector | `llm` |
+| `--selector_model_path` | existing local selector model directory; `setwise` requires an instruction-following causal LM | none |
+| `--selector_max_length` | complete local-selector prompt limit; inputs are rejected rather than truncated | `16384` |
 
 ### 5.2 LoCoMo
 
@@ -217,6 +216,9 @@ python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 
 # local selector with bounded parent-to-child supplemental routing
 python run.py --data locomo --model deepseek-pro --file parent_route_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend local --selector_model_path /root/autodl-tmp/models/Qwen3-Reranker-4B --eaes_parent_child_routing --eaes_parent_child_route_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-pro --file parent_route_s42 --sample conv-42 --eaes --semantic_hierarchy --evidence_selector_backend local --eaes_parent_child_routing
+
+# one-pass setwise zero-marginal pruning; the local instruction model reads real node IDs
+python run.py --data locomo --model deepseek-pro --file setwise_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend setwise --selector_model_path /path/to/local-4B-instruct-model --eaes_parent_child_routing
 
 ```
 
@@ -263,14 +265,14 @@ normalized gold evidence do not enter this metric.
 
 ## 7. Notes
 
-- Optional local marginal-value selector: see [setup, diagnostics and validation limits](docs/local_selector.md). Enable with `--evidence_selector_backend local --selector_model_path /path/to/Qwen3-Reranker-4B`. The default remains the legacy `llm` selector; `--disable_evidence_selector` bypasses both. The local backend jointly selects children and parents, re-scores each candidate conditioned on the original question and current selection, and enforces a reader-evidence token budget. No memory/query-plan schema changes or model downloads are performed. Real model loading/inference has **not** been verified on the development machine.
+- The proposed `setwise` selector jointly reads every retrieved child and parent once, using real memory IDs and no extra embedding prefilter or candidate-pair construction. It removes only IDs judged to have zero query-conditioned marginal value: irrelevant nodes or nodes whose useful answer information is fully covered by retained nodes. Distinct events, times, entities, causal links, and complementary facts must be preserved. The iterative `local` selector remains as a budgeted baseline; `llm` remains the legacy default. All local model loading is offline and real-weight inference must be validated on the experiment machine.
 
 - The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
   `embedding` files to force regeneration of a sample.
 - Per-sample reasoning traces are logged under `log/<dataset>/`.
 - `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
 - With semantic hierarchy enabled, every child memory has one to four tags. Each tag independently generates a prefix and facet, and code stores the complete `prefix.facet` string. The prompt asks each prefix to start with the supported person's name and end in `activity`, `plan`, `profile`, `possession`, or `relationship`. Code still requires a capitalized explicit person name and a storage-safe prefix structure, but no longer rejects a prefix solely because its final word is outside those five canonical heads. Each facet may contain at most five whitespace-separated words, while the prefix has no word-count limit. Facet and composite-tag structure remain validated. Any malformed validated structure receives exactly one error-aware repair attempt before the child window fails. No session prefix pool is generated or stored.
-- Normal EAES retrieval generates six ordinary query phrases of at most ten whitespace-separated words; query phrases do not follow the child `prefix.facet` schema. Child and Parent channels share this phrase pool but independently rank and select views. For each phrase-node pair, geometric question/phrase relevance gating is multiplied by phrase fidelity and a normalized reciprocal-rank discount. Each phrase probes Child Top-30 and Parent Top-10, after which each channel greedily selects one to four views by saturating marginal evidence gain. Selected views are fused with the same bounded coverage function before cumulative-mass depth selection. Selected Parents never add or boost Child candidates.
+- Normal EAES retrieval generates six ordinary query phrases of at most ten whitespace-separated words; query phrases do not follow the child `prefix.facet` schema. Child and Parent channels share the phrase pool. For each phrase-node pair, geometric question/phrase relevance gating is multiplied by phrase fidelity and a normalized reciprocal-rank discount. Every phrase probes Child Top-30 and Parent Top-10, all six views are fused, and only fixed child/parent safety caps are applied. There is no phrase-view MEG, cumulative-mass prefix, or query-only LLM reranker. Selected Parents never boost direct Child scores.
 - Every child `origin` stores all and only the source turns used by that node in dialogue order. Its `id` uses the earliest of those turns plus a session-global collision suffix (`D1:1-1`, `D1:1-2`, ...); Parent `child_ids` are attached only after this final numbering pass.
 - Child rewrites first retry an invalid persistence classification normally. If retries still leave zero or multiple persistence properties, the invalid persistence values are replaced by the single neutral value `unknown`, content properties are retained, and the complete child rewrite is validated again.
-- With semantic hierarchy enabled, Child and Parent depths are adaptive and independently bounded by `--eaes_rerank_limit` and `--parent_top_k`. Retrieval-only reports all-view probes, selected-view pools, pre-rerank prefixes, final children, selected parents, and final-combined stages separately.
+- With semantic hierarchy enabled, Child and Parent pools are independently bounded by `--eaes_child_candidate_limit` and `--parent_top_k`. Retrieval-only reports all-view probes, fused pools, final children, selected parents, and selector pre/post stages separately.

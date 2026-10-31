@@ -77,12 +77,12 @@ class _FakeController:
                 "fused_score_ratio": 1.0 / rank,
                 "fused_rank": rank,
                 "prefilter_rank": rank,
-                "inside_adaptive_prefix": rank <= config.EAES_RERANK_LIMIT,
+                "inside_fused_safety_cap": rank <= config.EAES_CHILD_CANDIDATE_LIMIT,
                 "adaptive_k": min(
-                    config.EAES_RERANK_LIMIT, len(self.candidates)
+                    config.EAES_CHILD_CANDIDATE_LIMIT, len(self.candidates)
                 ),
             })
-        adaptive = children[:config.EAES_RERANK_LIMIT]
+        adaptive = children[:config.EAES_CHILD_CANDIDATE_LIMIT]
         parents = []
         if config.SEMANTIC_HIERARCHY:
             parents = [{
@@ -94,7 +94,7 @@ class _FakeController:
                 "fused_rank": i,
                 "rank": i,
                 "score": 1.0 / (10 + i),
-                "inside_adaptive_prefix": True,
+                "inside_fused_safety_cap": True,
                 "adaptive_k": 4,
             } for i in range(1, 5)]
         return {
@@ -144,10 +144,6 @@ class _AblationAgent(EAESMixin):
     def _as_list(value):
         return value if isinstance(value, list) else []
 
-    @staticmethod
-    def rerank_eaes_phrase_candidates(_question, candidates, top_k=15):
-        return list(candidates)[:top_k]
-
     def select_eaes_evidence(self, _question, query_plan, candidates):
         self.selector_calls += 1
         self.selector_query_plans.append(dict(query_plan))
@@ -175,14 +171,14 @@ def _candidates(count=20):
 
 
 class EvidenceSelectorAblationTests(unittest.TestCase):
-    def test_disabled_selector_passes_every_reranked_candidate_to_reader(self):
+    def test_disabled_selector_passes_every_retrieved_candidate_to_reader(self):
         agent = _AblationAgent(_candidates())
 
         with (
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", False),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_CHILD_CANDIDATE_LIMIT", 16),
         ):
             answer, prediction_context = agent.answer_question_eaes(
                 "question", category=1
@@ -203,8 +199,8 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         )
         self.assertTrue(all(
             set(item["evidence"][0]) == {
-                "memory_id", "conversation_time", "rewrite_content",
-                "retrieval_score", "rerank_rank",
+                "memory_id", "parent_id", "conversation_time",
+                "rewrite_content",
             }
             for item in package["answer_items"]
         ))
@@ -217,7 +213,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", False),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_CHILD_CANDIDATE_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             _, prediction_context = agent.answer_question_eaes(
@@ -259,8 +255,8 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
         )
         self.assertTrue(all(
             set(item) == {
-                "memory_id", "conversation_time", "rewrite_content",
-                "retrieval_score", "rerank_rank",
+                "memory_id", "parent_id", "conversation_time",
+                "rewrite_content",
             }
             for item in reader_input["backup_candidates"]
         ))
@@ -302,7 +298,7 @@ class EvidenceSelectorAblationTests(unittest.TestCase):
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", True),
             patch.object(config, "SEMANTIC_HIERARCHY", True),
             patch.object(config, "EAES_ROLLBACK_CHECK", True),
-            patch.object(config, "EAES_RERANK_LIMIT", 16),
+            patch.object(config, "EAES_CHILD_CANDIDATE_LIMIT", 16),
             patch.object(config, "PARENT_TOP_K", 4),
         ):
             agent.answer_question_eaes("question", category=4)

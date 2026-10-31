@@ -17,22 +17,18 @@ def compact_eaes_retrieval(retrieval):
         "memory_id", "event_id", "parent_id", "origin", "tag",
         "rewrite_content", "max_phrase_similarity", "question_relevance",
         "joint_relevance", "fused_score", "fused_score_ratio",
-        "fused_rank", "normalized_mass", "cumulative_mass",
-        "mass_target", "inside_fused_safety_cap",
-        "inside_adaptive_prefix", "adaptive_k",
+        "fused_rank", "inside_fused_safety_cap", "adaptive_k",
         "base_score", "candidate_score", "score", "score_parts",
-        "candidate_sources", "prefilter_rank", "rerank_rank",
-        "rerank_source", "matched_tag", "phrase_matches",
+        "candidate_sources", "prefilter_rank", "matched_tag", "phrase_matches",
         "matched_query_phase", "retrieval_source", "routed_parent_id",
         "parent_route_support", "parent_route_score",
         "parent_route_rank",
     )
     parent_fields = (
         "parent_id", "rewrite_content", "raw_similarity",
-        "question_relevance", "inside_adaptive_prefix", "adaptive_k",
+        "question_relevance", "adaptive_k",
         "joint_relevance", "fused_score", "fused_score_ratio",
-        "fused_rank", "normalized_mass", "cumulative_mass",
-        "mass_target", "inside_fused_safety_cap",
+        "fused_rank", "inside_fused_safety_cap",
         "parent_probability", "child_support", "posterior_score",
         "selected", "rank", "score", "matched_query_phase",
     )
@@ -293,12 +289,10 @@ class RetrievalMixin:
             "question_relevance_weight": getattr(
                 config, "EAES_QUESTION_RELEVANCE_WEIGHT", 0.7
             ),
-            "child_mass_target": getattr(
-                config, "EAES_CHILD_MASS_TARGET", 0.85
+            "child_candidate_limit": getattr(
+                config, "EAES_CHILD_CANDIDATE_LIMIT", 30
             ),
-            "parent_mass_target": getattr(
-                config, "EAES_PARENT_MASS_TARGET", 0.85
-            ),
+            "parent_candidate_limit": getattr(config, "PARENT_TOP_K", 10),
             "parent_child_routing": retrieval.get(
                 "parent_child_routing"
             ) or {"enabled": False},
@@ -313,15 +307,9 @@ class RetrievalMixin:
                 )
                 phrase_scores = phrase_info.get("phrase_scores") or []
                 fused = child_selected.get(memory_id) or {}
-                adaptive = child_adaptive.get(memory_id) or {}
-                final = child_final.get(memory_id) or {}
                 routed = parent_routed_child.get(memory_id) or {}
                 any_top30 = any(
                     row.get("inside_top30") for row in phrase_scores
-                )
-                selected_top30 = any(
-                    row.get("inside_top30") and row.get("phrase_selected")
-                    for row in phrase_scores
                 )
                 if note is None:
                     drop_reason = "no_child_memory_built"
@@ -329,16 +317,10 @@ class RetrievalMixin:
                     drop_reason = "inside_final_child"
                 elif not any_top30:
                     drop_reason = "outside_joint_relevance_top30"
-                elif not selected_top30:
-                    drop_reason = "retrieved_only_by_unselected_phrase"
                 elif memory_id not in child_adaptive:
-                    drop_reason = (
-                        "outside_child_fused_safety_cap"
-                        if not fused.get("inside_fused_safety_cap")
-                        else "outside_child_cumulative_mass_prefix"
-                    )
+                    drop_reason = "outside_child_fused_safety_cap"
                 else:
-                    drop_reason = "missing_after_child_rerank"
+                    drop_reason = "missing_after_child_pool"
                 child_nodes.append({
                     "memory_id": memory_id,
                     "event_id": note.event_id if note is not None else None,
@@ -358,9 +340,6 @@ class RetrievalMixin:
                         "fused_score_ratio", 0.0
                     ),
                     "fused_rank": fused.get("fused_rank"),
-                    "normalized_mass": fused.get("normalized_mass", 0.0),
-                    "cumulative_mass": fused.get("cumulative_mass"),
-                    "mass_target": fused.get("mass_target"),
                     "inside_fused_safety_cap": fused.get(
                         "inside_fused_safety_cap", False
                     ),
@@ -370,9 +349,7 @@ class RetrievalMixin:
                             "adaptive_child_k"
                         ),
                     ),
-                    "inside_adaptive_prefix": memory_id in child_adaptive,
-                    "pre_rerank_rank": fused.get("fused_rank"),
-                    "rerank_rank": final.get("rerank_rank"),
+                    "inside_direct_child_pool": memory_id in child_adaptive,
                     "inside_final_child": memory_id in child_final,
                     "inside_parent_route": (
                         memory_id in parent_routed_child
@@ -408,13 +385,8 @@ class RetrievalMixin:
                 )
                 phrase_scores = phrase_info.get("phrase_scores") or []
                 fused = parent_selected.get(parent_id) or {}
-                final = parent_final.get(parent_id) or {}
                 any_top10 = any(
                     row.get("inside_top10") for row in phrase_scores
-                )
-                selected_top10 = any(
-                    row.get("inside_top10") and row.get("phrase_selected")
-                    for row in phrase_scores
                 )
                 if parent is None:
                     drop_reason = "no_parent_memory_built"
@@ -422,14 +394,8 @@ class RetrievalMixin:
                     drop_reason = "inside_final_parent"
                 elif not any_top10:
                     drop_reason = "outside_joint_relevance_parent_top10"
-                elif not selected_top10:
-                    drop_reason = "retrieved_only_by_unselected_phrase"
                 else:
-                    drop_reason = (
-                        "outside_parent_fused_safety_cap"
-                        if not fused.get("inside_fused_safety_cap")
-                        else "outside_parent_cumulative_mass_prefix"
-                    )
+                    drop_reason = "outside_parent_fused_safety_cap"
                 parent_nodes.append({
                     "parent_id": parent_id,
                     "rewrite_content": (
@@ -448,9 +414,6 @@ class RetrievalMixin:
                         "fused_score_ratio", 0.0
                     ),
                     "fused_rank": fused.get("fused_rank"),
-                    "normalized_mass": fused.get("normalized_mass", 0.0),
-                    "cumulative_mass": fused.get("cumulative_mass"),
-                    "mass_target": fused.get("mass_target"),
                     "inside_fused_safety_cap": fused.get(
                         "inside_fused_safety_cap", False
                     ),
@@ -460,7 +423,6 @@ class RetrievalMixin:
                             "adaptive_parent_k"
                         ),
                     ),
-                    "inside_adaptive_prefix": parent_id in parent_final,
                     "inside_final_parent": parent_id in parent_final,
                     "inside_post_selector_parent": (
                         parent_id in post_selector_parent
@@ -603,13 +565,13 @@ class RetrievalMixin:
                 "dropped_by_pool_limit_ids", []
             )
         )
-        reranked_candidates = self._as_list(retrieval.get("candidates"))
-        reranked_by_memory_id = {
-            item.get("memory_id"): item for item in reranked_candidates
+        final_candidates = self._as_list(retrieval.get("candidates"))
+        final_by_memory_id = {
+            item.get("memory_id"): item for item in final_candidates
             if isinstance(item, dict) and item.get("memory_id")
         }
         retrieved_memory_ids = {
-            item.get("memory_id") for item in reranked_candidates if isinstance(item, dict)
+            item.get("memory_id") for item in final_candidates if isinstance(item, dict)
         }
         parent_ids = set(self._as_list(retrieval.get("parent_ids")))
         parent_origin_groups = self._as_list(
@@ -617,8 +579,10 @@ class RetrievalMixin:
         )
 
         diagnostics = {
-            "initial_limit": getattr(config, "EAES_PHRASE_UNION_LIMIT", 60),
-            "rerank_limit": getattr(config, "EAES_PHRASE_RERANK_LIMIT", 15),
+            "initial_limit": getattr(config, "EAES_CANDIDATE_LIMIT", 120),
+            "candidate_limit": getattr(
+                config, "EAES_CHILD_CANDIDATE_LIMIT", 30
+            ),
             "total_scored_memories": len(self.memory.eaes_notes),
             "gold_origins": [],
         }
@@ -640,7 +604,6 @@ class RetrievalMixin:
                     "in_initial_child": False,
                     "in_final_child": False,
                     "prefilter_rank": None,
-                    "rerank_rank": None,
                     "candidate_score": None,
                     "phrase_hits": [],
                     "drop_reason": "gold_origin_not_in_episode_events",
@@ -650,21 +613,19 @@ class RetrievalMixin:
                 note = self.memory.get_eaes_note(memory_id) if memory_id else None
                 scored = by_memory_id.get(memory_id) or by_event_id.get(event_id)
                 rank = scored.get("prefilter_rank") if scored else None
-                reranked = reranked_by_memory_id.get(memory_id)
-                rerank_rank = reranked.get("rerank_rank") if reranked else None
                 covered_by_selected_parent = bool(
                     note is not None and note.parent_id in parent_ids
                 )
                 if note is None:
                     drop_reason = "not_built_in_eaes_memory"
-                elif memory_id in reranked_by_memory_id:
-                    drop_reason = "inside_llm_top15"
+                elif memory_id in final_by_memory_id:
+                    drop_reason = "inside_final_child"
                 elif covered_by_selected_parent:
-                    drop_reason = "inside_dynamic_parent"
+                    drop_reason = "inside_final_parent"
                 elif memory_id in pool_dropped_ids:
                     drop_reason = "dropped_by_initial_pool_limit"
                 elif memory_id in initial_memory_ids:
-                    drop_reason = "dropped_by_llm_reranker"
+                    drop_reason = "missing_after_child_pool"
                 else:
                     drop_reason = "not_in_any_dynamic_phrase_topk"
                 memory_entries.append({
@@ -676,7 +637,6 @@ class RetrievalMixin:
                     "in_initial_child": memory_id in initial_memory_ids,
                     "in_final_child": memory_id in retrieved_memory_ids,
                     "prefilter_rank": rank,
-                    "rerank_rank": rerank_rank,
                     "candidate_score": scored.get("candidate_score") if scored else None,
                     "phrase_hits": phrase_hits.get(memory_id, []),
                     "drop_reason": drop_reason,
@@ -697,20 +657,16 @@ class RetrievalMixin:
                 entry["prefilter_rank"] for entry in memory_entries
                 if entry["prefilter_rank"] is not None
             ]
-            rerank_values = [
-                entry["rerank_rank"] for entry in memory_entries
-                if entry["rerank_rank"] is not None
-            ]
             if not event_ids:
                 origin_drop_reason = "gold_origin_not_in_episode_events"
             elif not memory_ids:
                 origin_drop_reason = "no_gold_memory_built_for_origin"
             elif covered_by_child:
-                origin_drop_reason = "inside_llm_top15"
+                origin_drop_reason = "inside_final_child"
             elif covered_by_parent:
-                origin_drop_reason = "inside_dynamic_parent"
+                origin_drop_reason = "inside_final_parent"
             elif rank_values:
-                origin_drop_reason = "dropped_by_llm_reranker"
+                origin_drop_reason = "missing_after_child_pool"
             elif any(memory_id in pool_dropped_ids for memory_id in memory_ids):
                 origin_drop_reason = "dropped_by_initial_pool_limit"
             else:
@@ -726,7 +682,6 @@ class RetrievalMixin:
                 "matched_parent_ids": matched_parent_ids,
                 "drop_reason": origin_drop_reason,
                 "best_prefilter_rank": min(rank_values, default=None),
-                "best_rerank_rank": min(rerank_values, default=None),
                 "memories": memory_entries,
             })
         return diagnostics
@@ -789,9 +744,9 @@ class RetrievalMixin:
                         for candidate in first_parent_candidates
                     ],
                 }
-            run_local_selector = (
+            run_joint_selector = (
                 not config.DISABLE_EVIDENCE_SELECTOR
-                and config.EVIDENCE_SELECTOR_BACKEND == "local"
+                and config.EVIDENCE_SELECTOR_BACKEND in {"local", "setwise"}
             )
             selector_input_candidates = list(candidates)
             parent_routed_children = []
@@ -802,7 +757,7 @@ class RetrievalMixin:
                 "routed_child_k": 0,
                 "selector_input_child_k": len(candidates),
             }
-            if run_local_selector:
+            if run_joint_selector:
                 (
                     selector_input_candidates,
                     parent_routed_children,
@@ -872,7 +827,7 @@ class RetrievalMixin:
                 "parent_probe_all_views": parent_probe_groups,
                 "child_selected_views": prefilter_groups,
                 "parent_selected_views": selected_parent_groups,
-                "child_pre_rerank": initial_groups,
+                "child_fused_pool": initial_groups,
                 "parent_final": parent_origin_groups,
                 "prefilter_child": prefilter_groups,
                 "initial_child": initial_groups,
@@ -883,10 +838,10 @@ class RetrievalMixin:
                 "selector_input_child": selector_input_child_groups,
             }
             # Preserve upstream metrics and gold diagnostics. Report the actual
-            # local-selector output as additional pre/post stages, without a reader call.
+            # Local-selector output is an additional pre/post stage; no reader runs.
             selector_details = None
             selector_children, selector_parents = [], []
-            if run_local_selector:
+            if run_joint_selector:
                 if selector_input_candidates or parent_candidates:
                     selection = self.select_eaes_evidence(
                         question, self._eaes_child_query_plan(query_plan),
@@ -897,7 +852,8 @@ class RetrievalMixin:
                     selector_parents = selection["selected_parent_memories"]
                     selector_details = selection["selector_diagnostics"]
                 else:
-                    selector_details = {"enabled": True, "backend": "local",
+                    selector_details = {"enabled": True,
+                                        "backend": config.EVIDENCE_SELECTOR_BACKEND,
                                         "stop_reason": "no_candidates", "selected_nodes": []}
                 stage_origin_groups["pre_selector"] = (
                     selector_input_child_groups + parent_origin_groups

@@ -340,47 +340,5 @@ class PhraseRankingTests(unittest.TestCase):
         ])
 
 
-class PhraseRerankerTests(unittest.TestCase):
-    def test_reranker_payload_hides_phrase_and_rrf_information(self):
-        mixin = _TestEAES()
-        mixin.llm = _QueuedLLM([{"ranked_memory_ids": ["M_2", "M_1"]}])
-        candidates = [
-            {
-                "memory_id": "M_1",
-                "origin": "D1:1",
-                "tag": [
-                    "Person profile.alpha", "Person profile.alpha topic",
-                ],
-                "rewrite_content": "Alpha memory",
-                "_internal_score": 0.9,
-                "phrase": "hidden",
-                "phrase_rank": 1,
-            },
-            {
-                "memory_id": "M_2",
-                "origin": "D1:2",
-                "tag": [
-                    "Person profile.beta", "Person profile.beta topic",
-                ],
-                "rewrite_content": "Beta memory",
-                "_internal_score": 0.4,
-            },
-        ]
-
-        result = mixin.rerank_eaes_phrase_candidates(
-            "Which memory answers the question?", candidates, top_k=2
-        )
-
-        payload = mixin.llm.inputs[0]["user"]
-        self.assertEqual([item["memory_id"] for item in result], ["M_2", "M_1"])
-        self.assertNotIn("query_plan", payload)
-        self.assertEqual(
-            set(payload["candidates"][0]),
-            {"memory_id", "origin", "tag", "rewrite_content"},
-        )
-        for item in result:
-            self.assertNotIn("_internal_score", item)
-
-
 if __name__ == "__main__":
     unittest.main()

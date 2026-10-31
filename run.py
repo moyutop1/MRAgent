@@ -3,7 +3,7 @@ Main entry: EAES retrieval and answering over reconstructed conversational memor
 
 Pipeline (per sample):
   rewrite -> embed -> extract_keyword (memory-index hints) -> build EAES notes
-  -> parse query plan -> retrieve/rerank evidence -> final reader
+  -> parse query plan -> fuse retrieval views -> select evidence -> final reader
 
 Usage:
   python run.py --data locomo --model gemini --file <tag> --eaes [--sample 42]
@@ -269,7 +269,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
         "parent_probe_all_views": "parent_probe_k",
         "child_selected_views": "selected_view_child_k",
         "parent_selected_views": "selected_view_parent_k",
-        "child_pre_rerank": "adaptive_child_k",
+        "child_fused_pool": "adaptive_child_k",
         "parent_final": "adaptive_parent_k",
         "prefilter_child": "prefilter_child_k",
         "initial_child": "initial_child_k",

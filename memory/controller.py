@@ -464,222 +464,6 @@ class MemoryController:
         return fidelities
 
     @staticmethod
-    def _eaes_view_contribution_maps(rankings, id_field):
-        return [
-            {
-                item[id_field]: float(item.get("support_potential") or 0.0)
-                for item in ranking
-                if item.get(id_field)
-            }
-            for ranking in rankings
-        ]
-
-    @staticmethod
-    def _eaes_marginal_gain(contributions, coverage):
-        """Sum saturating node gains A_i(m) * (1 - C(m | S))."""
-        return sum(
-            value * (1.0 - coverage.get(node_id, 0.0))
-            for node_id, value in contributions.items()
-        )
-
-    def _select_eaes_channel_views_by_meg(
-            self,
-            retrieval_phrases,
-            fidelities,
-            rankings,
-            id_field,
-    ):
-        """Greedily maximize one channel's saturating evidence coverage."""
-        contribution_maps = self._eaes_view_contribution_maps(
-            rankings, id_field
-        )
-        scale = max(
-            (sum(values.values()) for values in contribution_maps),
-            default=0.0,
-        )
-        min_views = int(config.EAES_MIN_SELECTED_VIEWS)
-        max_views = int(config.EAES_MAX_SELECTED_VIEWS)
-        threshold = float(config.EAES_VIEW_GAIN_THRESHOLD)
-        if scale <= 0.0:
-            for ranking in rankings:
-                for item in ranking:
-                    item["phrase_selected"] = False
-            return [], {
-                "phrases": [
-                    {
-                        "phrase_index": phrase_index,
-                        "phrase": phrase,
-                        "fidelity": float(fidelities[phrase_index]),
-                        "selected": False,
-                        "selection_step": None,
-                        "marginal_gain": 0.0,
-                        "normalized_marginal_gain": 0.0,
-                        "remaining_marginal_gain": 0.0,
-                        "remaining_normalized_marginal_gain": 0.0,
-                        "decision": "no_channel_evidence",
-                    }
-                    for phrase_index, phrase in enumerate(retrieval_phrases)
-                ],
-                "selection_history": [],
-                "min_views": min_views,
-                "max_views": max_views,
-                "gain_threshold": threshold,
-                "initial_gain_scale": 0.0,
-            }
-        coverage = {}
-        selected = []
-        history = []
-        remaining = set(range(len(retrieval_phrases)))
-
-        def normalized_gain(raw_gain):
-            return raw_gain / scale if scale > 0.0 else 0.0
-
-        while remaining and len(selected) < max_views:
-            rows = []
-            for phrase_index in sorted(remaining):
-                raw_gain = self._eaes_marginal_gain(
-                    contribution_maps[phrase_index], coverage
-                )
-                rows.append({
-                    "phrase_index": phrase_index,
-                    "marginal_gain": raw_gain,
-                    "normalized_marginal_gain": normalized_gain(raw_gain),
-                })
-            best = max(
-                rows,
-                key=lambda row: (
-                    row["normalized_marginal_gain"],
-                    -row["phrase_index"],
-                ),
-            )
-            must_select = len(selected) < min_views
-            if (
-                    not must_select
-                    and best["normalized_marginal_gain"] < threshold
-            ):
-                history.append({
-                    "step": len(selected) + 1,
-                    "selected_phrase_index": None,
-                    "stop_reason": "below_marginal_gain_threshold",
-                    "candidates": rows,
-                })
-                break
-
-            phrase_index = best["phrase_index"]
-            selected.append(phrase_index)
-            remaining.remove(phrase_index)
-            for node_id, value in contribution_maps[phrase_index].items():
-                old_coverage = coverage.get(node_id, 0.0)
-                coverage[node_id] = (
-                    old_coverage + value * (1.0 - old_coverage)
-                )
-            history.append({
-                "step": len(selected),
-                "selected_phrase_index": phrase_index,
-                "stop_reason": None,
-                "candidates": rows,
-            })
-
-        selected_step = {
-            phrase_index: step
-            for step, phrase_index in enumerate(selected, start=1)
-        }
-        selected_gain = {}
-        for step in history:
-            chosen = step.get("selected_phrase_index")
-            if chosen is None:
-                continue
-            selected_gain[chosen] = next(
-                (
-                    row for row in step.get("candidates", [])
-                    if row.get("phrase_index") == chosen
-                ),
-                {},
-            )
-
-        phrase_rows = []
-        for phrase_index, phrase in enumerate(retrieval_phrases):
-            raw_gain = self._eaes_marginal_gain(
-                contribution_maps[phrase_index], coverage
-            )
-            remaining_gain = normalized_gain(raw_gain)
-            is_selected = phrase_index in selected_step
-            if is_selected:
-                decision = "selected"
-            elif len(selected) >= max_views:
-                decision = "max_views_reached"
-            elif raw_gain <= 1e-12:
-                decision = "redundant_with_selected_views"
-            else:
-                decision = "below_marginal_gain_threshold"
-            reported = selected_gain.get(phrase_index) or {
-                "marginal_gain": raw_gain,
-                "normalized_marginal_gain": remaining_gain,
-            }
-            phrase_rows.append({
-                "phrase_index": phrase_index,
-                "phrase": phrase,
-                "fidelity": float(fidelities[phrase_index]),
-                "selected": is_selected,
-                "selection_step": selected_step.get(phrase_index),
-                "marginal_gain": reported.get("marginal_gain", 0.0),
-                "normalized_marginal_gain": reported.get(
-                    "normalized_marginal_gain", 0.0
-                ),
-                "remaining_marginal_gain": raw_gain,
-                "remaining_normalized_marginal_gain": remaining_gain,
-                "decision": decision,
-            })
-
-        for ranking in rankings:
-            for item in ranking:
-                item["phrase_selected"] = (
-                    item.get("phrase_index") in selected_step
-                )
-        return selected, {
-            "phrases": phrase_rows,
-            "selection_history": history,
-            "min_views": min_views,
-            "max_views": max_views,
-            "gain_threshold": threshold,
-            "initial_gain_scale": scale,
-        }
-
-    def select_eaes_views_by_meg(
-            self,
-            retrieval_phrases,
-            fidelities,
-            child_rankings,
-            parent_rankings,
-    ):
-        """Select shared phrases independently for child and parent channels."""
-        child_selected, child_diagnostics = (
-            self._select_eaes_channel_views_by_meg(
-                retrieval_phrases,
-                fidelities,
-                child_rankings,
-                "memory_id",
-            )
-        )
-        parent_selected, parent_diagnostics = (
-            self._select_eaes_channel_views_by_meg(
-                retrieval_phrases,
-                fidelities,
-                parent_rankings,
-                "parent_id",
-            )
-        )
-        return {
-            "child_selected_phrase_indices": child_selected,
-            "parent_selected_phrase_indices": parent_selected,
-            "child": child_diagnostics,
-            "parent": parent_diagnostics,
-            "question_relevance_weight": float(
-                config.EAES_QUESTION_RELEVANCE_WEIGHT
-            ),
-        }
-
-    @staticmethod
     def fuse_eaes_channel_rankings(
             phrase_rankings,
             selected_phrase_indices,
@@ -761,73 +545,6 @@ class MemoryController:
         return rows
 
     @staticmethod
-    def select_eaes_adaptive_prefix(
-            candidates,
-            max_k,
-            mass_target=None,
-            min_k=1,
-            relevance_floor=None,
-            ratio_threshold=None,
-    ):
-        """Keep the smallest fused-score prefix reaching target mass."""
-        annotated = [dict(item) for item in candidates]
-        if not annotated or max_k <= 0:
-            return [], annotated
-        mass_target = float(
-            mass_target if mass_target is not None else 0.85
-        )
-        if not 0.0 < mass_target <= 1.0:
-            raise ValueError("mass_target must be in (0, 1]")
-        eligible = True
-        if relevance_floor is not None:
-            eligible = float(
-                annotated[0].get("question_relevance") or 0.0
-            ) >= float(relevance_floor)
-        selected_k = 0
-        safety_k = min(int(max_k), len(annotated))
-        all_score_values = [
-            max(
-                0.0,
-                float(
-                    item.get("fused_score")
-                    if item.get("fused_score") is not None
-                    else item.get("candidate_score")
-                    if item.get("candidate_score") is not None
-                    else 0.0
-                ),
-            )
-            for item in annotated
-        ]
-        total_score = sum(all_score_values)
-        if eligible:
-            if total_score <= 1e-12:
-                selected_k = safety_k
-            else:
-                cumulative = 0.0
-                selected_k = safety_k
-                for index, score in enumerate(
-                        all_score_values[:safety_k], start=1):
-                    cumulative += score / total_score
-                    if cumulative + 1e-12 >= mass_target:
-                        selected_k = index
-                        break
-            selected_k = min(safety_k, max(min_k, selected_k))
-        cumulative_mass = 0.0
-        for index, item in enumerate(annotated):
-            normalized_mass = (
-                all_score_values[index] / total_score
-                if total_score > 1e-12 else 1.0 / len(annotated)
-            )
-            cumulative_mass += normalized_mass
-            item["normalized_mass"] = normalized_mass
-            item["cumulative_mass"] = min(1.0, cumulative_mass)
-            item["mass_target"] = mass_target
-            item["inside_fused_safety_cap"] = index < safety_k
-            item["inside_adaptive_prefix"] = index < selected_k
-            item["adaptive_k"] = selected_k
-        return annotated[:selected_k], annotated
-
-    @staticmethod
     def _eaes_compact_phrase_rankings(rankings, id_field):
         return [
             {
@@ -854,7 +571,7 @@ class MemoryController:
             question_emb=None,
             question_text=None,
     ):
-        """Run shared-view, independent-channel retrieval and adaptive depths."""
+        """Fuse every retrieval view, then apply only channel safety caps."""
         phrases = [str(value).strip() for value in retrieval_phrases or []]
         _, child_relevance, parent_relevance = (
             self._eaes_question_relevance_maps(
@@ -872,77 +589,56 @@ class MemoryController:
             top_k=config.EAES_PARENT_PHRASE_TOP_K,
             question_relevance_by_id=parent_relevance,
         )
-        fidelities = self._score_eaes_view_rankings(
+        self._score_eaes_view_rankings(
             child_rankings,
             parent_rankings,
             phrases,
             question_emb=question_emb,
             question_text=question_text,
         )
-        selection = self.select_eaes_views_by_meg(
-            phrases, fidelities, child_rankings, parent_rankings
-        )
-        child_selected_indices = selection[
-            "child_selected_phrase_indices"
-        ]
-        parent_selected_indices = selection[
-            "parent_selected_phrase_indices"
-        ]
         all_indices = list(range(len(phrases)))
-        child_probe = self.fuse_eaes_channel_rankings(
+        for ranking in child_rankings + parent_rankings:
+            for item in ranking:
+                item["phrase_selected"] = True
+        child_fused = self.fuse_eaes_channel_rankings(
             child_rankings, all_indices, "memory_id"
         )
-        parent_probe = self.fuse_eaes_channel_rankings(
+        parent_fused = self.fuse_eaes_channel_rankings(
             parent_rankings, all_indices, "parent_id"
         )
-        child_fused = self.fuse_eaes_channel_rankings(
-            child_rankings,
-            child_selected_indices,
-            "memory_id",
-        )
-        parent_fused = self.fuse_eaes_channel_rankings(
-            parent_rankings,
-            parent_selected_indices,
-            "parent_id",
-        )
-        adaptive_children, child_scored = self.select_eaes_adaptive_prefix(
-            child_fused,
-            max_k=config.EAES_RERANK_LIMIT,
-            mass_target=config.EAES_CHILD_MASS_TARGET,
-            min_k=1,
-        )
-        adaptive_parents, parent_scored = self.select_eaes_adaptive_prefix(
-            parent_fused,
-            max_k=config.PARENT_TOP_K,
-            mass_target=config.EAES_PARENT_MASS_TARGET,
-            min_k=1,
-            relevance_floor=config.PARENT_RELEVANCE_FLOOR,
-        )
+        adaptive_children = child_fused[:config.EAES_CHILD_CANDIDATE_LIMIT]
+        adaptive_parents = parent_fused[:config.PARENT_TOP_K]
+        for index, child in enumerate(child_fused):
+            child["inside_fused_safety_cap"] = index < len(adaptive_children)
+            child["adaptive_k"] = len(adaptive_children)
+        for index, parent in enumerate(parent_fused):
+            parent["inside_fused_safety_cap"] = index < len(adaptive_parents)
+            parent["adaptive_k"] = len(adaptive_parents)
         for rank, parent in enumerate(adaptive_parents, start=1):
             parent["rank"] = rank
             parent["score"] = float(parent.get("fused_score") or 0.0)
         return {
-            "child_probe_candidates": child_probe,
-            "parent_probe_candidates": parent_probe,
-            "selected_child_candidates": child_scored,
-            "selected_parent_candidates": parent_scored,
+            "child_probe_candidates": child_fused,
+            "parent_probe_candidates": parent_fused,
+            "selected_child_candidates": child_fused,
+            "selected_parent_candidates": parent_fused,
             "adaptive_children": adaptive_children,
             "adaptive_parents": adaptive_parents,
             "child_rankings": child_rankings,
             "parent_rankings": parent_rankings,
             "phrase_retrieval": {
-                **selection,
-                "child_mass_target": float(config.EAES_CHILD_MASS_TARGET),
-                "parent_mass_target": float(config.EAES_PARENT_MASS_TARGET),
+                "child_selected_phrase_indices": all_indices,
+                "parent_selected_phrase_indices": all_indices,
+                "question_relevance_weight": float(
+                    config.EAES_QUESTION_RELEVANCE_WEIGHT
+                ),
                 "child": {
-                    **selection["child"],
                     "top_k": config.EAES_PHRASE_INITIAL_TOP_K,
                     "rankings": self._eaes_compact_phrase_rankings(
                         child_rankings, "memory_id"
                     ),
                 },
                 "parent": {
-                    **selection["parent"],
                     "top_k": config.EAES_PARENT_PHRASE_TOP_K,
                     "rankings": self._eaes_compact_phrase_rankings(
                         parent_rankings, "parent_id"

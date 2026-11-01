@@ -1049,68 +1049,76 @@ class EAESMixin:
         return context
 
     def select_eaes_evidence(self, question, query_plan, candidates, parent_candidates=None):
-        """Local backends select child/parent nodes jointly; legacy backend unchanged."""
+        """Local backends select child/parent evidence; legacy backend unchanged."""
         if config.EVIDENCE_SELECTOR_BACKEND == "setwise":
             from llm.setwise_evidence_selector import get_setwise_evidence_selector
 
             started = time.perf_counter()
             selector = get_setwise_evidence_selector()
-            nodes, seen = [], set()
-            for kind, items in (("child", candidates), ("parent", parent_candidates or [])):
-                for candidate in items:
-                    node_id = candidate.get(
-                        "memory_id" if kind == "child" else "parent_id"
-                    )
-                    if not node_id or node_id in seen:
-                        continue
-                    seen.add(node_id)
-                    nodes.append({
-                        "kind": kind,
-                        "id": node_id,
-                        "source": (
-                            candidate.get("retrieval_source", "direct_child")
-                            if kind == "child" else "parent"
-                        ),
-                        "candidate": candidate,
-                        "payload": (
-                            self._eaes_reader_child_memory(candidate)
-                            if kind == "child"
-                            else self._eaes_reader_parent_memory(candidate)
-                        ),
-                    })
-            redundant_ids, input_tokens = selector.select_redundant_ids(
+            children, seen = [], set()
+            for candidate in candidates:
+                memory_id = candidate.get("memory_id")
+                if memory_id and memory_id not in seen:
+                    seen.add(memory_id)
+                    children.append(candidate)
+            parents = []
+            for candidate in parent_candidates or []:
+                parent_id = candidate.get("parent_id")
+                if parent_id and parent_id not in seen:
+                    seen.add(parent_id)
+                    parents.append(candidate)
+
+            child_redundant_ids, child_input_tokens = selector.select_redundant_ids(
                 self._eaes_query_question(question),
-                [node["payload"] for node in nodes],
+                [self._eaes_reader_child_memory(candidate) for candidate in children],
             )
+            parent_redundant_ids, parent_input_tokens = selector.select_redundant_ids(
+                self._eaes_query_question(question),
+                [self._eaes_reader_parent_memory(candidate) for candidate in parents],
+            )
+            redundant_ids = child_redundant_ids + parent_redundant_ids
             redundant = set(redundant_ids)
-            selected = [node for node in nodes if node["id"] not in redundant]
+            selected_children = [
+                candidate for candidate in children
+                if candidate.get("memory_id") not in redundant
+            ]
+            selected_parents = [
+                candidate for candidate in parents
+                if candidate.get("parent_id") not in redundant
+            ]
             trace = {
                 "enabled": True,
                 "backend": "setwise",
                 "score_kind": "query_conditioned_zero_marginal_value",
                 "model_path": config.SELECTOR_MODEL_PATH,
-                "candidate_count": len(nodes),
-                "selector_input_tokens": input_tokens,
+                "candidate_count": len(children) + len(parents),
+                "selector_input_tokens": child_input_tokens + parent_input_tokens,
                 "redundant_ids": redundant_ids,
-                "selected_nodes": [
+                "selected_nodes": ([
                     {
-                        "kind": node["kind"],
-                        "id": node["id"],
-                        "source": node["source"],
+                        "kind": "child",
+                        "id": candidate.get("memory_id"),
+                        "source": candidate.get(
+                            "retrieval_source", "direct_child"
+                        ),
                     }
-                    for node in selected
-                ],
+                    for candidate in selected_children
+                ] + [
+                    {
+                        "kind": "parent",
+                        "id": candidate.get("parent_id"),
+                        "source": "parent",
+                    }
+                    for candidate in selected_parents
+                ]),
                 "elapsed_seconds": time.perf_counter() - started,
             }
             return {
                 "answer_items": [
-                    {"evidence": [node["candidate"]]}
-                    for node in selected if node["kind"] == "child"
+                    {"evidence": [candidate]}
+                    for candidate in selected_children
                 ],
-                "selected_parent_memories": [
-                    node["candidate"]
-                    for node in selected if node["kind"] == "parent"
-                ],
+                "selected_parent_memories": selected_parents,
                 "selector_diagnostics": trace,
             }
 

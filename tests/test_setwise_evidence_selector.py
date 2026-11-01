@@ -1,4 +1,4 @@
-"""One-pass setwise selector tests without model weights or network access."""
+"""Per-level setwise selector tests without model weights or network access."""
 
 from contextlib import ExitStack, nullcontext
 import json
@@ -131,13 +131,15 @@ class SetwiseSelectorTests(unittest.TestCase):
             )
         self.assertEqual(selector.model.calls, 0)
 
-    def test_agent_prunes_reported_ids_without_aliases_pairs_or_score_fields(self):
+    def test_agent_selects_children_and_parents_in_separate_calls(self):
         selector = types.SimpleNamespace()
         selector.inputs = []
 
         def select(question, candidates):
             selector.inputs.append((question, candidates))
-            return ["M_2"], 321
+            if candidates and candidates[0].get("memory_id"):
+                return ["M_2"], 321
+            return ["P_2"], 123
 
         selector.select_redundant_ids = select
         children = [
@@ -152,10 +154,16 @@ class SetwiseSelectorTests(unittest.TestCase):
                 "rewrite_content": "covered fact", "fused_score": 0.8,
             },
         ]
-        parents = [{
-            "parent_id": "P_1", "rewrite_content": "complementary summary",
-            "fused_score": 0.7,
-        }]
+        parents = [
+            {
+                "parent_id": "P_1", "rewrite_content": "complementary summary",
+                "fused_score": 0.7,
+            },
+            {
+                "parent_id": "P_2", "rewrite_content": "covered summary",
+                "fused_score": 0.6,
+            },
+        ]
         with patch.object(
             setwise_evidence_selector,
             "get_setwise_evidence_selector",
@@ -165,7 +173,7 @@ class SetwiseSelectorTests(unittest.TestCase):
                 "question", {}, children, parents
             )
 
-        self.assertEqual(len(selector.inputs), 1)
+        self.assertEqual(len(selector.inputs), 2)
         self.assertEqual(
             selector.inputs[0][1],
             [
@@ -179,15 +187,24 @@ class SetwiseSelectorTests(unittest.TestCase):
                     "conversation_time": "2023-05-09",
                     "rewrite_content": "covered fact",
                 },
+            ],
+        )
+        self.assertEqual(
+            selector.inputs[1][1],
+            [
                 {"parent_id": "P_1", "rewrite_content": "complementary summary"},
+                {"parent_id": "P_2", "rewrite_content": "covered summary"},
             ],
         )
         self.assertEqual(
             package["answer_items"][0]["evidence"][0]["memory_id"], "M_1"
         )
-        self.assertEqual(package["selected_parent_memories"], parents)
+        self.assertEqual(package["selected_parent_memories"], parents[:1])
         self.assertEqual(
-            package["selector_diagnostics"]["redundant_ids"], ["M_2"]
+            package["selector_diagnostics"]["redundant_ids"], ["M_2", "P_2"]
+        )
+        self.assertEqual(
+            package["selector_diagnostics"]["selector_input_tokens"], 444
         )
         self.assertEqual(
             [node["id"] for node in package["selector_diagnostics"]["selected_nodes"]],
@@ -195,9 +212,12 @@ class SetwiseSelectorTests(unittest.TestCase):
         )
 
     def test_reader_receives_only_retained_set_without_backup_reintroduction(self):
-        selector = types.SimpleNamespace(
-            select_redundant_ids=lambda _question, _candidates: (["M_2"], 123)
-        )
+        def select(_question, candidates):
+            if candidates and candidates[0].get("memory_id"):
+                return ["M_2"], 123
+            return [], 45
+
+        selector = types.SimpleNamespace(select_redundant_ids=select)
         reader_inputs = []
 
         def read(messages, **_kwargs):

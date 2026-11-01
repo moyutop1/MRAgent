@@ -173,7 +173,7 @@ The single entry point is `run.py`, invoked from the repository root.
 | `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
 | `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
 | `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
-| `--evidence_selector_backend` | `llm`, iterative `local` baseline, or one-pass `setwise` selector | `llm` |
+| `--evidence_selector_backend` | `llm`, iterative `local` baseline, or per-level `setwise` selector | `llm` |
 | `--selector_model_path` | existing local selector model directory; `setwise` requires an instruction-following causal LM | none |
 | `--selector_max_length` | complete local-selector prompt limit; inputs are rejected rather than truncated | `16384` |
 
@@ -217,7 +217,7 @@ python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 
 python run.py --data locomo --model deepseek-pro --file parent_route_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend local --selector_model_path /root/autodl-tmp/models/Qwen3-Reranker-4B --eaes_parent_child_routing --eaes_parent_child_route_limit 30
 python eval/evaluate_retrieval.py --data locomo --model deepseek-pro --file parent_route_s42 --sample conv-42 --eaes --semantic_hierarchy --evidence_selector_backend local --eaes_parent_child_routing
 
-# one-pass setwise zero-marginal pruning; the local instruction model reads real node IDs
+# per-level setwise zero-marginal pruning; the local instruction model reads real node IDs
 python run.py --data locomo --model deepseek-pro --file setwise_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend setwise --selector_model_path /path/to/local-4B-instruct-model --eaes_parent_child_routing
 
 ```
@@ -265,7 +265,7 @@ normalized gold evidence do not enter this metric.
 
 ## 7. Notes
 
-- The proposed `setwise` selector jointly reads every retrieved child and parent once, using real memory IDs and no extra embedding prefilter or candidate-pair construction. It removes only IDs judged to have zero query-conditioned marginal value: irrelevant nodes or nodes whose useful answer information is fully covered by retained nodes. Distinct events, times, entities, causal links, and complementary facts must be preserved. The iterative `local` selector remains as a budgeted baseline; `llm` remains the legacy default. All local model loading is offline and real-weight inference must be validated on the experiment machine.
+- The proposed `setwise` selector reads the complete Child set and complete Parent set in two independent calls, using real memory IDs and no extra embedding prefilter or candidate-pair construction. Redundancy is judged only within the same hierarchy level, so a Parent cannot cause a Child to be removed or vice versa; retained nodes from both levels are sent to the reader. It removes only IDs judged to have zero query-conditioned marginal value: irrelevant nodes or nodes whose useful answer information is fully covered by retained same-level nodes. Distinct events, times, entities, causal links, and complementary facts must be preserved. The iterative `local` selector remains as a budgeted baseline; `llm` remains the legacy default. All local model loading is offline and real-weight inference must be validated on the experiment machine.
 
 - The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
   `embedding` files to force regeneration of a sample.

@@ -1,4 +1,4 @@
-"""One-pass local selector for query-conditioned zero-marginal memories."""
+"""Per-level local selector for query-conditioned zero-marginal memories."""
 
 import json
 from pathlib import Path
@@ -31,7 +31,8 @@ def get_setwise_evidence_selector():
 class SetwiseEvidenceSelector:
     SYSTEM_PROMPT = (
         "Select the memory nodes that have zero marginal value for answering the "
-        "question. Read the complete candidate set jointly. Remove a node only "
+        "question. All candidates in this call are from the same hierarchy level; "
+        "judge redundancy only within this complete candidate set. Remove a node only "
         "when all of its useful answer-relevant information is already preserved "
         "by nodes that remain, or when it contributes no answer-relevant "
         "information. Similar topics are not redundant: preserve distinct people, "

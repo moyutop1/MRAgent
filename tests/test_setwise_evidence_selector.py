@@ -85,6 +85,15 @@ class SetwiseSelectorTests(unittest.TestCase):
             patch.object(config, "DISABLE_EVIDENCE_SELECTOR", False)
         )
 
+    def test_prompt_defines_conservative_redundancy_not_relevance_filtering(self):
+        prompt = setwise_evidence_selector.SetwiseEvidenceSelector.SYSTEM_PROMPT
+
+        self.assertIn("NOT to select relevant evidence", prompt)
+        self.assertIn("same event, state, relation, or experience", prompt)
+        self.assertIn("equal or finer specificity", prompt)
+        self.assertIn("When uncertain, keep the candidate", prompt)
+        self.assertNotIn("contributes no answer-relevant information", prompt)
+
     def test_model_reads_complete_set_once_and_returns_only_real_ids(self):
         selector = setwise_evidence_selector.SetwiseEvidenceSelector.__new__(
             setwise_evidence_selector.SetwiseEvidenceSelector

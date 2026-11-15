@@ -1,971 +1,69 @@
-﻿import json
-import logging
-import math
+import json
 import re
-import time
 
 from common import config
 from memory.system import EAESMemoryNote, EAESParentNode
 from prompts.prompts import Prompts
-
-logger = logging.getLogger(__name__)
 
 
 class EAESMixin:
     @staticmethod
     def _eaes_query_question(question):
         text = str(question or "").strip()
-        for suffix in (
-            " No extra explanations.",
-            " Give reasons with original text.",
-        ):
+        for suffix in (" No extra explanations.", " Give reasons with original text."):
             if text.endswith(suffix.strip()):
                 text = text[:-len(suffix.strip())].rstrip()
         return text
 
     @staticmethod
     def _normalize_eaes_parent_id(parent_id):
-        """Normalize legacy D<session>:t<n> IDs without rewriting old files."""
-        value = str(parent_id or "").strip()
-        match = re.fullmatch(r"D(\d+):t(\d+)", value, flags=re.IGNORECASE)
-        return f"{match.group(1)}-{match.group(2)}" if match else value
+        return str(parent_id or "").strip()
 
     @staticmethod
     def _eaes_memory_id(event_id):
         return "M_" + re.sub(r"[^A-Za-z0-9]+", "_", event_id).strip("_")
 
-    @staticmethod
-    def _eaes_infer_lifecycle(text, explicit=None):
-        explicit = (explicit or "").lower().strip()
-        if explicit in {"planned", "current", "historical"}:
-            return explicit
-        t = (text or "").lower()
-        planned_markers = [
-            "will ", "going to", "plans to", "planned to", "planning to", "hopes to",
-            "expects to", "scheduled", "upcoming", "next ", "tomorrow", "looking forward"
-        ]
-        historical_markers = [
-            "attended", "went", "visited", "had ", "did ", "was ", "were ", "finished",
-            "completed", "joined", "shared", "talked", "met", "bought", "made", "created"
-        ]
-        current_markers = [
-            "currently", "now", "still", "is working", "is living", "lives", "works",
-            "likes", "prefers", "enjoys", "has a", "has an", "is a", "are a"
-        ]
-        if any(m in t for m in planned_markers):
-            return "planned"
-        if any(m in t for m in historical_markers):
-            return "historical"
-        if any(m in t for m in current_markers):
-            return "current"
-        return "historical"
-
-    @staticmethod
-    def _eaes_entities_from_keywords(keywords, raw_text):
-        stop = {
-            "i", "you", "he", "she", "we", "they", "it", "me", "him", "her", "them",
-            "user", "assistant", "the", "a", "an", "and", "or", "to", "of", "in", "on",
-            "at", "for", "with", "from", "about", "this", "that"
-        }
-        entities = []
-        for kw in keywords or []:
-            k = str(kw).strip()
-            if not k or k.lower() in stop:
+    def _eaes_build_notes_for_session(self, events, conversation_time, session_id):
+        for spec in self._as_list(events.get("sentence")):
+            if not isinstance(spec, dict):
                 continue
-            if re.search(r"[A-Z][a-z]+", k) or " " in k:
-                entities.append(k)
-        for match in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", raw_text or ""):
-            if match.lower() not in stop:
-                entities.append(match)
-        out = []
-        seen = set()
-        for ent in entities:
-            key = ent.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(ent)
-        return out[:8]
-
-    @staticmethod
-    def _eaes_short_text(text, max_chars=180):
-        text = re.sub(r"\s+", " ", str(text or "")).strip()
-        if len(text) <= max_chars:
-            return text
-        return text[:max_chars].rsplit(" ", 1)[0].rstrip(" .,;:") + "..."
-
-    def _eaes_raw_source_text(self, event):
-        """Recover original dialogue text so rewrite normalization is not lossy."""
-        parts = []
-        for origin in re.findall(r"D\d+:\d+", str(getattr(event, "origin", "") or "")):
-            prefix = origin.split(":", 1)[0]
-            raw = self.memory.raw_text.get(prefix, {}).get(origin)
-            if raw:
-                parts.append(str(raw))
-        return "\n".join(parts) or str(getattr(event, "text", "") or "")
-
-    def _eaes_attribute_text(self, attr, fallback_text=None):
-        if isinstance(attr, str):
-            text = attr.strip()
-            if not text:
-                return ""
-            if ":" in text:
-                return text
-            fallback = self._eaes_short_text(fallback_text)
-            return f"{text}: {fallback}" if fallback else text
-        if not isinstance(attr, dict):
-            return ""
-        name = str(attr.get("name") or "").strip()
-        desc = str(attr.get("description") or "").strip()
-        if name and desc:
-            return f"{name}: {desc}"
-        if desc:
-            return f"event.detail: {desc}"
-        if name:
-            fallback = self._eaes_short_text(fallback_text)
-            return f"{name}: {fallback}" if fallback else name
-        return ""
-
-    def _eaes_llm_index_for_session(self, events, keyword_by_sentence):
-        memories = []
-        for ee in self._as_list(events.get("sentence")):
-            if not isinstance(ee, dict):
+            event_id = spec.get("id")
+            event = self.memory.episode_events.get(event_id)
+            if event is None:
                 continue
-            event_id = ee.get("id")
-            if event_id not in self.memory.episode_events:
-                continue
-            ev = self.memory.episode_events[event_id]
-            memories.append({
-                "event_id": event_id,
-                "rewrite_content": ee.get("text") or ev.text,
-                "raw_text": self._eaes_raw_source_text(ev),
-                "tag": ee.get("tag"),
-                "keywords": self._as_list(keyword_by_sentence.get(event_id))[:12],
-            })
-        if not memories:
-            return {}
-        out = self.llm.chat_text(
-            messages=[
-                {"role": "system", "content": Prompts.EAES_INDEX_SYSTEM_PROMPT},
-                {"role": "user", "content": Prompts.eaes_index_prompt(json.dumps(memories, ensure_ascii=False))},
-            ],
-            model=config.RE_MODEL,
-        )
-        if not isinstance(out, dict):
-            logger.warning("EAES LLM index returned non-dict; falling back to heuristic index.")
-            return {}
-        indexed = {}
-        valid_ids = {m["event_id"] for m in memories}
-        for item in self._as_list(out.get("memories")):
-            if not isinstance(item, dict):
-                continue
-            event_id = item.get("event_id")
-            if event_id not in valid_ids:
-                continue
-            entities = [str(e).strip() for e in self._as_list(item.get("entities")) if str(e).strip()]
-            memory_text = next((m["rewrite_content"] for m in memories if m["event_id"] == event_id), "")
-            attributes = [
-                self._eaes_attribute_text(attr, memory_text)
-                for attr in self._as_list(item.get("attributes"))
-            ]
-            attributes = [a for a in attributes if a]
-            lifecycle = str(item.get("event_lifecycle") or "").lower().strip()
-            indexed[event_id] = {
-                "entities": list(dict.fromkeys(entities))[:8],
-                "attribute_paths": list(dict.fromkeys(attributes))[:12],
-                "event_lifecycle": lifecycle if lifecycle in {"planned", "current", "historical"} else None,
-            }
-        return indexed
-
-    def _eaes_build_notes_for_session(self, events, keyword_by_sentence, conversation_time):
-        llm_index = {}
-        if config.EAES_INDEX_MODE == "llm":
-            try:
-                llm_index = self._eaes_llm_index_for_session(events, keyword_by_sentence)
-            except Exception as e:
-                logger.warning(f"EAES LLM index failed; falling back to heuristic index: {e}", exc_info=True)
-                llm_index = {}
-        for ee in self._as_list(events.get("sentence")):
-            if not isinstance(ee, dict):
-                continue
-            event_id = ee.get("id")
-            if event_id not in self.memory.episode_events:
-                continue
-            ev = self.memory.episode_events[event_id]
-            keywords = self._as_list(keyword_by_sentence.get(event_id))
-            index_item = llm_index.get(event_id) or {}
-            entities = index_item.get("entities") or self._eaes_entities_from_keywords(keywords, ev.text)
-            attribute_paths = list(index_item.get("attribute_paths") or [])
-            rewrite_content = ee.get("text") or ev.text
-            attribute_paths = [
-                self._eaes_attribute_text(attr, rewrite_content)
-                for attr in attribute_paths
-            ]
-            attribute_paths = [attr for attr in attribute_paths if attr and ":" in attr]
-            if not attribute_paths:
-                short = self._eaes_short_text(rewrite_content)
-                if short:
-                    attribute_paths.append(f"event.summary: {short}")
-            attribute_paths = list(dict.fromkeys(attribute_paths))[:12]
-            raw_source_text = self._eaes_raw_source_text(ev)
             note = EAESMemoryNote(
                 memory_id=self._eaes_memory_id(event_id),
                 event_id=event_id,
-                entities=entities,
-                attribute_paths=attribute_paths,
-                raw_text=raw_source_text,
-                rewrite_content=rewrite_content,
+                rewrite_content=spec.get("text") or event.text,
                 conversation_time=conversation_time,
-                event_lifecycle=index_item.get("event_lifecycle") or self._eaes_infer_lifecycle(rewrite_content, ee.get("event_lifecycle")),
-                origin=ev.origin,
-                embedding=ev.embedding,
-                parent_id=self._normalize_eaes_parent_id(ee.get("parent_id")),
+                origin=event.origin,
+                parent_id=self._normalize_eaes_parent_id(spec.get("parent_id")),
             )
-            self.memory.add_eaes_memory_note(note)
+            self.memory.add_eaes_memory_note(note, session_id)
 
-    def _eaes_build_parent_nodes_for_session(self, events):
-        if not getattr(config, "SEMANTIC_HIERARCHY", False):
+    def _eaes_build_parent_nodes_for_session(self, events, session_id):
+        if not config.SEMANTIC_HIERARCHY:
             return
         for spec in self._as_list(events.get("parent_nodes")):
             if not isinstance(spec, dict):
                 continue
             parent_id = self._normalize_eaes_parent_id(spec.get("parent_id"))
             rewrite_content = str(spec.get("rewrite_content") or "").strip()
-            if not parent_id or not rewrite_content:
-                continue
-            child_memory_ids = []
-            child_attributes = []
+            child_ids = []
             for event_id in self._as_list(spec.get("child_ids")):
                 memory_id = self.memory.eaes_event_to_memory.get(event_id)
-                note = self.memory.get_eaes_note(memory_id) if memory_id else None
-                if note is None:
-                    continue
-                # New rewrite files persist this relation directly on every
-                # child. This assignment also backfills legacy rewrite files.
-                note.parent_id = parent_id
-                child_memory_ids.append(memory_id)
-                child_attributes.append({
-                    "child_id": memory_id,
-                    "attributes": list(note.attribute_paths or []),
-                })
-            if not child_memory_ids:
-                continue
-            self.memory.add_eaes_parent_node(EAESParentNode(
-                parent_id=parent_id,
-                rewrite_content=rewrite_content,
-                child_ids=child_memory_ids,
-                child_attributes=child_attributes,
-            ))
-
-    @staticmethod
-    def _eaes_child_query_plan(query_plan):
-        """Hide parent-only query keywords from every child/reader stage."""
-        if not isinstance(query_plan, dict):
-            return {}
-        plan = dict(query_plan)
-        plan.pop("keywords", None)
-        plan.pop("retrieval_phrases", None)
-        plan.pop("retrieval_phrase_source", None)
-        plan.pop("retrieval_breadth", None)
-        plan.pop("breadth_value", None)
-        plan.pop("detail_need", None)
-        plan.pop("detail_value", None)
-        return plan
-
-    @staticmethod
-    def _eaes_phrase_content_tokens(value):
-        text = re.sub(r"['’]s\b", "", str(value or "").casefold())
-        tokens = re.findall(r"[a-z0-9]+", text)
-        stopwords = {
-            "a", "an", "and", "are", "at", "did", "do", "does", "for",
-            "from", "how", "in", "is", "of", "on", "or", "the", "their",
-            "to", "was", "were", "what", "when", "where", "which", "who",
-            "why", "with",
-        }
-        return [token for token in tokens if token not in stopwords]
-
-    @staticmethod
-    def _validate_eaes_retrieval_phrases(
-            values, expected_count=None, max_words=None, entities=None
-    ):
-        expected_count = expected_count or getattr(config, "EAES_PHRASE_COUNT", 6)
-        max_words = max_words or getattr(config, "EAES_PHRASE_MAX_WORDS", 10)
-        if not isinstance(values, list):
-            return None, "retrieval_phrases must be an array"
-        if len(values) < expected_count:
-            return None, (
-                f"retrieval_phrases must contain at least {expected_count} "
-                f"valid phrases; got {len(values)}"
-            )
-        phrases = []
-        strict_validation = bool(
-            getattr(config, "EAES_STRICT_PHRASE_VALIDATION", False)
-        )
-        normalized_phrases = set()
-        content_signatures = set()
-        entity_tokens = {
-            token
-            for entity in entities or []
-            for token in EAESMixin._eaes_phrase_content_tokens(entity)
-        }
-        for index, value in enumerate(values):
-            if len(phrases) >= expected_count:
-                break
-            if not isinstance(value, str):
-                return None, f"retrieval_phrases[{index}] must be a string"
-            phrase = re.sub(r"\s+", " ", value).strip()
-            if not phrase:
-                return None, f"retrieval_phrases[{index}] must be non-empty"
-            if len(phrase.split()) > max_words:
-                return None, (
-                    f"retrieval_phrases[{index}] must contain no more than "
-                    f"{max_words} whitespace-separated words: {value!r}"
+                child = self.memory.get_eaes_note(memory_id) if memory_id else None
+                if child is not None:
+                    child.parent_id = parent_id
+                    child_ids.append(memory_id)
+            if parent_id and rewrite_content and child_ids:
+                self.memory.add_eaes_parent_node(
+                    EAESParentNode(parent_id, rewrite_content, child_ids),
+                    session_id,
                 )
-            if not strict_validation:
-                phrases.append(phrase)
-                continue
-            normalized = re.sub(r"\s+", " ", phrase).casefold()
-            if normalized in normalized_phrases:
-                return None, (
-                    f"retrieval_phrases[{index}] duplicates an earlier phrase"
-                )
-            content_tokens = EAESMixin._eaes_phrase_content_tokens(phrase)
-            if not content_tokens:
-                return None, (
-                    f"retrieval_phrases[{index}] has no usable content words"
-                )
-            signature = tuple(sorted(content_tokens))
-            if signature in content_signatures:
-                return None, (
-                    f"retrieval_phrases[{index}] only reorders the same "
-                    "normalized content words as an earlier phrase"
-                )
-            if entity_tokens:
-                phrase_entities = entity_tokens.intersection(content_tokens)
-                if not phrase_entities:
-                    return None, (
-                        f"retrieval_phrases[{index}] must retain at least one "
-                        "known entity from the question"
-                    )
-                relation_tokens = [
-                    token for token in content_tokens
-                    if token not in entity_tokens
-                ]
-                if not relation_tokens:
-                    return None, (
-                        f"retrieval_phrases[{index}] is entity-only and loses "
-                        "the question's target relation"
-                    )
-            normalized_phrases.add(normalized)
-            content_signatures.add(signature)
-            phrases.append(phrase)
-        if len(phrases) < expected_count:
-            return None, (
-                f"retrieval_phrases must contain at least {expected_count} "
-                f"valid phrases; got {len(phrases)}"
-            )
-        return phrases[:expected_count], ""
-
-    @staticmethod
-    def _normalize_eaes_retrieval_phrases(
-            values, expected_count=None, max_words=None
-    ):
-        phrases, _ = EAESMixin._validate_eaes_retrieval_phrases(
-            values,
-            expected_count=expected_count,
-            max_words=max_words,
-        )
-        return phrases
-
-    def _regenerate_eaes_retrieval_phrases(
-            self, query_question, invalid_phrases, validation_error
-    ):
-        return self.llm.chat_text(
-            messages=[
-                {
-                    "role": "system",
-                    "content": Prompts.EAES_RETRIEVAL_PHRASE_REPAIR_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps({
-                        "question": query_question,
-                        "previous_invalid_output": invalid_phrases,
-                        "validation_error": validation_error,
-                    }, ensure_ascii=False),
-                },
-            ],
-            model=config.RE_MODEL,
-        )
-
-    def _eaes_query_plan_from_output(self, query_question, query_out, query_mode):
-        if not isinstance(query_out, dict):
-            return None
-        query_attributes = []
-        for value in self._as_list(query_out.get("query_attributes")):
-            value = str(value or "").strip()
-            if value and value not in query_attributes:
-                query_attributes.append(value)
-        breadth = str(query_out.get("retrieval_breadth") or "").lower().strip()
-        if breadth not in {"single", "several", "wide"}:
-            breadth = "several"
-        detail = str(query_out.get("detail_need") or "").lower().strip()
-        if detail not in {"coarse", "mixed", "exact"}:
-            detail = "mixed"
-        plan = {
-            "entities": self._as_list(query_out.get("entities")),
-            "query_attributes": query_attributes[:3] or [query_question],
-            "answer_type": query_out.get("answer_type", "unknown"),
-            "keywords": self._as_list(query_out.get("keywords")),
-            "query_mode": query_mode,
-            "retrieval_breadth": breadth,
-            "breadth_value": {"single": 0.0, "several": 0.5, "wide": 1.0}[breadth],
-            "detail_need": detail,
-            "detail_value": {"coarse": 0.0, "mixed": 0.5, "exact": 1.0}[detail],
-            "retrieval_phrases": (
-                self._normalize_eaes_retrieval_phrases(
-                    query_out.get("retrieval_phrases"),
-                    expected_count=getattr(config, "EAES_PHRASE_COUNT", 4),
-                )
-                or []
-            ),
-        }
-        if config.EAES_SEMANTIC_SCORE:
-            # Query requirements use exact labels only. Unknown persistence
-            # and unapproved/legacy labels cannot create a scoring bonus.
-            allowed_properties = {
-                "event_action", "state_opinion", "personal_profile",
-                "relation_social", "transient", "episodic", "durable",
-            }
-            required_properties = []
-            for value in self._as_list(
-                    query_out.get("required_semantic_properties")):
-                value = str(value or "").lower().strip()
-                if value in allowed_properties and value not in required_properties:
-                    required_properties.append(value)
-            plan["required_semantic_properties"] = required_properties
-        return plan
-
-    def parse_eaes_query(self, question, question_emb=None):
-        query_question = self._eaes_query_question(question)
-        # Keep the baseline query prompt byte-for-byte unchanged when semantic
-        # scoring is disabled. The extension is opt-in and only asks for the
-        # additional evidence-requirement field.
-        query_prompt = Prompts.EAES_QUERY_SYSTEM_PROMPT
-        if config.EAES_SEMANTIC_SCORE:
-            query_prompt += Prompts.EAES_SEMANTIC_QUERY_EXTENSION
-        query_out = self.llm.chat_text(
-            messages=[
-                {"role": "system", "content": query_prompt},
-                {"role": "user", "content": json.dumps({"question": query_question}, ensure_ascii=False)},
-            ],
-            model=config.RE_MODEL
-        )
-        parsed_plan = self._eaes_query_plan_from_output(
-            query_question, query_out, "question_only"
-        )
-        if parsed_plan is None:
-            parsed_plan = {
-                "entities": [],
-                "query_attributes": [query_question],
-                "answer_type": "unknown",
-                "keywords": [],
-                "query_mode": "question_text_fallback",
-                "retrieval_phrases": [],
-                "retrieval_breadth": "several",
-                "breadth_value": 0.5,
-                "detail_need": "mixed",
-                "detail_value": 0.5,
-            }
-            if config.EAES_SEMANTIC_SCORE:
-                # A failed semantic query parse is neutral: no match and no penalty.
-                parsed_plan["required_semantic_properties"] = []
-
-        phrase_count = getattr(config, "EAES_PHRASE_COUNT", 4)
-        raw_retrieval_phrases = (
-            query_out.get("retrieval_phrases")
-            if isinstance(query_out, dict)
-            else parsed_plan.get("retrieval_phrases")
-        )
-        phrases, phrase_error = self._validate_eaes_retrieval_phrases(
-            raw_retrieval_phrases,
-            expected_count=phrase_count,
-            entities=parsed_plan.get("entities"),
-        )
-        phrase_source = "initial"
-        if phrases is None:
-            repair_out = self._regenerate_eaes_retrieval_phrases(
-                query_question,
-                raw_retrieval_phrases,
-                phrase_error,
-            )
-            phrases, phrase_error = self._validate_eaes_retrieval_phrases(
-                repair_out.get("retrieval_phrases")
-                if isinstance(repair_out, dict) else None,
-                expected_count=phrase_count,
-                entities=parsed_plan.get("entities"),
-            )
-            phrase_source = "regenerated"
-        if phrases is None:
-            raise ValueError(
-                "EAES retrieval phrase generation failed after exactly one "
-                f"repair attempt: {phrase_error}"
-            )
-        parsed_plan["retrieval_phrases"] = phrases
-        parsed_plan["retrieval_phrase_source"] = phrase_source
-        return parsed_plan
-
-    @staticmethod
-    def _eaes_rollback_evidence_contents(child_candidates, parent_candidates):
-        return [
-            str(candidate.get("rewrite_content"))
-            for candidate in list(child_candidates or [])
-            + list(parent_candidates or [])
-            if candidate.get("rewrite_content")
-        ]
-
-    @staticmethod
-    def _validate_eaes_rollback_decision(output):
-        if not isinstance(output, dict):
-            raise ValueError("rollback decision must be a JSON object")
-
-        expected_fields = {"state", "semantic_properties", "query_phase"}
-        if set(output) != expected_fields:
-            raise ValueError(
-                "rollback decision must contain exactly state, "
-                "semantic_properties, and query_phase"
-            )
-
-        state = str(output.get("state") or "").strip().lower()
-        if state not in {"no_need_more", "need_more"}:
-            raise ValueError(
-                "rollback decision state must be no_need_more or need_more"
-            )
-
-        raw_properties = output.get("semantic_properties")
-        if not isinstance(raw_properties, list):
-            raise ValueError("semantic_properties must be an array")
-        allowed_properties = {
-            "event_action", "state_opinion", "personal_profile",
-            "relation_social", "transient", "episodic", "durable",
-        }
-        semantic_properties = []
-        for index, value in enumerate(raw_properties):
-            if not isinstance(value, str):
-                raise ValueError(
-                    f"semantic_properties[{index}] must be a string"
-                )
-            normalized = value.lower().strip()
-            if normalized not in allowed_properties:
-                raise ValueError(
-                    f"semantic_properties[{index}] is not an allowed label: "
-                    f"{value!r}"
-                )
-            if normalized in semantic_properties:
-                raise ValueError(
-                    f"semantic_properties contains duplicate label: {value!r}"
-                )
-            semantic_properties.append(normalized)
-
-        raw_phases = output.get("query_phase")
-        if not isinstance(raw_phases, list):
-            raise ValueError("query_phase must be an array")
-        query_phases = []
-        normalized_phases = set()
-        for index, value in enumerate(raw_phases):
-            if not isinstance(value, str):
-                raise ValueError(f"query_phase[{index}] must be a string")
-            phase = re.sub(r"\s+", " ", value).strip()
-            if not phase:
-                raise ValueError(f"query_phase[{index}] must be non-empty")
-            if len(phase.split()) > 3:
-                raise ValueError(
-                    f"query_phase[{index}] must contain no more than 3 "
-                    f"whitespace-separated words: {value!r}"
-                )
-            phase_key = phase.casefold()
-            if phase_key in normalized_phases:
-                raise ValueError(
-                    f"query_phase contains duplicate normalized phase: {value!r}"
-                )
-            normalized_phases.add(phase_key)
-            query_phases.append(phase)
-
-        if state == "no_need_more":
-            if semantic_properties or query_phases:
-                raise ValueError(
-                    "no_need_more requires empty semantic_properties and "
-                    "query_phase arrays"
-                )
-        elif len(query_phases) != 4:
-            raise ValueError(
-                "need_more requires exactly four distinct query phases; "
-                f"got {len(query_phases)}"
-            )
-
-        return {
-            "state": state,
-            "semantic_properties": semantic_properties,
-            "query_phase": query_phases,
-        }
-
-    def _request_eaes_rollback_decision(
-            self,
-            question,
-            child_candidates,
-            parent_candidates,
-            initial_query_phases,
-            rollback_history,
-            remaining_rollbacks,
-    ):
-        payload = {
-            "question": self._eaes_query_question(question),
-            "current_evidence": self._eaes_rollback_evidence_contents(
-                child_candidates, parent_candidates
-            ),
-            "initial_query_phase": list(initial_query_phases or []),
-            "rollback_history": list(rollback_history or []),
-            "remaining_rollbacks": int(remaining_rollbacks),
-        }
-        last_error = None
-        previous_output = None
-        for attempt in range(2):
-            request_payload = dict(payload)
-            if attempt:
-                request_payload.update({
-                    "previous_invalid_output": previous_output,
-                    "validation_error": str(last_error),
-                })
-            output = self.llm.chat_text(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": Prompts.EAES_ROLLBACK_QUERY_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            request_payload, ensure_ascii=False
-                        ),
-                    },
-                ],
-                model=config.RE_MODEL,
-            )
-            previous_output = output
-            try:
-                return self._validate_eaes_rollback_decision(output)
-            except ValueError as error:
-                last_error = error
-        raise ValueError(
-            "EAES rollback decision failed validation after exactly one "
-            f"repair attempt: {last_error}"
-        )
-
-    def select_eaes_rollback_supplements(
-            self,
-            question,
-            rollback_decision,
-            current_children,
-            current_parents,
-            child_candidates,
-            parent_candidates,
-    ):
-        """Select up to three useful nodes from one rollback candidate pool."""
-        limit = min(
-            config.EAES_ROLLBACK_SUPPLEMENT_LIMIT,
-            len(child_candidates or []) + len(parent_candidates or []),
-        )
-        if limit <= 0:
-            return [], []
-        payload = {
-            "question": self._eaes_query_question(question),
-            "rollback_decision": rollback_decision,
-            "current_evidence": self._eaes_rollback_evidence_contents(
-                current_children, current_parents
-            ),
-            "limit": limit,
-            "child_candidates": child_candidates,
-            "parent_candidates": parent_candidates,
-        }
-        out = self.llm.chat_text(
-            messages=[
-                {
-                    "role": "system",
-                    "content": Prompts.EAES_ROLLBACK_SUPPLEMENT_RERANK_PROMPT,
-                },
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            model=config.RE_MODEL,
-        )
-        if not isinstance(out, dict):
-            return [], []
-
-        child_by_id = {
-            candidate.get("memory_id"): candidate
-            for candidate in child_candidates or []
-            if candidate.get("memory_id")
-        }
-        parent_by_id = {
-            candidate.get("parent_id"): candidate
-            for candidate in parent_candidates or []
-            if candidate.get("parent_id")
-        }
-        selected_keys = []
-        for item in self._as_list(out.get("ranked_nodes")):
-            if not isinstance(item, dict):
-                continue
-            node_type = str(item.get("node_type") or "").lower().strip()
-            node_id = item.get("node_id")
-            key = (node_type, node_id)
-            if key in selected_keys:
-                continue
-            if (
-                    (node_type == "child" and node_id in child_by_id)
-                    or (node_type == "parent" and node_id in parent_by_id)
-            ):
-                selected_keys.append(key)
-            if len(selected_keys) >= limit:
-                break
-
-        selected_children = [
-            child_by_id[node_id]
-            for node_type, node_id in selected_keys
-            if node_type == "child"
-        ]
-        selected_parents = [
-            parent_by_id[node_id]
-            for node_type, node_id in selected_keys
-            if node_type == "parent"
-        ]
-        return selected_children, selected_parents
-
-    def apply_eaes_rollback_check(
-            self,
-            question,
-            query_plan,
-            child_candidates,
-            parent_candidates,
-            question_emb=None,
-    ):
-        """Run up to two evidence-gap decisions and additive retrievals."""
-        current_children = list(child_candidates or [])
-        current_parents = list(parent_candidates or [])
-        initial_query_phases = list(query_plan.get("retrieval_phrases") or [])
-        excluded_child_ids = {
-            candidate.get("memory_id")
-            for candidate in current_children
-            if candidate.get("memory_id")
-        }
-        excluded_parent_ids = {
-            candidate.get("parent_id")
-            for candidate in current_parents
-            if candidate.get("parent_id")
-        }
-        rollback_history = []
-        metadata = {
-            "enabled": True,
-            "first_query_plan": query_plan,
-            "initial_query_phase": initial_query_phases,
-            "first_pass": {
-                "child_ids": [
-                    candidate.get("memory_id")
-                    for candidate in current_children
-                ],
-                "parent_ids": [
-                    candidate.get("parent_id")
-                    for candidate in current_parents
-                ],
-            },
-            "rounds": [],
-            "selected_supplements": {
-                "child_ids": [],
-                "parent_ids": [],
-            },
-        }
-        # Two rounds are a protocol invariant: after rollback 2 the reader uses
-        # the accumulated evidence without a third sufficiency call.
-        max_rounds = 2
-        for round_index in range(1, max_rounds + 1):
-            decision = self._request_eaes_rollback_decision(
-                question,
-                current_children,
-                current_parents,
-                initial_query_phases,
-                rollback_history,
-                remaining_rollbacks=max_rounds - round_index + 1,
-            )
-            metadata["last_s2g_decision"] = decision
-            if decision["state"] == "no_need_more":
-                metadata.update({
-                    "terminal_reason": "no_need_more",
-                    "rollback_count": len(rollback_history),
-                    "final": {
-                        "child_ids": [
-                            candidate.get("memory_id")
-                            for candidate in current_children
-                        ],
-                        "parent_ids": [
-                            candidate.get("parent_id")
-                            for candidate in current_parents
-                        ],
-                    },
-                })
-                return current_children, current_parents, metadata
-
-            rollback_children = (
-                self.memory_controller.retrieve_eaes_rollback_children(
-                    query_phases=decision["query_phase"],
-                    semantic_properties=decision["semantic_properties"],
-                    entities=query_plan.get("entities") or [],
-                    question_emb=question_emb,
-                    exclude_memory_ids=excluded_child_ids,
-                    limit=config.EAES_ROLLBACK_CHILD_PREFILTER_LIMIT,
-                )
-            )
-            rollback_parents = (
-                self.memory_controller.retrieve_eaes_rollback_parents(
-                    query_phases=decision["query_phase"],
-                    exclude_parent_ids=excluded_parent_ids,
-                    limit=config.EAES_ROLLBACK_PARENT_PREFILTER_LIMIT,
-                )
-            )
-            supplemental_children, supplemental_parents = (
-                self.select_eaes_rollback_supplements(
-                    question,
-                    decision,
-                    current_children,
-                    current_parents,
-                    rollback_children,
-                    rollback_parents,
-                )
-            )
-
-            selected_child_ids = [
-                candidate.get("memory_id")
-                for candidate in supplemental_children
-                if candidate.get("memory_id")
-            ]
-            selected_parent_ids = [
-                candidate.get("parent_id")
-                for candidate in supplemental_parents
-                if candidate.get("parent_id")
-            ]
-            current_children.extend(supplemental_children)
-            current_parents.extend(supplemental_parents)
-            excluded_child_ids.update(selected_child_ids)
-            excluded_parent_ids.update(selected_parent_ids)
-            metadata["selected_supplements"]["child_ids"].extend(
-                selected_child_ids
-            )
-            metadata["selected_supplements"]["parent_ids"].extend(
-                selected_parent_ids
-            )
-
-            history_entry = {
-                "round": round_index,
-                "state": decision["state"],
-                "semantic_properties": decision["semantic_properties"],
-                "query_phase": decision["query_phase"],
-                "selected_supplement_count": (
-                    len(supplemental_children) + len(supplemental_parents)
-                ),
-            }
-            rollback_history.append(history_entry)
-            metadata["rounds"].append({
-                **history_entry,
-                "prefilter": {
-                    "child_ids": [
-                        candidate.get("memory_id")
-                        for candidate in rollback_children
-                    ],
-                    "parent_ids": [
-                        candidate.get("parent_id")
-                        for candidate in rollback_parents
-                    ],
-                },
-                "selected_supplements": {
-                    "child_ids": selected_child_ids,
-                    "parent_ids": selected_parent_ids,
-                },
-            })
-
-        metadata.update({
-            "terminal_reason": "max_rollbacks_completed",
-            "rollback_count": max_rounds,
-            "post_second_rollback_sufficiency": "not_checked",
-            "final": {
-                "child_ids": [
-                    candidate.get("memory_id")
-                    for candidate in current_children
-                ],
-                "parent_ids": [
-                    candidate.get("parent_id")
-                    for candidate in current_parents
-                ],
-            },
-        })
-        return current_children, current_parents, metadata
-
-    def _enrich_eaes_package(self, package):
-        if not isinstance(package, dict):
-            return {"answer_items": []}
-        enriched_items = []
-        for item in self._as_list(package.get("answer_items")):
-            if not isinstance(item, dict):
-                continue
-            enriched_evidence = []
-            for ev in self._as_list(item.get("evidence")):
-                if not isinstance(ev, dict):
-                    continue
-                mid = ev.get("memory_id")
-                note = self.memory.get_eaes_note(mid)
-                if note is None:
-                    continue
-                enriched_evidence.append({**ev, **note.to_dict(include_raw=False)})
-            if enriched_evidence:
-                enriched_items.append({
-                    "item": item.get("item"),
-                    "score": item.get("score"),
-                    "evidence": enriched_evidence,
-                })
-        return {
-            "need_raw_expansion": package.get("need_raw_expansion", False),
-            "reason": package.get("reason", ""),
-            "answer_items": enriched_items,
-        }
-
-    def _fallback_eaes_package(
-            self,
-            candidates,
-            reason="selector returned no usable evidence",
-            limit=8,
-            role="candidate_evidence",
-            rationale="Top retrieved memory used as fallback evidence.",
-    ):
-        answer_items = []
-        selected = candidates if limit is None else candidates[:limit]
-        for cand in selected:
-            mid = cand.get("memory_id")
-            if not mid:
-                continue
-            answer_items.append({
-                "item": cand.get("rewrite_content", "")[:80],
-                "score": cand.get("score", 0.0),
-                "evidence": [{
-                    "memory_id": mid,
-                    "role": role,
-                    "rationale": rationale,
-                    **cand,
-                }],
-            })
-        return {
-            "need_raw_expansion": False,
-            "reason": reason,
-            "answer_items": answer_items,
-        }
 
     @staticmethod
     def _eaes_reader_child_memory(candidate):
-        """Expose only child identity, hierarchy, time, and answer content."""
         return {
             "memory_id": candidate.get("memory_id"),
             "parent_id": candidate.get("parent_id"),
@@ -973,582 +71,228 @@ class EAESMixin:
             "rewrite_content": candidate.get("rewrite_content"),
         }
 
-    def _eaes_reader_evidence_package(self, package):
-        """Remove retrieval/index metadata before the final-reader call."""
-        answer_items = []
-        for item in self._as_list((package or {}).get("answer_items")):
-            if not isinstance(item, dict):
-                continue
-            evidence = []
-            for candidate in self._as_list(item.get("evidence")):
-                if not isinstance(candidate, dict) or not candidate.get("memory_id"):
-                    continue
-                evidence.append(self._eaes_reader_child_memory(candidate))
-            if evidence:
-                answer_items.append({"evidence": evidence})
-        return {"answer_items": answer_items}
-
     @staticmethod
     def _eaes_reader_parent_memory(candidate):
-        """Expose only parent identity and answer-bearing summary."""
         return {
             "parent_id": candidate.get("parent_id"),
             "rewrite_content": candidate.get("rewrite_content"),
         }
 
-    def _eaes_prediction_context(self, reader_input, candidates, limit=None):
-        """Return one provenance entry per unique memory node shown to the reader."""
-        visible_child_ids = []
-
-        def add_child(memory_id):
-            if memory_id and memory_id not in visible_child_ids:
-                visible_child_ids.append(memory_id)
-
-        package = (reader_input or {}).get("evidence_package") or {}
-        for item in self._as_list(package.get("answer_items")):
-            if not isinstance(item, dict):
-                continue
-            for evidence in self._as_list(item.get("evidence")):
-                if isinstance(evidence, dict):
-                    add_child(evidence.get("memory_id"))
-        for evidence in self._as_list(
-                (reader_input or {}).get("backup_candidates")):
-            if isinstance(evidence, dict):
-                add_child(evidence.get("memory_id"))
-
-        parent_ids = [
-            parent.get("parent_id")
-            for parent in self._as_list(
-                (reader_input or {}).get("parent_memories"))
-            if isinstance(parent, dict) and parent.get("parent_id")
-        ]
-        # Follow actual reader order; do not silently drop nodes after the 20th.
-        memory_ids = ([("child", mid) for mid in visible_child_ids]
-                      + [("parent", pid) for pid in dict.fromkeys(parent_ids)])[:limit]
-        candidate_by_id = {
-            candidate.get("memory_id"): candidate
-            for candidate in candidates or []
-            if candidate.get("memory_id")
-        }
-
-        context = []
-        for kind, memory_id in memory_ids:
-            candidate = candidate_by_id.get(memory_id) if kind == "child" else None
-            origin = candidate.get("origin") if candidate else None
-            if origin:
-                context.append(str(origin))
-                continue
-            expanded = self.memory.get_eaes_support_origin([memory_id])
-            # A parent can expand to many child origins. Keep them grouped in
-            # one string so prediction_context still has one entry per node.
-            origins = [
-                str(value) for value in self._as_list(expanded)
-                if value and value != memory_id
-            ]
-            context.append(",".join(origins) if origins else str(memory_id))
-        return context
-
-    def select_eaes_evidence(self, question, query_plan, candidates, parent_candidates=None):
-        """Local backends select child/parent evidence; legacy backend unchanged."""
-        if config.EVIDENCE_SELECTOR_BACKEND == "setwise":
-            from llm.setwise_evidence_selector import get_setwise_evidence_selector
-
-            started = time.perf_counter()
-            selector = get_setwise_evidence_selector()
-            children, seen = [], set()
-            for candidate in candidates:
-                memory_id = candidate.get("memory_id")
-                if memory_id and memory_id not in seen:
-                    seen.add(memory_id)
-                    children.append(candidate)
-            parents = []
-            for candidate in parent_candidates or []:
-                parent_id = candidate.get("parent_id")
-                if parent_id and parent_id not in seen:
-                    seen.add(parent_id)
-                    parents.append(candidate)
-
-            child_redundant_ids, child_input_tokens = selector.select_redundant_ids(
-                self._eaes_query_question(question),
-                [self._eaes_reader_child_memory(candidate) for candidate in children],
-            )
-            parent_redundant_ids, parent_input_tokens = selector.select_redundant_ids(
-                self._eaes_query_question(question),
-                [self._eaes_reader_parent_memory(candidate) for candidate in parents],
-            )
-            redundant_ids = child_redundant_ids + parent_redundant_ids
-            redundant = set(redundant_ids)
-            selected_children = [
-                candidate for candidate in children
-                if candidate.get("memory_id") not in redundant
-            ]
-            selected_parents = [
-                candidate for candidate in parents
-                if candidate.get("parent_id") not in redundant
-            ]
-            trace = {
-                "enabled": True,
-                "backend": "setwise",
-                "score_kind": "query_conditioned_zero_marginal_value",
-                "model_path": config.SELECTOR_MODEL_PATH,
-                "candidate_count": len(children) + len(parents),
-                "selector_input_tokens": child_input_tokens + parent_input_tokens,
-                "redundant_ids": redundant_ids,
-                "selected_nodes": ([
-                    {
-                        "kind": "child",
-                        "id": candidate.get("memory_id"),
-                        "source": candidate.get(
-                            "retrieval_source", "direct_child"
-                        ),
-                    }
-                    for candidate in selected_children
-                ] + [
-                    {
-                        "kind": "parent",
-                        "id": candidate.get("parent_id"),
-                        "source": "parent",
-                    }
-                    for candidate in selected_parents
-                ]),
-                "elapsed_seconds": time.perf_counter() - started,
-            }
-            return {
-                "answer_items": [
-                    {"evidence": [candidate]}
-                    for candidate in selected_children
-                ],
-                "selected_parent_memories": selected_parents,
-                "selector_diagnostics": trace,
-            }
-
-        if config.EVIDENCE_SELECTOR_BACKEND == "local":
-            from llm.evidence_scorer import get_local_evidence_scorer
-
-            started = time.perf_counter()
-            scorer = get_local_evidence_scorer()
-            tokenizer = scorer.tokenizer
-            budget = config.SELECTOR_TOKEN_BUDGET
-            nodes, vectors, seen = [], {}, set()
-            for kind, items in (("child", candidates), ("parent", parent_candidates or [])):
-                for candidate in items:
-                    node_id = candidate.get("memory_id" if kind == "child" else "parent_id")
-                    key = (kind, node_id)
-                    if not node_id or key in seen:
-                        continue
-                    seen.add(key)
-                    payload = (self._eaes_reader_child_memory(candidate) if kind == "child"
-                               else self._eaes_reader_parent_memory(candidate))
-                    # Cost is measured where it is used, not through a token-count wrapper.
-                    unit = {"evidence": [payload]} if kind == "child" else payload
-                    cost = len(tokenizer.encode(json.dumps(unit, ensure_ascii=False),
-                                                add_special_tokens=False))
-                    source = (
-                        candidate.get("retrieval_source", "direct_child")
-                        if kind == "child" else "parent"
-                    )
-                    nodes.append({"kind": kind, "id": node_id,
-                                  "source": source, "candidate": candidate,
-                                  "payload": payload, "token_cost": cost})
-                    # Reuse existing retrieval vectors. Missing/invalid vectors are
-                    # neutral, never trigger new embedding API calls or hard pruning.
-                    table = getattr(self.memory, "eaes_notes" if kind == "child"
-                                    else "eaes_parent_nodes", {})
-                    vector = getattr(table.get(node_id), "retrieval_embedding", None)
-                    if vector is not None:
-                        vector = [float(value) for value in vector]
-                        norm = math.sqrt(sum(value * value for value in vector))
-                        if norm > 0 and math.isfinite(norm):
-                            vectors[key] = [value / norm for value in vector]
-
-            def evidence_payload(items):
-                # Exactly the evidence projection sent to the reader (same JSON
-                # separators). Question/plan/system prompt are outside this budget.
-                return {
-                    "evidence_package": {"answer_items": [
-                        {"evidence": [node["payload"]]} for node in items
-                        if node["kind"] == "child"
-                    ]},
-                    "parent_memories": [node["payload"] for node in items
-                                        if node["kind"] == "parent"],
+    def _eaes_reader_evidence_package(self, selection):
+        return {
+            "answer_items": [
+                {
+                    "evidence": [
+                        self._eaes_reader_child_memory(candidate)
+                        for candidate in item.get("evidence") or []
+                    ]
                 }
-
-            selected, remaining = [], list(nodes)
-            used = len(tokenizer.encode(json.dumps(evidence_payload([]), ensure_ascii=False),
-                                        add_special_tokens=False))
-            if used > budget:
-                raise ValueError("Selector token budget is smaller than the empty evidence container")
-            trace = {
-                "enabled": True, "backend": "local", "score_kind": "conditional_yes_no_proxy",
-                "model_path": config.SELECTOR_MODEL_PATH,
-                "tokenizer": "selector_tokenizer_proxy_for_reader", "token_budget": budget,
-                "container_tokens": used, "candidate_count": len(nodes),
-                "redundancy_weight": config.SELECTOR_REDUNDANCY_WEIGHT,
-                "cost_weight": config.SELECTOR_COST_WEIGHT,
-                "min_gain": config.SELECTOR_MIN_GAIN,
-                "similarity_threshold": config.SELECTOR_SIMILARITY_THRESHOLD,
-                "scorer_max_length": config.SELECTOR_MAX_LENGTH,
-                "scorer_batch_size": config.SELECTOR_BATCH_SIZE,
-                "candidates_without_vectors": [
-                    {"kind": node["kind"], "id": node["id"]} for node in nodes
-                    if (node["kind"], node["id"]) not in vectors
-                ],
-                "input_evidence_tokens": len(tokenizer.encode(
-                    json.dumps(evidence_payload(nodes), ensure_ascii=False), add_special_tokens=False)),
-                "steps": [], "scorer_calls": 0, "forward_batches": 0,
-            }
-            stop_reason = "candidates_exhausted"
-            while remaining:
-                step = {"round": len(selected) + 1, "tokens_before": used, "candidates": []}
-                feasible = []
-                for node in remaining:
-                    # Check the entire proposed evidence block: summing independent
-                    # token costs alone can undercount JSON/boundary tokens.
-                    proposed_tokens = len(tokenizer.encode(json.dumps(
-                        evidence_payload(selected + [node]), ensure_ascii=False),
-                        add_special_tokens=False))
-                    row = {"kind": node["kind"], "id": node["id"],
-                           "source": node["source"],
-                           "token_cost": node["token_cost"], "proposed_tokens": proposed_tokens}
-                    step["candidates"].append(row)
-                    if proposed_tokens > budget:
-                        row["rejected"] = "token_budget"
-                    else:
-                        feasible.append((node, row))
-                trace["steps"].append(step)
-                if not feasible:
-                    stop_reason = "token_budget"
-                    break
-                result = scorer.score_added_value(
-                    self._eaes_query_question(question),
-                    [node["payload"] for node in selected],
-                    [node["payload"] for node, _ in feasible],
-                )
-                trace["scorer_calls"] += 1
-                trace["forward_batches"] += result["forward_batches"]
-                if len(result["scores"]) != len(feasible) or len(result["input_tokens"]) != len(feasible):
-                    raise ValueError("Selector returned a different number of scores than candidates")
-                best = None
-                for (node, row), gain, input_tokens in zip(
-                        feasible, result["scores"], result["input_tokens"]):
-                    row["scorer_input_tokens"] = input_tokens
-                    if gain is None:
-                        row["rejected"] = "scorer_input_length"
-                        continue
-                    if not math.isfinite(gain) or not 0 <= gain <= 1:
-                        raise ValueError("Selector conditional score must be finite and in [0, 1]")
-                    vector = vectors.get((node["kind"], node["id"]))
-                    similarities = []
-                    if vector is not None:
-                        for other in selected:
-                            other_vector = vectors.get((other["kind"], other["id"]))
-                            if other_vector is not None and len(other_vector) == len(vector):
-                                similarities.append(sum(a * b for a, b in zip(vector, other_vector)))
-                    similarity = max(similarities, default=0.0)
-                    threshold = config.SELECTOR_SIMILARITY_THRESHOLD
-                    redundancy = max(0.0, (min(1.0, similarity) - threshold) / (1.0 - threshold))
-                    cost_penalty = config.SELECTOR_COST_WEIGHT * node["token_cost"] / budget
-                    utility = gain - config.SELECTOR_REDUNDANCY_WEIGHT * redundancy - cost_penalty
-                    row.update(gain=gain, redundancy=redundancy, cost_penalty=cost_penalty,
-                               utility=utility)
-                    if best is None or utility > best[1]["utility"]:
-                        best = (node, row)  # Stable ties follow upstream candidate order.
-                if best is None:
-                    stop_reason = "scorer_input_length"
-                    break
-                if best[1]["utility"] <= config.SELECTOR_MIN_GAIN:
-                    stop_reason = "minimum_gain"
-                    break
-                node, row = best
-                selected.append(node)
-                remaining.remove(node)
-                used = row["proposed_tokens"]
-                step.update(selected={"kind": node["kind"], "id": node["id"],
-                                      "source": node["source"]}, tokens_after=used)
-                # Every surviving candidate is re-scored against the NEW full S.
-
-            trace.update(
-                stop_reason=stop_reason, selected_evidence_tokens=used,
-                selected_nodes=[{"kind": node["kind"], "id": node["id"],
-                                  "source": node["source"],
-                                 "token_cost": node["token_cost"]} for node in selected],
-                elapsed_seconds=time.perf_counter() - started,
-            )
-            return {
-                "answer_items": [{"evidence": [node["candidate"]]} for node in selected
-                                 if node["kind"] == "child"],
-                "selected_parent_memories": [node["candidate"] for node in selected
-                                             if node["kind"] == "parent"],
-                "selector_diagnostics": trace,
-            }
-
-        selection_input = {
-            "question": question,
-            "query_plan": query_plan,
-            "candidates": candidates,
+                for item in selection.get("answer_items") or []
+            ]
         }
-        package = self.llm.chat_text(
-            messages=[
-                {"role": "system", "content": Prompts.EAES_EVIDENCE_SELECTION_PROMPT},
-                {"role": "user", "content": json.dumps(selection_input, ensure_ascii=False)},
-            ],
-            model=config.RE_MODEL
-        )
-        if not isinstance(package, dict):
-            package = {"answer_items": []}
-        raw_ids = package.get("memory_ids_to_expand") or []
-        if package.get("need_raw_expansion") and raw_ids:
-            selection_input["expanded_raw_notes"] = self.memory_controller.expand_eaes_raw_text(raw_ids)
-            package2 = self.llm.chat_text(
-                messages=[
-                    {"role": "system", "content": Prompts.EAES_EVIDENCE_SELECTION_PROMPT},
-                    {"role": "user", "content": json.dumps(selection_input, ensure_ascii=False)},
-                ],
-                model=config.RE_MODEL
+
+    def _eaes_prediction_context(self, reader_input, candidates):
+        candidate_by_id = {
+            candidate.get("memory_id"): candidate for candidate in candidates
+        }
+        context = []
+        package = reader_input.get("evidence_package") or {}
+        for item in package.get("answer_items") or []:
+            for evidence in item.get("evidence") or []:
+                candidate = candidate_by_id.get(evidence.get("memory_id"))
+                if candidate and candidate.get("origin"):
+                    context.append(candidate["origin"])
+        for parent in reader_input.get("parent_memories") or []:
+            support = self.memory.get_eaes_support_origin([parent.get("parent_id")])
+            origins = [
+                origin for value in support
+                for origin in re.findall(r"D\d+:\d+", str(value))
+            ]
+            context.append(",".join(dict.fromkeys(origins)))
+        return [value for value in dict.fromkeys(context) if value]
+
+    def select_eaes_evidence(
+            self, question, _query_plan, candidates, parent_candidates=None
+    ):
+        """Apply SELECT utility in retrieval-score order under a hard budget."""
+        from llm.unified_utility_judge import get_unified_utility_judge
+
+        judge = get_unified_utility_judge()
+        nodes = []
+        seen = set()
+        for kind, values in (
+                ("child", candidates or []),
+                ("parent", parent_candidates or [])):
+            id_key = "memory_id" if kind == "child" else "parent_id"
+            for candidate in values:
+                node_id = candidate.get(id_key)
+                if not node_id or (kind, node_id) in seen:
+                    continue
+                seen.add((kind, node_id))
+                payload = (
+                    self._eaes_reader_child_memory(candidate)
+                    if kind == "child"
+                    else self._eaes_reader_parent_memory(candidate)
+                )
+                nodes.append({
+                    "kind": kind,
+                    "id": node_id,
+                    "score": float(candidate.get("score") or 0.0),
+                    "candidate": candidate,
+                    "payload": payload,
+                })
+        nodes.sort(key=lambda node: (-node["score"], node["kind"], node["id"]))
+
+        selected = []
+        decisions = []
+        for node in nodes:
+            proposed = [item["payload"] for item in selected] + [node["payload"]]
+            if judge.count_tokens(proposed) > config.UTILITY_TOKEN_BUDGET:
+                decisions.append({
+                    "kind": node["kind"], "id": node["id"],
+                    "decision": "DROP", "reason": "token_budget",
+                })
+                continue
+            keep = judge.keep(
+                "SELECT",
+                {
+                    "query": self._eaes_query_question(question),
+                    "criterion": "new query-useful information",
+                },
+                [item["payload"] for item in selected],
+                node["payload"],
             )
-            if isinstance(package2, dict):
-                package = package2
-        enriched = self._enrich_eaes_package(package)
-        if not enriched.get("answer_items"):
-            return self._fallback_eaes_package(candidates)
-        return enriched
+            decisions.append({
+                "kind": node["kind"], "id": node["id"],
+                "decision": "KEEP" if keep else "DROP",
+                "score": node["score"],
+            })
+            if keep:
+                selected.append(node)
+
+        children = [node["candidate"] for node in selected if node["kind"] == "child"]
+        parents = [node["candidate"] for node in selected if node["kind"] == "parent"]
+        return {
+            "answer_items": [{"evidence": [child]} for child in children],
+            "selected_parent_memories": parents,
+            "selector_diagnostics": {
+                "enabled": True,
+                "backend": "unified_utility",
+                "operation": "SELECT",
+                "token_budget": config.UTILITY_TOKEN_BUDGET,
+                "candidate_count": len(nodes),
+                "selected_count": len(selected),
+                "selected_tokens": judge.count_tokens(
+                    [node["payload"] for node in selected]
+                ),
+                "decisions": decisions,
+            },
+        }
 
     def _prepare_eaes_selector_children(
-            self,
-            question,
-            question_emb,
-            direct_children,
-            parent_candidates,
+            self, question, question_emb, direct_children, parent_candidates
     ):
-        """Add bounded parent-routed children without touching direct results."""
+        """Merge direct Child retrieval with query-rescored Parent children."""
         direct_children = list(direct_children or [])
-        base_diagnostics = {
-            "enabled": False,
-            "route_limit": getattr(
-                config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30
-            ),
-            "direct_child_k": len(direct_children),
-            "routed_child_k": 0,
-            "selector_input_child_k": len(direct_children),
-            "source_parent_ids": [],
-            "selected_child_ids": [],
-        }
-        if not getattr(config, "EAES_PARENT_CHILD_ROUTING", False):
-            base_diagnostics["stop_reason"] = "disabled"
-            return direct_children, [], base_diagnostics
-        if config.DISABLE_EVIDENCE_SELECTOR:
-            base_diagnostics["stop_reason"] = "selector_disabled"
-            return direct_children, [], base_diagnostics
-
         direct_ids = {
             candidate.get("memory_id") for candidate in direct_children
             if candidate.get("memory_id")
         }
-        routed_children, diagnostics = (
-            self.memory_controller.retrieve_eaes_parent_routed_children(
-                parent_candidates,
-                question_emb=question_emb,
-                question_text=self._eaes_query_question(question),
-                exclude_memory_ids=direct_ids,
-                limit=getattr(
-                    config, "EAES_PARENT_CHILD_ROUTE_LIMIT", 30
-                ),
-            )
+        routed, diagnostics = self.memory_controller.retrieve_eaes_parent_routed_children(
+            parent_candidates,
+            question_emb=question_emb,
+            question_text=self._eaes_query_question(question),
+            exclude_memory_ids=direct_ids,
+            limit=config.EAES_PARENT_CHILD_ROUTE_LIMIT,
         )
         merged = list(direct_children)
         seen = set(direct_ids)
-        for candidate in routed_children:
+        for candidate in routed:
             memory_id = candidate.get("memory_id")
-            if not memory_id or memory_id in seen:
-                continue
-            seen.add(memory_id)
-            merged.append(candidate)
-        diagnostics.update(
-            enabled=True,
-            direct_child_k=len(direct_children),
-            routed_child_k=len(merged) - len(direct_children),
-            selector_input_child_k=len(merged),
-        )
-        return merged, routed_children, diagnostics
+            if memory_id and memory_id not in seen:
+                seen.add(memory_id)
+                merged.append(candidate)
+        diagnostics.update({
+            "enabled": True,
+            "direct_child_k": len(direct_children),
+            "routed_child_k": len(merged) - len(direct_children),
+            "selector_input_child_k": len(merged),
+        })
+        return merged, routed, diagnostics
 
     def _read_eaes_candidates(
-            self,
-            question,
-            child_query_plan,
-            candidates,
-            parent_candidates,
-            lm_current_date=None,
-            return_details=False,
+            self, question, query_plan, candidates, parent_candidates,
+            lm_current_date=None, return_details=False
     ):
-        """Generate one reader answer from an already selected child/parent set."""
-        joint_selector = (
-            not config.DISABLE_EVIDENCE_SELECTOR
-            and config.EVIDENCE_SELECTOR_BACKEND in {"local", "setwise"}
+        selection = self.select_eaes_evidence(
+            question, query_plan, candidates, parent_candidates
         )
-        selector_details = None
-        if config.DISABLE_EVIDENCE_SELECTOR:
-            evidence_package = self._fallback_eaes_package(
-                candidates,
-                reason="evidence selector disabled for ablation; using all retrieved candidates",
-                limit=None,
-                role="retrieved_candidate",
-                rationale="Retrieved memory passed directly to the final reader.",
-            )
-        elif joint_selector:
-            evidence_package = self.select_eaes_evidence(
-                question, child_query_plan, candidates, parent_candidates
-            )
-            parent_candidates = evidence_package["selected_parent_memories"]
-            selector_details = evidence_package["selector_diagnostics"]
-        else:
-            evidence_package = self.select_eaes_evidence(
-                question, child_query_plan, candidates
-            )
+        selected_parents = selection["selected_parent_memories"]
         final_input = {
             "question": question,
-            "query_plan": child_query_plan,
-            "evidence_package": self._eaes_reader_evidence_package(
-                evidence_package
-            ),
-        }
-        if parent_candidates or joint_selector:
-            final_input["parent_memories"] = [
+            "evidence_package": self._eaes_reader_evidence_package(selection),
+            "parent_memories": [
                 self._eaes_reader_parent_memory(parent)
-                for parent in parent_candidates
-            ]
-        if not config.DISABLE_EVIDENCE_SELECTOR and not joint_selector:
-            final_input["backup_candidates"] = [
-                self._eaes_reader_child_memory(candidate)
-                for candidate in candidates[:12]
-            ]
+                for parent in selected_parents
+            ],
+        }
         if lm_current_date:
             final_input["current_date"] = lm_current_date
-        answer_obj = self.llm.chat_text(
-            messages=[
-                {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
-                {"role": "user", "content": json.dumps(final_input, ensure_ascii=False)},
-            ],
-            model=config.RE_MODEL
-        )
-        reader_input = final_input
-        if not isinstance(answer_obj, dict):
-            # A reader format retry must not reintroduce locally rejected evidence.
-            fallback_input = dict(final_input)
-            if not joint_selector:
-                evidence_package = self._fallback_eaes_package(candidates, reason="final answer JSON parsing failed")
-                fallback_input["evidence_package"] = self._eaes_reader_evidence_package(evidence_package)
-            reader_input = fallback_input
+        if not final_input["evidence_package"]["answer_items"] and not selected_parents:
+            result = ("no information available", [], None)
+        else:
             answer_obj = self.llm.chat_text(
                 messages=[
                     {"role": "system", "content": Prompts.EAES_FINAL_ANSWER_PROMPT},
-                    {"role": "user", "content": json.dumps(fallback_input, ensure_ascii=False)},
+                    {"role": "user", "content": json.dumps(final_input, ensure_ascii=False)},
                 ],
-                model=config.RE_MODEL
+                model=config.RE_MODEL,
             )
-            if not isinstance(answer_obj, dict):
-                context = self._eaes_prediction_context(
-                    reader_input, candidates
-                )
-                result = ("no information available", context, None)
-                return result + (selector_details,) if return_details else result
-        raw_answer = answer_obj.get("answer")
-        answer = (
-            raw_answer
-            if raw_answer is not None
-            else "no information available"
-        )
-        result = (
-            answer,
-            self._eaes_prediction_context(reader_input, candidates),
-            raw_answer,
-        )
-        return result + (selector_details,) if return_details else result
+            raw_answer = answer_obj.get("answer") if isinstance(answer_obj, dict) else None
+            result = (
+                raw_answer if raw_answer is not None else "no information available",
+                self._eaes_prediction_context(final_input, candidates),
+                raw_answer,
+            )
+        if return_details:
+            return result + (selection["selector_diagnostics"],)
+        return result
 
     def _retrieve_eaes_first_pass(self, question, question_emb=None):
-        """Fuse every retrieval view and return the bounded child/parent pools."""
-        query_plan = self.parse_eaes_query(question, question_emb)
-        view_retrieval = self.memory_controller.retrieve_eaes_adaptive_views(
-            query_plan["retrieval_phrases"],
+        query = self._eaes_query_question(question)
+        children = self.memory_controller.retrieve_eaes_candidates(
             question_emb=question_emb,
-            question_text=self._eaes_query_question(question),
+            question_text=query,
+            limit=config.EAES_CHILD_CANDIDATE_LIMIT,
         )
-        child_probe = view_retrieval["child_probe_candidates"]
-        parent_probe = view_retrieval["parent_probe_candidates"]
-        selected_child_pool = view_retrieval["selected_child_candidates"]
-        selected_parent_pool = view_retrieval["selected_parent_candidates"]
-        initial_children = view_retrieval["adaptive_children"]
-        selected_parents = view_retrieval["adaptive_parents"]
-        phrase_retrieval = view_retrieval["phrase_retrieval"]
-        final_children = initial_children
-        routing = {
-            "selected_parent_k": 0,
-            "parent_candidates": selected_parent_pool,
-            "parent_phrase_top_k": getattr(
-                config, "EAES_PARENT_PHRASE_TOP_K", 10
-            ),
-        }
-        routing["selected_parent_k"] = len(selected_parents)
-        initial_retrieval = {
-            "all_view_child_ids": [
-                item.get("memory_id") for item in child_probe
-            ],
-            "selected_view_child_ids": [
-                item.get("memory_id") for item in selected_child_pool
-            ],
-            "adaptive_child_ids": [
-                item.get("memory_id") for item in initial_children
-            ],
-            "all_view_parent_ids": [
-                item.get("parent_id") for item in parent_probe
-            ],
-            "selected_view_parent_ids": [
-                item.get("parent_id") for item in selected_parent_pool
-            ],
-            "adaptive_parent_ids": [
-                item.get("parent_id") for item in selected_parents
-            ],
-        }
+        parents = self.memory_controller.retrieve_eaes_parent_candidates(
+            question_emb=question_emb,
+            question_text=query,
+            limit=config.PARENT_TOP_K,
+        )
         return {
-            "query_plan": query_plan,
-            "child_probe_candidates": child_probe,
-            "parent_probe_candidates": parent_probe,
-            "prefilter_children": selected_child_pool,
-            "selected_parent_pool": selected_parent_pool,
-            "initial_children": initial_children,
-            "final_children": final_children,
-            "selected_parents": selected_parents,
-            "routing": routing,
-            "phrase_retrieval": phrase_retrieval,
-            "child_rankings": view_retrieval["child_rankings"],
-            "parent_rankings": view_retrieval["parent_rankings"],
-            "initial_retrieval": initial_retrieval,
+            "query_plan": {"query": query},
+            "child_probe_candidates": children,
+            "parent_probe_candidates": parents,
+            "prefilter_children": children,
+            "selected_parent_pool": parents,
+            "initial_children": children,
+            "final_children": children,
+            "selected_parents": parents,
+            "routing": {
+                "selected_parent_k": len(parents),
+                "parent_candidates": parents,
+            },
+            "initial_retrieval": {
+                "direct_child_ids": [item["memory_id"] for item in children],
+                "direct_parent_ids": [item["parent_id"] for item in parents],
+            },
             "counts": {
-                "candidate_phrase_k": len(
-                    query_plan.get("retrieval_phrases") or []
-                ),
-                "selected_child_phrase_k": len(
-                    phrase_retrieval.get(
-                        "child_selected_phrase_indices"
-                    ) or []
-                ),
-                "selected_parent_phrase_k": len(
-                    phrase_retrieval.get(
-                        "parent_selected_phrase_indices"
-                    ) or []
-                ),
-                "child_probe_k": len(child_probe),
-                "parent_probe_k": len(parent_probe),
-                "selected_view_child_k": len(selected_child_pool),
-                "selected_view_parent_k": len(selected_parent_pool),
-                "adaptive_child_k": len(initial_children),
-                "adaptive_parent_k": len(selected_parents),
-                # Compatibility names for existing result readers.
-                "prefilter_child_k": len(selected_child_pool),
-                "initial_child_k": len(initial_children),
-                "dropped_by_pool_limit_k": 0,
-                "final_child_k": len(final_children),
-                "final_parent_k": len(selected_parents),
-                "final_total_k": len(final_children) + len(selected_parents),
+                "direct_child_k": len(children),
+                "direct_parent_k": len(parents),
+                "final_child_k": len(children),
+                "final_parent_k": len(parents),
+                "final_total_k": len(children) + len(parents),
             },
         }
 
@@ -1556,51 +300,31 @@ class EAESMixin:
             self, question, category=0, question_emb=None,
             lm_current_date=None, return_details=False
     ):
-        """Answer through one reader; category is API-only evaluation metadata."""
         first_pass = self._retrieve_eaes_first_pass(question, question_emb)
-        query_plan = first_pass["query_plan"]
-        child_query_plan = self._eaes_child_query_plan(query_plan)
-        parent_candidates = first_pass["selected_parents"]
-        candidates = first_pass["final_children"]
-        rollback_enabled = bool(
-            getattr(config, "EAES_ROLLBACK_CHECK", False)
+        parents = first_pass["selected_parents"]
+        children, _, route_details = self._prepare_eaes_selector_children(
+            question, question_emb, first_pass["final_children"], parents
         )
-        if rollback_enabled:
-            candidates, parent_candidates, _ = self.apply_eaes_rollback_check(
-                question,
-                query_plan,
-                candidates,
-                parent_candidates,
-                question_emb,
-            )
-        candidates, _, route_diagnostics = (
-            self._prepare_eaes_selector_children(
-                question,
-                question_emb,
-                candidates,
-                parent_candidates,
-            )
-        )
-        if not candidates and not parent_candidates and not rollback_enabled:
+        if not children and not parents:
             result = ("no information available", [])
-            return result + ({"enabled": not config.DISABLE_EVIDENCE_SELECTOR,
-                              "backend": config.EVIDENCE_SELECTOR_BACKEND,
-                              "stop_reason": "no_candidates"},) if return_details else result
+            details = {
+                "enabled": True,
+                "backend": "unified_utility",
+                "stop_reason": "no_candidates",
+            }
+            return result + (details,) if return_details else result
 
         reader_result = self._read_eaes_candidates(
             question,
-            child_query_plan,
-            candidates,
-            parent_candidates,
+            first_pass["query_plan"],
+            children,
+            parents,
             lm_current_date=lm_current_date,
-            **({"return_details": True} if return_details else {}),
+            return_details=return_details,
         )
         answer, context = reader_result[:2]
         if return_details:
-            selector_details = reader_result[3]
-            if selector_details is not None:
-                selector_details["parent_child_routing"] = route_diagnostics
-            return answer, context, selector_details
+            details = reader_result[3]
+            details["parent_child_routing"] = route_details
+            return answer, context, details
         return answer, context
-
-

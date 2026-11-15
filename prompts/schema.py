@@ -301,7 +301,7 @@ def check_rewrite_json(
 
 
 def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
-  """Validate exhaustive memories generated from one contiguous child window."""
+  """Validate candidate memories generated from one contiguous child window."""
   flag, err = check_rewrite_json(
     text,
     dialogue_text,
@@ -312,8 +312,6 @@ def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
   if not flag:
     return flag, err
   sentences = text.get("sentence") or []
-  if not sentences:
-    return False, "a child window must produce at least one memory sentence"
   origin_to_position = {
     getattr(turn, "origin", None): position
     for position, turn in enumerate(turns)
@@ -331,7 +329,6 @@ def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
     for turn in turns[start:end + 1]
   ]
   allowed_ids = set(ordered_window_origins)
-  covered_ids = set()
   seen_sentence_ids = set()
 
   for index, sentence in enumerate(sentences):
@@ -353,14 +350,6 @@ def check_child_window_rewrite_json(text, child_window, turns, dialogue_text):
     used_positions = [origin_to_position[origin] for origin in used_order]
     if used_positions != sorted(used_positions):
       return False, f"sentence[{index}] origins must follow dialogue order"
-    covered_ids.update(used_order)
-
-  missing = [origin for origin in ordered_window_origins if origin not in covered_ids]
-  if missing:
-    return False, (
-      "child rewrite must cover every current-window turn; "
-      f"missing origins: {missing!r}"
-    )
   return True, ""
 
 def check_key_json(text, ref_obj=None, replace=False):

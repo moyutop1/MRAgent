@@ -2,8 +2,8 @@
 Main entry: EAES retrieval and answering over reconstructed conversational memory.
 
 Pipeline (per sample):
-  rewrite -> embed -> extract_keyword (memory-index hints) -> build EAES notes
-  -> parse query plan -> fuse retrieval views -> select evidence -> final reader
+  session-local Child/Parent construction -> embedding -> raw-question Child and
+  Parent retrieval -> Parent routing -> unified utility selection -> final reader
 
 Usage:
   python run.py --data locomo --model gemini --file <tag> --eaes [--sample 42]
@@ -44,12 +44,6 @@ def _resolve_compatible_cache_path(
         candidates = [
             root / f"{sample_id}_rewrite.jsonl",
             root / f"{sample_id}_rewrite.json",
-        ]
-    elif cache_kind == "keyword":
-        root = Path("data") / dataset / f"keyword_{model_token}"
-        candidates = [
-            root / f"{sample_id}_keyword.jsonl",
-            root / f"{sample_id}_keyword.json",
         ]
     elif cache_kind == "embedding":
         root = (
@@ -333,6 +327,8 @@ def main():
         raise ValueError(
             "--eaes is required because the non-EAES keyword retrieval path has been removed."
         )
+    if not config.SEMANTIC_HIERARCHY:
+        raise ValueError("--semantic_hierarchy is required by the unified utility pipeline.")
     datapath = config.datapath
     conversation_list, question_list, raw_conversation_list, raw_text_list = get_data(dataset, datapath)
     i=0
@@ -413,14 +409,6 @@ def main():
             else:
                 logging.info(f"Rewrite for sample {sample_id} already exists, skipping.")
 
-            keyword_path = _resolve_compatible_cache_path(
-                config.keyword_template.format(
-                    dataset=dataset, sample_id=sample_id
-                ),
-                dataset,
-                sample_id,
-                "keyword",
-            )
             embedding_path = _resolve_compatible_cache_path(
                 config.embedding_template.format(
                     dataset=dataset, sample_id=sample_id
@@ -430,9 +418,7 @@ def main():
                 "embedding",
             )
             if rewrite_updated:
-                # A keyword/embedding cache beside an incomplete rewrite came
-                # from a different generation and cannot be aligned safely.
-                for dependent_path in (keyword_path, embedding_path):
+                for dependent_path in (embedding_path,):
                     if os.path.exists(dependent_path):
                         logging.warning(
                             "Removing stale derived cache after rewrite resume: %s",
@@ -440,38 +426,8 @@ def main():
                         )
                         os.remove(dependent_path)
 
-            keyword_records = load_jsonl_records(keyword_path)
-            if len(keyword_records) > len(rewrite_records):
-                logging.warning(
-                    "Keyword cache has %d records for %d rewrite records; "
-                    "rebuilding %s.",
-                    len(keyword_records),
-                    len(rewrite_records),
-                    keyword_path,
-                )
-                os.remove(keyword_path)
-                keyword_records = []
-            if len(keyword_records) < len(rewrite_records):
-                logging.info(
-                    "Resuming keyword extraction at record %d/%d.",
-                    len(keyword_records) + 1,
-                    len(rewrite_records),
-                )
-                agent.extract_keyword_sample(
-                    keyword_path, rewrite_path, ref_id=len(keyword_records)
-                )
-                keyword_records = load_jsonl_records(keyword_path)
-                if len(keyword_records) != len(rewrite_records):
-                    raise ValueError(
-                        f"keyword cache {keyword_path} remains misaligned: "
-                        f"{len(keyword_records)} keyword records for "
-                        f"{len(rewrite_records)} rewrite records"
-                    )
-            else:
-                logging.info(f"Keyword for sample {sample_id} already exists, skipping.")
-
             if not os.path.exists(embedding_path):
-                embed_sample(question_list[sample_id], rewrite_path, embedding_path)
+                embed_sample(question_list[sample_id], embedding_path)
             else:
                 logging.info(f"Embedding for sample {sample_id} already exists, skipping.")
 
@@ -480,7 +436,7 @@ def main():
             conv_embeddings, question_embeddings, topic_id_list, topic_embeddings = get_conv_embeddings(embedding_path)
             agent.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)
 
-            agent.store_keyword(keyword_path, rewrite_path)
+            agent.store_rewrite(rewrite_path)
             if config.EAES_MODE and config.SEMANTIC_HIERARCHY:
                 memory_controller.prepare_eaes_parent_embeddings()
 

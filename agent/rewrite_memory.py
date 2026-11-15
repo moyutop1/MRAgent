@@ -3,18 +3,12 @@ import re
 from collections import defaultdict
 from copy import deepcopy
 from datetime import date, datetime, timedelta
-from math import sqrt
-from typing import List, NamedTuple
-
-from common import config
 from prompts import schema as json_scheme
 from prompts.prompts import Prompts
 from agent.semantic_segmentation import (
-    attach_child_memory_ids_to_parents,
     child_window_turns,
     parse_session_turns,
     plan_child_windows,
-    plan_parent_segments,
 )
 
 
@@ -142,48 +136,6 @@ def inherit_adjacent_question_origins(rewrite_out, turns):
     return changed
 
 
-def normalize_rewrite_tag_lengths(rewrite_out, max_words=5):
-    """Fold only an overlong tag/facet suffix into one compound token."""
-    if not isinstance(rewrite_out, dict) or max_words < 1:
-        return 0
-    sentences = rewrite_out.get("sentence")
-    if not isinstance(sentences, list):
-        return 0
-
-    changed = 0
-    for sentence in sentences:
-        if not isinstance(sentence, dict):
-            continue
-        tags = sentence.get("tag")
-        if not isinstance(tags, list):
-            continue
-        normalized_tags = []
-        for tag in tags:
-            if not isinstance(tag, str):
-                normalized_tags.append(tag)
-                continue
-            clean_tag = re.sub(r"\s+", " ", tag).strip()
-            prefix = None
-            phrase = clean_tag
-            if clean_tag.count(".") == 1:
-                raw_prefix, raw_facet = clean_tag.split(".", 1)
-                prefix = re.sub(r"\s+", " ", raw_prefix).strip()
-                phrase = re.sub(r"\s+", " ", raw_facet).strip()
-            words = phrase.split(" ")
-            if len(words) > max_words:
-                words = words[:max_words - 1] + [
-                    "-".join(words[max_words - 1:])
-                ]
-                changed += 1
-            normalized_phrase = " ".join(words)
-            normalized_tags.append(
-                f"{prefix}.{normalized_phrase}"
-                if prefix is not None else normalized_phrase
-            )
-        sentence["tag"] = normalized_tags
-    return changed
-
-
 def _compose_child_tag_components(rewrite_out):
     """Validate generated prefix/facet pairs and compose stored child tags."""
     if not isinstance(rewrite_out, dict):
@@ -261,16 +213,6 @@ def _compose_child_tag_components(rewrite_out):
     return True, output, "", ""
 
 
-def _is_child_tag_validation_error(error):
-    message = str(error or "").casefold()
-    return (
-        ".tag" in message
-        or "tag prefix" in message
-        or "tag facet" in message
-        or "composite tag" in message
-    )
-
-
 _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
     "activity": "event_action",
     "plan": "event_action",
@@ -278,11 +220,6 @@ _TAG_HEAD_SEMANTIC_PROPERTY_MAP = {
     "possession": "personal_profile",
     "relationship": "relation_social",
 }
-
-_PERSISTENCE_SEMANTIC_PROPERTIES = frozenset({
-    "transient", "episodic", "durable", "unknown",
-})
-
 
 def normalize_rewrite_semantic_properties(rewrite_out):
     """Repair canonical tag heads leaked into ``semantic_properties``."""
@@ -318,35 +255,6 @@ def normalize_rewrite_semantic_properties(rewrite_out):
     return changed
 
 
-def fallback_invalid_persistence_to_unknown(rewrite_out):
-    """Replace an invalid persistence selection with one neutral fallback."""
-    if not isinstance(rewrite_out, dict):
-        return 0
-    sentences = rewrite_out.get("sentence")
-    if not isinstance(sentences, list):
-        return 0
-
-    changed = 0
-    for sentence in sentences:
-        if not isinstance(sentence, dict):
-            continue
-        properties = sentence.get("semantic_properties")
-        if not isinstance(properties, list):
-            continue
-        persistence_count = sum(
-            value in _PERSISTENCE_SEMANTIC_PROPERTIES
-            for value in properties
-        )
-        if persistence_count == 1:
-            continue
-        sentence["semantic_properties"] = [
-            value for value in properties
-            if value not in _PERSISTENCE_SEMANTIC_PROPERTIES
-        ] + ["unknown"]
-        changed += 1
-    return changed
-
-
 def _as_list(value):
     if value is None:
         return []
@@ -355,14 +263,6 @@ def _as_list(value):
     if isinstance(value, (tuple, set)):
         return list(value)
     return [value]
-
-
-def _dialogue_turn_lines(text: str):
-    return [
-        line.strip()
-        for line in str(text or "").splitlines()
-        if re.search(r"\bdia_id\s*:\s*D\d+:\d+", line)
-    ]
 
 
 def _conversation_time_from_text(text: str):
@@ -558,25 +458,6 @@ def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
             sentence.get("text"), cue, display, index_start)
 
 
-class _RewriteWindow(NamedTuple):
-    previous_context: List[str]
-    current_turns: List[str]
-
-
-def _window_turns(turns: List[str]):
-    if not turns:
-        return []
-    window_size = config.REWRITE_WINDOW_SIZE
-    windows = []
-    for start in range(0, len(turns), window_size):
-        context_size = min(start, config.REWRITE_OVERLAP_SIZE)
-        windows.append(_RewriteWindow(
-            previous_context=turns[start - context_size:start],
-            current_turns=turns[start:start + window_size],
-        ))
-    return windows
-
-
 def _empty_rewrite(conversation_time=None):
     return {
         "conversation_time": conversation_time or "1970-01-01",
@@ -586,224 +467,133 @@ def _empty_rewrite(conversation_time=None):
     }
 
 
-def _filter_context_only_outputs(rewrite_out, current_window_text: str):
-    """Drop context-only items, retrying only when every returned item is dropped."""
-    current_ids = set(_dialogue_by_origin(current_window_text))
-    if not current_ids:
-        return False, "current dialogue window has no dia_id values"
-    invalid_count = 0
-    compliant_count = 0
-    for field in ("sentence", "personal_sentences"):
-        compliant_items = []
-        for item in rewrite_out.get(field) or []:
-            if not isinstance(item, dict):
-                compliant_items.append(item)
-                compliant_count += 1
-                continue
-            ids = set(origin_ids(item.get("origin")))
-            if ids and ids.isdisjoint(current_ids):
-                invalid_count += 1
-                continue
-            compliant_items.append(item)
-            compliant_count += 1
-        rewrite_out[field] = compliant_items
-    if not invalid_count:
-        return True, ""
-    if not compliant_count:
-        return (
-            False,
-            "all returned memory items are supported only by "
-            "PREVIOUS_DIALOGUE_CONTEXT; omit them and extract information "
-            "from CURRENT_DIALOGUE_WINDOW",
-        )
-
-    used_topics = {
-        str(topic)
-        for sentence in rewrite_out.get("sentence") or []
-        if isinstance(sentence, dict)
-        for topic in _as_list(sentence.get("topic"))
+def _utility_child(memory):
+    return {
+        "id": memory.get("id"),
+        "origin": memory.get("origin"),
+        "text": memory.get("text"),
     }
-    if isinstance(rewrite_out.get("topics"), dict):
-        rewrite_out["topics"] = {
-            topic_id: topic_text
-            for topic_id, topic_text in rewrite_out["topics"].items()
-            if str(topic_id) in used_topics
-        }
-    return True, ""
 
 
-def _rewrite_window(
-        llm,
-        current_window_text: str,
-        source_text: str,
-        previous_dialogue_context: str,
-        previous_memories=None,
-        logger=None,
-):
-    previous_slice = (
-        (previous_memories or [])[-config.REWRITE_PREVIOUS_LIMIT:]
-        if config.REWRITE_PREVIOUS_LIMIT
-        else []
-    )
-    previous_payload = [
-        {
-            "id": memory.get("id"),
-            "text": memory.get("text"),
-            "origin": memory.get("origin"),
-            "tag": memory.get("tag"),
-        }
-        for memory in previous_slice
-        if isinstance(memory, dict)
-    ]
-    rewrite_prompt = Prompts.extract_rewrite_prompt(
-        json.dumps(current_window_text, ensure_ascii=False),
-        json.dumps(previous_payload, ensure_ascii=False),
-        json.dumps(previous_dialogue_context, ensure_ascii=False),
-    )
-    rewrite_out = llm.chat_text(
-        messages=[
-            {"role": "system", "content": Prompts.REWRITE_SYSTEM_PROMPT},
-            {"role": "user", "content": rewrite_prompt},
-        ],
-    )
-    normalize_sentence_ids(rewrite_out)
-    normalize_rewrite_temporal_granularity(rewrite_out, source_text)
-    normalize_rewrite_tag_lengths(rewrite_out)
-    normalize_rewrite_semantic_properties(rewrite_out)
-    flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
-    if flag:
-        flag, err = _filter_context_only_outputs(
-            rewrite_out, current_window_text)
-    last_err = err
-    if not flag:
-        for _ in range(1, 4):
-            rewrite_out = llm.chat_text(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": Prompts.REWRITE_SYSTEM_PROMPT
-                        + " The previous run failed with the following error: "
-                        + last_err,
-                    },
-                    {"role": "user", "content": rewrite_prompt},
-                ],
-                temperature=1.0,
-            )
-            normalize_sentence_ids(rewrite_out)
-            normalize_rewrite_temporal_granularity(rewrite_out, source_text)
-            normalize_rewrite_tag_lengths(rewrite_out)
-            normalize_rewrite_semantic_properties(rewrite_out)
-            flag, err = json_scheme.check_rewrite_json(rewrite_out, source_text)
-            if flag:
-                flag, err = _filter_context_only_outputs(
-                    rewrite_out, current_window_text)
-            if flag:
-                break
-            last_err = err
-    if not flag:
-        if logger:
-            logger.warning(f"rewrite window failed validation after retries: {last_err}")
-        return _empty_rewrite(_conversation_time_from_text(current_window_text))
-    return rewrite_out
+def _keep_new_children(candidates, kept_children):
+    from llm.unified_utility_judge import get_unified_utility_judge
+
+    judge = get_unified_utility_judge()
+    accepted = []
+    for candidate in candidates:
+        keep = judge.keep(
+            "WRITE",
+            {
+                "scope": "current session only",
+                "criterion": (
+                    "new event/state, time/stage, or concrete detail relative "
+                    "to already kept children"
+                ),
+            },
+            [_utility_child(memory) for memory in kept_children],
+            _utility_child(candidate),
+        )
+        if keep:
+            kept_children.append(candidate)
+            accepted.append(candidate)
+    return accepted
 
 
-def _merge_window_rewrites(window_outputs: List[dict], conversation_time: str):
-    merged = _empty_rewrite(conversation_time)
-    topic_counter = 1
-    personal_counter = 1
-    seen_memory_keys = set()
-    for out in window_outputs:
-        if not isinstance(out, dict):
-            continue
-        # Keep the session-level anchor parsed from the raw session text.
-        # Window LLM outputs may confuse event dates with conversation_time.
-        topic_map = {}
-        for old_tid, topic_text in (out.get("topics") or {}).items():
-            if not topic_text:
-                continue
-            new_tid = f"t{topic_counter}"
-            topic_counter += 1
-            topic_map[str(old_tid)] = new_tid
-            merged["topics"][new_tid] = topic_text
-        for sentence in out.get("sentence") or []:
-            if not isinstance(sentence, dict):
-                continue
-            ids = origin_ids(sentence.get("origin"))
-            text = str(sentence.get("text") or "").strip()
-            if not ids or not text:
-                continue
-            sentence = dict(sentence)
-            sentence["origin"] = ",".join(ids)
-            sentence["topic"] = [
-                topic_map.get(str(topic), str(topic))
-                for topic in _as_list(sentence.get("topic"))
-                if topic_map.get(str(topic), str(topic)) in merged["topics"]
-            ]
-            key = (text.lower(), sentence["origin"])
-            if key in seen_memory_keys:
-                continue
-            seen_memory_keys.add(key)
-            merged["sentence"].append(sentence)
-        for personal_sentence in out.get("personal_sentences") or []:
-            if not isinstance(personal_sentence, dict) or not personal_sentence.get("text"):
-                continue
-            item = dict(personal_sentence)
-            item["id"] = f"p{personal_counter}"
-            personal_counter += 1
-            if item.get("origin"):
-                item["origin"] = ",".join(origin_ids(item.get("origin"))) or item.get("origin")
-            merged["personal_sentences"].append(item)
-    normalize_sentence_ids(merged)
-    return merged
-
-
-def _rewrite_parent_segment(llm, parent, logger=None):
+def _plan_parent_groups(llm, turns, children):
+    if not children:
+        return []
     payload = {
-        "parent_id": parent.parent_id,
-        "previous_dialogue_context": [
-            turn.line for turn in parent.previous_context
-        ],
-        "parent_dialogue_window": [turn.line for turn in parent.current_turns],
+        "complete_raw_session": [turn.line for turn in turns],
+        "accepted_children": [_utility_child(child) for child in children],
     }
-    user_prompt = Prompts.extract_parent_rewrite_prompt(
-        json.dumps(payload, ensure_ascii=False)
-    )
-    last_error = ""
-    for attempt in range(4):
-        system_prompt = Prompts.PARENT_REWRITE_SYSTEM_PROMPT
-        if attempt:
-            system_prompt += (
-                "\nThe previous output was invalid. Return the complete object again. "
-                f"Validation error: {last_error}"
-            )
-        output = llm.chat_text(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0 if attempt == 0 else 0.7,
-        )
-        if not isinstance(output, dict):
-            last_error = "parent rewrite must be a JSON object"
-            continue
-        if output.get("parent_id") != parent.parent_id:
-            last_error = f"parent_id must equal {parent.parent_id!r}"
-            continue
+    output = llm.chat_text(messages=[
+        {"role": "system", "content": Prompts.PARENT_GROUP_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": Prompts.extract_parent_group_prompt(
+                json.dumps(payload, ensure_ascii=False)
+            ),
+        },
+    ], temperature=0.0)
+    groups = output.get("parent_groups") if isinstance(output, dict) else None
+    if not isinstance(groups, list):
+        raise ValueError("parent grouping must return parent_groups")
+
+    valid_ids = {child["id"] for child in children}
+    used = set()
+    result = []
+    for group in groups:
+        child_ids = group.get("child_ids") if isinstance(group, dict) else None
+        if not isinstance(child_ids, list) or not child_ids:
+            raise ValueError("every parent group must contain child_ids")
+        if any(child_id not in valid_ids for child_id in child_ids):
+            raise ValueError("parent group contains an unknown child id")
+        if len(child_ids) != len(set(child_ids)) or used.intersection(child_ids):
+            raise ValueError("parent groups must be disjoint")
+        used.update(child_ids)
+        result.append(child_ids)
+    return result
+
+
+def _build_session_parents(llm, turns, children):
+    from llm.unified_utility_judge import get_unified_utility_judge
+
+    groups = _plan_parent_groups(llm, turns, children)
+    if not groups:
+        return []
+    child_by_id = {child["id"]: child for child in children}
+    raw_session = [turn.line for turn in turns]
+    session_prefix = turns[0].origin.split(":", 1)[0]
+    judge = get_unified_utility_judge()
+    parents = []
+    for number, child_ids in enumerate(groups, start=1):
+        parent_id = f"{session_prefix}:P{number}"
+        group = [child_by_id[child_id] for child_id in child_ids]
+        payload = {
+            "parent_id": parent_id,
+            "complete_raw_session": raw_session,
+            "child_group": [_utility_child(child) for child in group],
+        }
+        output = llm.chat_text(messages=[
+            {"role": "system", "content": Prompts.PARENT_REWRITE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": Prompts.extract_parent_rewrite_prompt(
+                    json.dumps(payload, ensure_ascii=False)
+                ),
+            },
+        ], temperature=0.0)
+        if not isinstance(output, dict) or output.get("parent_id") != parent_id:
+            raise ValueError(f"invalid parent rewrite for {parent_id}")
         rewrite_content = str(output.get("rewrite_content") or "").strip()
         if not rewrite_content:
-            last_error = "rewrite_content must be non-empty"
+            raise ValueError(f"empty parent rewrite for {parent_id}")
+        candidate = {
+            "parent_id": parent_id,
+            "rewrite_content": rewrite_content,
+            "child_ids": child_ids,
+        }
+        if not judge.keep(
+            "ABSTRACT",
+            {
+                "scope": "current session only",
+                "criterion": "supported, distinct, useful high-level abstraction",
+            },
+            [
+                {
+                    "parent_id": parent["parent_id"],
+                    "rewrite_content": parent["rewrite_content"],
+                }
+                for parent in parents
+            ],
+            candidate,
+            {"complete_raw_session": raw_session, "child_group": payload["child_group"]},
+        ):
             continue
-        parent.rewrite_content = rewrite_content
-        return parent
-    if logger:
-        logger.error(
-            "parent rewrite failed for %s after retries: %s",
-            parent.parent_id,
-            last_error,
-        )
-    raise ValueError(
-        f"parent rewrite failed for {parent.parent_id}: {last_error}"
-    )
+        parents.append(candidate)
+        for child in group:
+            child["parent_id"] = parent_id
+    return parents
 
 
 def _child_window_source_text(window, turns, conversation_time):
@@ -821,170 +611,6 @@ def _previous_child_rewrite_context(generated_memories, limit=2):
         for memory in (generated_memories or [])[-limit:]
         if isinstance(memory, dict) and memory.get("text")
     ]
-
-
-def _embed_child_memory_texts(texts):
-    import numpy as np
-    from llm.embeddings import get_embedding
-
-    clean_texts = [str(text or "").strip() for text in texts]
-    if not clean_texts or any(not text for text in clean_texts):
-        raise ValueError("child memory similarity requires non-empty text")
-    embeddings = np.asarray(get_embedding(clean_texts), dtype=np.float32)
-    if embeddings.ndim == 1:
-        embeddings = embeddings.reshape(1, -1)
-    if embeddings.ndim != 2 or embeddings.shape[0] != len(clean_texts):
-        raise ValueError(
-            "child memory embedding count does not match the input text count"
-        )
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    if np.any(norms <= 0):
-        raise ValueError("child memory embedding contains a zero-length vector")
-    return embeddings / norms
-
-
-def _child_memory_cosine_similarity(left_embedding, right_embedding):
-    left = [float(value) for value in left_embedding]
-    right = [float(value) for value in right_embedding]
-    if len(left) != len(right) or not left:
-        raise ValueError("child memory embeddings must have the same non-zero shape")
-    denominator = sqrt(sum(value * value for value in left)) * sqrt(
-        sum(value * value for value in right)
-    )
-    if denominator <= 0:
-        raise ValueError("child memory cosine similarity received a zero vector")
-    similarity = sum(a * b for a, b in zip(left, right)) / denominator
-    return max(-1.0, min(1.0, similarity))
-
-
-def _merged_child_origins(previous_origin, current_origin):
-    return ",".join(dict.fromkeys(
-        origin_ids(previous_origin) + origin_ids(current_origin)
-    ))
-
-
-def _fuse_child_memory_text(llm, previous_text, current_text, logger=None):
-    payload = json.dumps({
-        "previous_rewrite_content": previous_text,
-        "current_rewrite_content": current_text,
-    }, ensure_ascii=False)
-    user_prompt = Prompts.extract_child_memory_fusion_prompt(payload)
-    last_error = ""
-    for attempt in range(4):
-        system_prompt = Prompts.CHILD_MEMORY_FUSION_SYSTEM_PROMPT
-        if attempt:
-            system_prompt += (
-                "\nThe previous fusion output was invalid. Return the complete "
-                "JSON object again. "
-                f"Validation error: {last_error}"
-            )
-        output = llm.chat_text(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0 if attempt == 0 else 0.7,
-        )
-        if not isinstance(output, dict):
-            last_error = "fusion output must be a JSON object"
-            continue
-        raw_rewrite_content = output.get("rewrite_content")
-        if not isinstance(raw_rewrite_content, str):
-            last_error = "rewrite_content must be a string"
-            continue
-        rewrite_content = raw_rewrite_content.strip()
-        if not rewrite_content:
-            last_error = "rewrite_content must be a non-empty string"
-            continue
-        return rewrite_content
-    if logger:
-        logger.error(
-            "child memory fusion failed after retries: %s", last_error
-        )
-    raise ValueError(
-        f"child memory fusion failed after retries: {last_error}"
-    )
-
-
-def _fuse_adjacent_duplicate_child_memories(
-        llm,
-        retained_memories,
-        candidate_memories,
-        previous_embedding=None,
-        threshold=None,
-        logger=None,
-):
-    if threshold is None:
-        threshold = getattr(
-            config, "CHILD_DUPLICATE_SIMILARITY_THRESHOLD", 0.55
-        )
-    threshold = float(threshold)
-    kept_candidates = []
-    last_embedding = previous_embedding
-    candidates = list(candidate_memories or [])
-    current_texts = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise ValueError("child memory candidate must be an object")
-        current_text = str(candidate.get("text") or "").strip()
-        if not current_text:
-            raise ValueError("child memory candidate text must be non-empty")
-        current_texts.append(current_text)
-
-    if not candidates:
-        return kept_candidates, last_embedding
-    if threshold >= 1.0:
-        retained_memories.extend(candidates)
-        return candidates, None
-
-    embedding_inputs = list(current_texts)
-    includes_previous = bool(retained_memories and last_embedding is None)
-    if includes_previous:
-        previous_text = str(retained_memories[-1].get("text") or "").strip()
-        embedding_inputs.insert(0, previous_text)
-    embeddings = _embed_child_memory_texts(embedding_inputs)
-    if includes_previous:
-        last_embedding = embeddings[0]
-        current_embeddings = embeddings[1:]
-    else:
-        current_embeddings = embeddings
-
-    for candidate, current_text, current_vector in zip(
-            candidates, current_texts, current_embeddings):
-        if not retained_memories:
-            retained_memories.append(candidate)
-            kept_candidates.append(candidate)
-            last_embedding = current_vector
-            continue
-
-        previous = retained_memories[-1]
-        previous_text = str(previous.get("text") or "").strip()
-        similarity = _child_memory_cosine_similarity(
-            last_embedding, current_vector
-        )
-
-        if similarity > threshold:
-            fused_text = _fuse_child_memory_text(
-                llm, previous_text, current_text, logger=logger
-            )
-            previous["text"] = fused_text
-            previous["origin"] = _merged_child_origins(
-                previous.get("origin"), candidate.get("origin")
-            )
-            last_embedding = _embed_child_memory_texts([fused_text])[0]
-            if logger:
-                logger.info(
-                    "fused adjacent child %s into %s at cosine %.4f (> %.4f)",
-                    candidate.get("id"), previous.get("id"), similarity,
-                    threshold,
-                )
-            continue
-
-        retained_memories.append(candidate)
-        kept_candidates.append(candidate)
-        last_embedding = current_vector
-
-    return kept_candidates, last_embedding
 
 
 def _rewrite_child_window(
@@ -1009,134 +635,41 @@ def _rewrite_child_window(
         window, turns, conversation_time
     )
     last_error = ""
-    last_output = None
-    last_validated_output = None
-    attempt = 0
-    general_retries_used = 0
-    tag_retry_used = False
-    while True:
+    for attempt in range(2):
         system_prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
-        request_prompt = user_prompt
         if attempt:
             system_prompt += (
-                "\nThe previous window rewrite was invalid. Return the complete "
-                "window rewrite again. "
-                f"Validation error: {last_error}"
-            )
-            request_prompt += (
-                "\n\nPREVIOUS_INVALID_WINDOW_REWRITE:\n<<<\n"
-                f"{json.dumps(last_output, ensure_ascii=False)}\n"
-                ">>>\nRepair the exact validation error without dropping any "
-                "previously represented current-window information. If an origin "
-                "is missing, incorporate that turn into the appropriate memory or "
-                "add a valid memory for it. Return the complete repaired object."
+                f"\nRepair the complete JSON. Validation error: {last_error}"
             )
         raw_output = llm.chat_text(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.0 if attempt == 0 else 0.7,
+            temperature=0.0,
         )
-        last_output = raw_output
-        tags_valid, output, error_kind, compose_error = (
+        tags_valid, output, _, compose_error = (
             _compose_child_tag_components(raw_output)
         )
-        if tags_valid:
-            # ``topics`` has no meaning in a hierarchical child rewrite.
-            # Silently discard an obsolete model-provided value instead of
-            # storing it or spending a retry on it.
-            output.pop("topics", None)
-            inherited_question_count = inherit_adjacent_question_origins(
-                output, current_turns
-            )
-            if inherited_question_count and logger:
-                logger.info(
-                    "inherited %d adjacent question origin(s) for %s through %s",
-                    inherited_question_count,
-                    window.start_origin,
-                    window.end_origin,
-                )
-            normalize_sentence_ids(output)
-            normalize_rewrite_temporal_granularity(output, source_text)
-            normalized_property_count = normalize_rewrite_semantic_properties(
-                output
-            )
-            if normalized_property_count and logger:
-                logger.info(
-                    "normalized %d leaked tag-head semantic property value(s) "
-                    "for %s through %s",
-                    normalized_property_count,
-                    window.start_origin,
-                    window.end_origin,
-                )
-            last_validated_output = output
-            valid, last_error = json_scheme.check_child_window_rewrite_json(
-                output,
-                window,
-                list(turns),
-                source_text,
-            )
-            if valid:
-                output["conversation_time"] = conversation_time or output.get(
-                    "conversation_time"
-                )
-                return output
-            is_tag_error = _is_child_tag_validation_error(last_error)
-        else:
+        if not tags_valid:
             last_error = compose_error
-            is_tag_error = error_kind.startswith("tag_")
-
-        if is_tag_error:
-            if tag_retry_used:
-                break
-            tag_retry_used = True
-        else:
-            if general_retries_used >= 3:
-                break
-            general_retries_used += 1
-        attempt += 1
-
-    persistence_error = (
-        ".semantic_properties must contain exactly one persistence property"
-        in str(last_error)
-    )
-    if persistence_error and last_validated_output is not None:
-        fallback_count = fallback_invalid_persistence_to_unknown(
-            last_validated_output
+            continue
+        output.pop("topics", None)
+        inherit_adjacent_question_origins(output, current_turns)
+        normalize_sentence_ids(output)
+        normalize_rewrite_temporal_granularity(output, source_text)
+        normalize_rewrite_semantic_properties(output)
+        valid, last_error = json_scheme.check_child_window_rewrite_json(
+            output, window, list(turns), source_text
         )
-        if fallback_count:
-            valid, fallback_error = json_scheme.check_child_window_rewrite_json(
-                last_validated_output,
-                window,
-                list(turns),
-                source_text,
+        if valid:
+            output["conversation_time"] = conversation_time or output.get(
+                "conversation_time"
             )
-            if valid:
-                if logger:
-                    logger.warning(
-                        "used unknown persistence fallback for %d child "
-                        "memory/memories after rewrite retries for %s through %s",
-                        fallback_count,
-                        window.start_origin,
-                        window.end_origin,
-                    )
-                last_validated_output["conversation_time"] = (
-                    conversation_time
-                    or last_validated_output.get("conversation_time")
-                )
-                return last_validated_output
-            last_error = fallback_error
-    if logger:
-        logger.error(
-            "child window rewrite failed after retries for %s through %s: %s",
-            window.start_origin,
-            window.end_origin,
-            last_error,
-        )
+            return output
     raise ValueError(
         f"child window rewrite failed for {window.start_origin} through "
-        f"{window.end_origin} after retries: {last_error}"
+        f"{window.end_origin}: {last_error}"
     )
 
 
@@ -1149,17 +682,9 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         empty["parent_nodes"] = []
         return empty
 
-    parents = plan_parent_segments(llm, turns, conversation_time)
     child_windows = plan_child_windows(llm, turns, conversation_time)
-
-    rewritten_parents = [
-        _rewrite_parent_segment(llm, parent, logger=logger)
-        for parent in parents
-    ]
-
     window_outputs = []
     generated_memories = []
-    last_child_embedding = None
     for window in child_windows:
         previous_rewrites = _previous_child_rewrite_context(
             generated_memories, limit=2
@@ -1172,41 +697,18 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             previous_rewrites=previous_rewrites,
             logger=logger,
         )
-        kept_sentences, last_child_embedding = (
-            _fuse_adjacent_duplicate_child_memories(
-                llm,
-                generated_memories,
-                _as_list(output.get("sentence")),
-                previous_embedding=last_child_embedding,
-                logger=logger,
-            )
+        output["sentence"] = _keep_new_children(
+            _as_list(output.get("sentence")), generated_memories
         )
-        output["sentence"] = kept_sentences
         window_outputs.append(output)
 
-    # Assign IDs once more across the complete session after question-origin
-    # inheritance and adjacent-memory fusion.  ``origin`` retains every real
-    # supporting dialogue ID; only ``id`` receives the -1/-2/... collision
-    # suffix based on its first origin.
+    # IDs become stable only after every candidate has passed WRITE utility.
     finalize_child_memory_ids(generated_memories, turns)
-    rewritten_parents = attach_child_memory_ids_to_parents(
-        rewritten_parents, generated_memories
-    )
-
-    parent_outputs = []
-    for parent in rewritten_parents:
-        if not parent.child_ids:
-            continue
-        parent_outputs.append({
-            "parent_id": parent.parent_id,
-            "rewrite_content": parent.rewrite_content,
-            "child_ids": list(parent.child_ids),
-        })
+    parent_outputs = _build_session_parents(llm, turns, generated_memories)
 
     merged = _empty_rewrite(conversation_time)
     merged.pop("topics", None)
     merged["parent_nodes"] = parent_outputs
-    personal_counter = 1
     for output in window_outputs:
         for sentence in output.get("sentence") or []:
             if not isinstance(sentence, dict):
@@ -1215,49 +717,8 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             item["origin"] = ",".join(origin_ids(item.get("origin")))
             item["topic"] = []
             merged["sentence"].append(item)
-        for personal in output.get("personal_sentences") or []:
-            if not isinstance(personal, dict) or not personal.get("text"):
-                continue
-            item = dict(personal)
-            item["id"] = f"p{personal_counter}"
-            personal_counter += 1
-            if item.get("origin"):
-                item["origin"] = ",".join(
-                    origin_ids(item.get("origin"))
-                ) or item.get("origin")
-            merged["personal_sentences"].append(item)
     return merged
 
 
 def rewrite_windowed_session(llm, text: str, logger=None):
-    if getattr(config, "SEMANTIC_HIERARCHY", False):
-        return rewrite_semantic_hierarchy_session(llm, text, logger=logger)
-    conversation_time = _conversation_time_from_text(text)
-    turns = _dialogue_turn_lines(text)
-    if not turns:
-        return _empty_rewrite(conversation_time)
-    window_outputs = []
-    previous_memories = []
-    for window in _window_turns(turns):
-        previous_dialogue_context = "\n".join(window.previous_context)
-        current_dialogue = "\n".join(window.current_turns)
-        source_dialogue = "\n".join(
-            window.previous_context + window.current_turns)
-        if conversation_time:
-            current_window_text = "time:" + conversation_time + "\n" + current_dialogue
-            source_text = "time:" + conversation_time + "\n" + source_dialogue
-        else:
-            current_window_text = current_dialogue
-            source_text = source_dialogue
-        out = _rewrite_window(
-            llm,
-            current_window_text,
-            source_text,
-            previous_dialogue_context,
-            previous_memories,
-            logger=logger,
-        )
-        window_outputs.append(out)
-        if isinstance(out, dict):
-            previous_memories.extend(_as_list(out.get("sentence")))
-    return _merge_window_rewrites(window_outputs, conversation_time)
+    return rewrite_semantic_hierarchy_session(llm, text, logger=logger)

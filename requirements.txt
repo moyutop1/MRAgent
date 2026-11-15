@@ -1,7 +1,10 @@
 # Core runtime (rewrite / embed / retrieve / answer pipeline)
 openai==1.108.2          # DeepSeek official API via OpenAI-compatible client
 numpy==1.26.4
-torch==2.8.0             # embedding tensor ops (L2 normalization); CPU build is sufficient
+torch==2.8.0             # install the CUDA build on AutoDL for the utility model
+transformers>=4.51.0     # Qwen3 unified utility judge
+accelerate>=1.0.0        # device_map="auto" for the local utility model
+huggingface_hub>=0.30.0  # `hf download` model setup command
 sentence-transformers==3.0.1
 requests==2.32.5
 regex==2022.4.24

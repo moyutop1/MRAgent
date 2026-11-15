@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import json
 import re
 from datetime import datetime, date
-from typing import List, Dict, Set, Any
+from typing import List, Dict
 from collections import defaultdict
 
 class Topic:
@@ -65,45 +65,29 @@ class EAESMemoryNote:
             self,
             memory_id: str,
             event_id: str,
-            entities: List[str],
-            attribute_paths: List[str],
-            raw_text: str,
             rewrite_content: str,
             conversation_time: str,
-            event_lifecycle: str,
             origin: str,
-            embedding=None,
             retrieval_embedding=None,
             parent_id: str = None,
     ):
         self.memory_id = memory_id
         self.event_id = event_id
-        self.entities = entities
-        self.attribute_paths = attribute_paths
-        self.raw_text = raw_text
         self.rewrite_content = rewrite_content
         self.conversation_time = conversation_time
-        self.event_lifecycle = event_lifecycle
         self.origin = origin
-        self.embedding = embedding
         self.retrieval_embedding = retrieval_embedding
         self.parent_id = parent_id
 
-    def to_dict(self, include_raw: bool = False):
-        data = {
+    def to_dict(self):
+        return {
             "memory_id": self.memory_id,
             "event_id": self.event_id,
             "parent_id": self.parent_id,
-            "entities": self.entities,
-            "attribute_paths": self.attribute_paths,
             "rewrite_content": self.rewrite_content,
             "conversation_time": self.conversation_time,
-            "event_lifecycle": self.event_lifecycle,
             "origin": self.origin,
         }
-        if include_raw:
-            data["raw_text"] = self.raw_text
-        return data
 
 
 class EAESParentNode:
@@ -112,13 +96,11 @@ class EAESParentNode:
             parent_id: str,
             rewrite_content: str,
             child_ids: List[str],
-            child_attributes: List[dict],
             retrieval_embedding=None,
     ):
         self.parent_id = parent_id
         self.rewrite_content = rewrite_content
         self.child_ids = list(child_ids or [])
-        self.child_attributes = list(child_attributes or [])
         self.retrieval_embedding = retrieval_embedding
 
     def to_reader_dict(self):
@@ -145,9 +127,8 @@ class MemorySystem:
         self.tid2emb = {}
         self.eaes_notes: Dict[str, EAESMemoryNote] = {}
         self.eaes_parent_nodes: Dict[str, EAESParentNode] = {}
+        self.eaes_sessions: Dict[str, dict] = {}
         self.eaes_event_to_memory: Dict[str, str] = {}
-        self.eaes_by_entity: Dict[str, Set[str]] = defaultdict(set)
-        self.eaes_by_attribute: Dict[str, Set[str]] = defaultdict(set)
 
     # ----- Node ops -----
 
@@ -298,23 +279,23 @@ class MemorySystem:
         text = re.sub(r"\s+", " ", text)
         return text
 
-    def add_eaes_memory_note(self, note: EAESMemoryNote):
+    def add_eaes_memory_note(self, note: EAESMemoryNote, session_id):
         self.eaes_notes[note.memory_id] = note
         self.eaes_event_to_memory[note.event_id] = note.memory_id
-        for entity in note.entities or []:
-            norm_entity = self._eaes_norm(entity)
-            if norm_entity:
-                self.eaes_by_entity[norm_entity].add(note.memory_id)
-        for attr in note.attribute_paths or []:
-            norm_attr = self._eaes_norm(attr)
-            if norm_attr:
-                self.eaes_by_attribute[norm_attr].add(note.memory_id)
+        session = self.eaes_sessions.setdefault(
+            f"session_{session_id}", {"children": {}, "parents": {}}
+        )
+        session["children"][note.memory_id] = note
 
     def get_eaes_note(self, memory_id: str):
         return self.eaes_notes.get(memory_id)
 
-    def add_eaes_parent_node(self, parent: EAESParentNode):
+    def add_eaes_parent_node(self, parent: EAESParentNode, session_id):
         self.eaes_parent_nodes[parent.parent_id] = parent
+        session = self.eaes_sessions.setdefault(
+            f"session_{session_id}", {"children": {}, "parents": {}}
+        )
+        session["parents"][parent.parent_id] = parent
 
     def get_eaes_parent_node(self, parent_id: str):
         return self.eaes_parent_nodes.get(parent_id)

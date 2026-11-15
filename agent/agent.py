@@ -9,7 +9,6 @@ from prompts import schema as json_scheme
 from prompts.prompts import Prompts
 from common.utils import topk_answers_by_similarity
 from common import config
-from common.cache_utils import index_keyword_sentences
 from llm.controller import LLM
 from memory.controller import MemoryController
 from memory.system import MemorySystem, EpisodeEvent
@@ -297,144 +296,28 @@ class Agent(EAESMixin, RetrievalMixin):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-    def extract_keyword_sample(self, keyword_path: str, rewrite_path:str, ref_id:int = 0):
-        self.extract_keyword(keyword_path, rewrite_path, ref_id)
-
-
-    def extract_keys(self, text: str):
-        keys_prompt = Prompts.extract_keyword_prompt(
-            json.dumps(text, ensure_ascii=False)
-        )
-        keys_out = self.llm.chat_text(
-            messages=[{"role": "system", "content": Prompts.KEYWORD_SYSTEM_PROMPT},
-                      {"role": "user", "content": keys_prompt}],
-        )
-        # [fix] chat_text already returns a parsed dict; drop the redundant json.loads here (json.loads on a dict raises TypeError);
-        # JSON parsing is done inside llm.chat_text.
-        flag, err = json_scheme.check_key_json(keys_out, text)
-
-        max_tries = 3
-        last_err = err
-
-        if not flag:
-            for attempt in range(1, max_tries + 1):
-                keys_out = self.llm.chat_text(
-                    messages=[
-                        {"role": "system", "content": Prompts.KEYWORD_SYSTEM_PROMPT+ "The previous run failed with the following error:"  + last_err},
-                        {"role": "user", "content": keys_prompt},
-                    ],
-                    temperature=0.5,
+    def store_rewrite(self, rewrite_path: str) -> None:
+        """Load session-local Child/Parent records without a keyword index."""
+        with open(rewrite_path, "r", encoding="utf-8") as file:
+            for index, line in enumerate(file, start=1):
+                record = json.loads(line)
+                if not record:
+                    continue
+                session_label, events = next(iter(record.items()))
+                match = re.fullmatch(r"session_(\d+)", str(session_label))
+                self.store_event_new(
+                    events,
+                    session_id=int(match.group(1)) if match else index,
                 )
-                # [fix] chat_text already returns a parsed dict; drop the redundant json.loads
-                flag, err = json_scheme.check_key_json(keys_out, text)
-                if flag:
-                    break
-                else:
-                    last_err = err  # keep the last error
-                    if attempt == max_tries:
-                        flag, err = json_scheme.check_key_json(keys_out, text, replace=True)
-
-        # final safety check: ensure we return a dict object, not a string
-        if isinstance(keys_out, str):
-            logger.warning("extract_keys: keys_out is still a string, attempting final extraction")
-            try:
-                keys_out = self.memory_controller.extract_json_from_content(keys_out)
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.error(f"extract_keys: failed to parse final result: {e}")
-                # return an empty structure instead of a string
-                keys_out = {"sentence": []}
-
-        return keys_out
-
-    def extract_keyword(self, keyword_path: str, rewrite_path:str, ref_id:int):
-        file_name = rewrite_path # "result_rewrite.json"
-        record_rewrite = []
-        with open(file_name, "r", encoding="utf-8") as f:
-            for line in f:
-                record = json.loads(line.strip())
-                record_rewrite.append(record)
-
-        file_name = keyword_path # "result_keyword2.json"
-        with open(file_name, "a", encoding="utf-8") as f:
-            for i in range(len(record_rewrite)):
-                if i < ref_id:
-                    continue
-                # a rewrite record key may be session_i (batch=1) or session_first-session_last (batch>1),
-                # so take the record's single value instead of a fixed session_{i+1} key (equivalent for plain-key files, no breakage).
-                session_dict = record_rewrite[i]
-                session_data = next(iter(session_dict.values())) if session_dict else None
-                if session_data is None:
-                    # write a null placeholder to keep line-index alignment with store_keyword (store_event_new handles keys=None)
-                    logger.warning(f"record_rewrite[{i}] value is None; writing null placeholder")
-                    f.write("null\n")
-                    continue
-                # feed only {id, text} to extract_keys, dropping rewrite-stage metadata,
-                # to avoid leaking existing tag/topic into the keyword-extraction prompt (the LLM would copy them).
-                sentences = session_data.get("sentence") or []
-                filtered_sentences = []
-                for sentence in sentences:
-                    if isinstance(sentence, dict):
-                        filtered_sentences.append({"id": sentence.get("id"), "text": sentence.get("text")})
-                    else:
-                        filtered_sentences.append(sentence)
-                if not filtered_sentences:
-                    keys_out = {"sentence": []}
-                else:
-                    keys_out = self.extract_keys(filtered_sentences)
-                f.write(json.dumps(keys_out, ensure_ascii=False) + "\n")
 
 
-
-    def store_keyword(self, keyword_path: str, rewrite_path:str,) -> None:
-        file_name = rewrite_path # "result_rewrite.json"
-        records_event = []
-        with open(file_name, "r", encoding="utf-8") as f:
-            for line in f:
-                record = json.loads(line.strip())
-                records_event.append(record)
-
-        file_name = keyword_path # "result_keyword.json"
-        records_key = []
-
-        with open(file_name, "r", encoding="utf-8") as f:
-            for line in f:
-                record = json.loads(line.strip())
-                records_key.append(record)
-
-        # Keyword extraction is model-generated and its JSONL cache may be
-        # partial or contain stale extra lines after an interrupted rewrite.
-        # Bind keywords to events by the deterministic sentence ID, never by
-        # the two files' line positions.
-        keyword_by_id = index_keyword_sentences(records_key)
-        for index, event_record in enumerate(records_event, start=1):
-            if not isinstance(event_record, dict) or not event_record:
-                continue
-            session_label, events = next(iter(event_record.items()))
-            event_ids = [
-                sentence.get("id")
-                for sentence in (events or {}).get("sentence") or []
-                if isinstance(sentence, dict) and sentence.get("id")
-            ] if isinstance(events, dict) else []
-            session_keywords = {
-                "sentence": [
-                    keyword_by_id[event_id]
-                    for event_id in event_ids
-                    if event_id in keyword_by_id
-                ]
-            }
-            session_match = re.fullmatch(r"session_(\d+)", str(session_label))
-            session_id = int(session_match.group(1)) if session_match else index
-            self.store_event_new(events, session_keywords, session_id)
-
-
-    def store_event_new(self, events, keys,  session_id):
+    def store_event_new(self, events, session_id):
         # [guard] skip the whole session only when events (rewrite) is None: no events means no topic/episode, so no misalignment with embeddings
         if events is None:
             logging.warning(f"store_event_new: session_{session_id} events is None; skipping this session")
             return
         conversation_time = events.get("conversation_time")
         topic_sentences = events.get("topics") or {}
-        personal_sentences = self._as_list(events.get("personal_sentences"))
         uses_composite_tags = bool(config.SEMANTIC_HIERARCHY)
         # Legacy summaries are not used by the EAES retrieval pipeline.
         # The keyword cache remains an optional hint for EAES indexing.
@@ -461,7 +344,6 @@ class Agent(EAESMixin, RetrievalMixin):
                 # dialogue origin in order and ignore any accidental event-ID
                 # suffixes when reading legacy caches.
                 ids = list(dict.fromkeys(self._origin_ids(origin)))
-                embedding = self.memory.embeddings[id]
                 if len(ids) != 1:
                     raw_session = self.memory.raw_text.get(prefix, {})
                     raw_context = "\n".join(
@@ -485,7 +367,7 @@ class Agent(EAESMixin, RetrievalMixin):
                     id,
                     text,
                     origin,
-                    embedding,
+                    embedding=None,
                     time=time,
                     conv_time=conversation_time,
                     semantic_properties=semantic_properties,
@@ -518,45 +400,8 @@ class Agent(EAESMixin, RetrievalMixin):
 
         self.memory.add_topics(topic_sentences, eid_topic_dict, session_id)
 
-        for ps in personal_sentences:
-            if not isinstance(ps, dict):
-                continue
-            personal_id = ps.get("id")
-            if not personal_id:
-                continue
-            pid = f"D{session_id}:" + str(personal_id)
-            ptext = ps.get("text")
-            porigin = ps.get("origin")
-            ptag = ps.get("tag")
-            person = ps.get("person")
-            self.memory.add_personal_information(pid,ptext,porigin,ptag,person)
-
-        # Memory-side keywords remain only as optional hints for EAES
-        # entity/attribute indexing. The removed non-EAES key/link graph is no
-        # longer constructed.
-        keywords = keys.get("sentence") if keys is not None else None
-        keyword_by_sentence = {}
-
-        for s in (keywords or []):
-            sentence_id = s.get("sentence_id")
-            raw_keywords = s.get("keyword")
-            ks = list(raw_keywords) if isinstance(raw_keywords, list) else []
-            if sentence_id not in self.memory.episode_events.keys():
-                keyword_by_sentence[sentence_id] = ks
-                continue
-            origin_add = self.memory.episode_events[sentence_id].origin
-            first_origin = self._first_origin(origin_add)
-            _prefix = first_origin.split(":")[0]
-            raw_speaker_text = self.memory.raw_text.get(_prefix, {}).get(first_origin, "")
-            speaker = raw_speaker_text.split(":", 1)[0].strip()
-            if speaker not in ks:
-                ks.append(speaker)
-            keyword_by_sentence[sentence_id] = ks
-
-        self._eaes_build_notes_for_session(
-            events, keyword_by_sentence, conversation_time
-        )
-        self._eaes_build_parent_nodes_for_session(events)
+        self._eaes_build_notes_for_session(events, conversation_time, session_id)
+        self._eaes_build_parent_nodes_for_session(events, session_id)
 
     def store_raw_text(self, raw_text, conv_embeddings=None, topic_id_list=None, topic_embeddings=None):
         self.memory.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)

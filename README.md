@@ -1,278 +1,103 @@
 # MRAgent
 
-> This repository contains the code for the paper
-> **"Memory is Reconstructed, Not Retrieved: Graph Memory for LLM Agents"** ([arXiv:2606.06036](https://arxiv.org/abs/2606.06036)).
+Code for hierarchical conversational memory on LoCoMo and LongMemEval.
 
-A retrieval-augmented question-answering system that reconstructs hierarchical
-episodic memory from long multi-session dialogues and answers questions through the
-**EAES retrieval and reader pipeline**. The system is evaluated on the **LoCoMo** and
-**LongMemEval (LM)** benchmarks.
+## Core pipeline
 
-The pipeline has two phases:
+The implementation uses one set-conditioned marginal-utility rule in memory
+construction and retrieval. The same local instruction model returns only
+`KEEP` or `DROP` for three operations:
 
-**Phase 1 — Build memory** (once per conversation sample):
+- `WRITE`: inside the current session, retain a proposed Child only when it adds
+  a new event/state, time/stage, or concrete detail.
+- `ABSTRACT`: at session end, retain a Parent only when it is a supported and
+  useful high-level abstraction of its Child group and the complete raw session.
+- `SELECT`: for one query, retain a retrieved Child or Parent only when it adds
+  answer-useful information beyond the already selected evidence.
 
-- **rewrite** — compress dialogue into self-contained memories: resolve pronouns and adjacent-question constraints, render relative times at their source granularity, rewrite every Parent before its Children, induce a session-level pool of up to 10 topic prefixes, and attach 2–4 fact-covering `prefix.facet` tags to every child.
-- **extract_keyword** — extract memory-side hints used only to build the EAES entity/attribute index.
-- **store** — build child EAES notes and, with semantic hierarchy enabled, their parent memories.
+Construction is isolated by session. Parent nodes are create-only and never
+cross session boundaries. Query-time retrieval sees every stored session.
 
-**Phase 2 — Answer questions** (per question):
+Retrieval uses the raw question directly:
 
-- **answer** — parse an EAES query plan, retrieve/rerank child evidence and independent parent memories, then call the final reader.
-- Query-side `keywords` are embedded only for parent retrieval. They do not score, filter, or rerank child memories and are not sent to the evidence selector or final reader.
+1. Child Top-K by cosine over `tag + rewrite_content`.
+2. Parent Top-K by cosine over Parent `rewrite_content`.
+3. Expand retrieved Parents and rescore routed Children only by query-Child
+   cosine; Parent scores never boost Child scores.
+4. Merge Children by ID, sort Child and Parent candidates by query score, and run
+   sequential `SELECT` under a hard evidence-token budget.
+5. Send only selected evidence to the answer model.
 
----
-
-## 1. Repository Structure
-
-```
-run.py                    # main entry point
-common/
-    config.py             # CLI args, models, paths
-    utils.py              # JSON + similarity helpers
-    logging_utils.py      # per-sample logging
-memory/
-    system.py             # in-memory EAES and hierarchy store
-    controller.py         # child and parent retrieval
-llm/
-    controller.py         # LLM request wrapper
-    embeddings.py         # text-embedding client
-    rag_utils.py          # batched embedding helper
-agent/
-    agent.py              # pipeline orchestration
-    eaes.py               # EAES indexing, retrieval stages, and final reader
-prompts/
-    prompts.py            # all LLM prompts
-    schema.py             # output JSON validators
-data/
-    get_data.py           # load benchmark dataset
-    embed_rewrite.py      # build embedding files
-    dataset_locomo.json   # LoCoMo benchmark data
-    dataset_LM.json       # LongMemEval benchmark data
-eval/
-    judge.py              # LLM-as-judge scorer
-    evaluation.py         # F1 / EM helpers
-    evaluate_reasoning.py # eval entry (F1 + judge)
-```
-
----
-
-## 2. Installation
-
-Python 3.9+. The LongMemEval dataset (`data/dataset_LM.json`) is stored with **Git LFS**,
-so install Git LFS *before* cloning, otherwise that file arrives as a small pointer stub.
+## Setup
 
 ```bash
-# install Git LFS once: https://git-lfs.com   (e.g. `apt install git-lfs` / `brew install git-lfs`)
-git lfs install
-git clone https://github.com/Ji-shuo/MRAgent.git
-cd MRAgent
-
 pip install -r requirements.txt
-```
-
-> `torch` is used only for embedding tensor ops (L2 normalization); a CPU build is
-> sufficient. `nltk` is required only by the `eval/` scripts.
-
----
-
-## 3. Configuration
-
-All components — the chat LLM, the text-embedding model, and the LLM-as-judge
-evaluator — are accessed through a single **OpenRouter** key (OpenAI-compatible API).
-The key is read from a `.env` file at the repository root; **no key is hard-coded**.
-
-Copy the template and fill in your key:
-
-```bash
 cp .env.example .env
-# then edit .env:
-# OPENROUTER_API_KEY=sk-or-v1-xxxxxxxx
 ```
 
-`.env` is git-ignored. The same `OPENROUTER_API_KEY` is used everywhere:
+Set at least:
 
-| Component | File | Model |
-| --- | --- | --- |
-| Chat / reasoning | `common/config.py` (`--model` → `MODEL`) | e.g. `gemini` → `google/gemini-2.5-flash` |
-| Embedding | `llm/embeddings.py` | `openai/text-embedding-3-large` (3072-d) |
-| LLM-as-judge | `eval/judge.py` | `openai/gpt-4o-mini` |
+```dotenv
+DEEPSEEK_API_KEY=...
+UTILITY_MODEL_PATH=/root/autodl-tmp/models/Qwen3-4B-Instruct-2507
+UTILITY_DEVICE=cuda
+UTILITY_MAX_LENGTH=32768
+UTILITY_TOKEN_BUDGET=2048
+LOCAL_EMBEDDING_MODEL=/autodl-pub/models/bge-large-en-v1.5
+```
 
-Quick connectivity check:
+The utility model is loaded from local files only. Download it before running:
 
 ```bash
-python try.py
+hf download Qwen/Qwen3-4B-Instruct-2507 \
+  --local-dir /root/autodl-tmp/models/Qwen3-4B-Instruct-2507
 ```
 
-If the account has no balance yet, this command should still distinguish config/network
-errors from OpenRouter billing or authentication errors.
+## Run
 
----
-
-## 4. Data Layout
-
-The two benchmarks shipped in `data/` come from:
-
-- **LoCoMo** (`dataset_locomo.json`) — Maharana et al., *Evaluating Very Long-Term
-  Conversational Memory of LLM Agents*, ACL 2024. [arXiv:2402.17753](https://arxiv.org/abs/2402.17753)
-- **LongMemEval** (`dataset_LM.json`) — Wu et al., *LongMemEval: Benchmarking Chat
-  Assistants on Long-Term Interactive Memory*, ICLR 2025. [arXiv:2410.10813](https://arxiv.org/abs/2410.10813)
-
-Place the benchmark file at `data/dataset_<name>.json`. Generated intermediate
-artifacts and results are written under per-dataset subfolders:
-
-```
-data/<dataset>/rewrite_<model>/<sample_id>_rewrite.json   # stage 1 output
-data/<dataset>/keyword_<model>/<sample_id>_keyword.json       # stage 3 output
-data/<dataset>/embedding/gpt_<model>/<sample_id>_embedding.pkl# stage 2 output
-result/<dataset>/<sample_id>_result_<model>_<file>.jsonl      # predictions (the only run output)
-```
-
-The run writes a single output per sample — the `_result_*.jsonl` predictions file
-(one JSON line per question: gold answer, prediction, category, evidence labels,
-retrieved support). A stage is **skipped if its output file already exists**, so
-generation runs once and subsequent runs reuse the cached `rewrite` / `keyword` /
-`embedding` files.
-
----
-
-## 5. Usage
-
-The single entry point is `run.py`, invoked from the repository root.
-
-### 5.1 Arguments
-
-| Argument | Meaning | Default |
-| --- | --- | --- |
-| `--data` | dataset name (`locomo` / `LM`) | `locomo` |
-| `--model` | chat model short name (`gemini` / `claude` / `gpt4o` / `qwen`) | `gemini` |
-| `--file` | run/experiment tag appended to result filenames | `0` |
-| `--sample` | (LoCoMo) run a single sample id, e.g. `42`; omit to run all | `None` |
-| `--max_questions` | run at most the first N questions per selected sample after category filtering | `None` |
-| `--exclude_categories` | comma-separated question categories to skip, e.g. `5` | none |
-| `--ca` | (LM) category index: `0`=multi-session, `1`=single-session-user, `2`=temporal-reasoning | `1` |
-| `--lm_batch` | (LM) sessions merged per rewrite call (`1` recommended) | `1` |
-| `--rewrite_window_size` | Current raw turns per rewrite window, excluding overlap context | `40` |
-| `--rewrite_overlap_size` | Tail turns from the preceding window supplied as raw context | `2` |
-| `--rewrite_previous_limit` | Previous compressed memories supplied for deduplication | `3` |
-| `--child_duplicate_similarity_threshold` | fuse adjacent semantic-hierarchy children when cosine similarity is strictly above this value; `1` bypasses similarity embeddings and fusion | `0.55` |
-| `--workers` | concurrent question workers per selected sample | `10` |
-| `--eaes` | enable the required EAES retrieval/answer pipeline | required |
-| `--eaes_index_mode` | EAES memory index strategy (`llm` builds entity/attribute notes; `heuristic` uses keyword-derived notes) | `llm` |
-| `--eaes_phrase_count` | relation-complete retrieval phrases generated for each question | `6` |
-| `--eaes_phrase_max_words` | maximum whitespace-separated words in each retrieval phrase | `10` |
-| `--eaes_phrase_initial_top_k` | child candidates retained per phrase after question/phrase relevance scoring | `30` |
-| `--eaes_parent_phrase_top_k` | parent candidates retained per phrase after question/phrase relevance scoring | `10` |
-| `--eaes_question_relevance_weight` | exponent beta in geometric question/phrase relevance gating | `0.7` |
-| `--eaes_phrase_rrf_k` | smoothing constant in the normalized reciprocal-rank discount | `10` |
-| `--eaes_prefilter_limit` | global child retrieval safety bound | `120` |
-| `--eaes_child_candidate_limit` | child-channel safety cap after all-view fusion | `30` |
-| `--parent_top_k` | parent-channel safety cap after all-view fusion | `10` |
-| `--eaes_parent_child_routing` | use selected parents to recover unseen children into a joint local-selector pool | off |
-| `--eaes_parent_child_route_limit` | global cap on supplemental children recovered through selected parents | `30` |
-| `--eaes_rollback_check` | before the reader, run at most two S2G sufficiency checks; each `need_more` round retrieves 27 unseen children plus 3 unseen parents and additively selects 0-3 supplements | off |
-| `--eaes_semantic_score` | add a capped `0.1` bonus per exact query-memory semantic-property match (requires `--eaes`) | off |
-| `--disable_evidence_selector` | pass all retrieved candidates directly to the final answer reader; retrieval-only mode never invokes that reader | off |
-| `--evidence_selector_backend` | `llm`, iterative `local` baseline, or per-level `setwise` selector | `llm` |
-| `--selector_model_path` | existing local selector model directory; `setwise` requires an instruction-following causal LM | none |
-| `--selector_max_length` | complete local-selector prompt limit; inputs are rejected rather than truncated | `16384` |
-
-### 5.2 LoCoMo
+Full LoCoMo answer run with DeepSeek Pro:
 
 ```bash
-# all conversations
-python run.py --data locomo --model gemini --file myrun --eaes
-
-# a single conversation
-python run.py --data locomo --model gemini --file myrun --sample 42 --eaes
-
-# a quick partial run over the first 50 questions of one conversation
-python run.py --data locomo --model qwen --file smoke50 --sample 26 --max_questions 50 --eaes
-
-# a conservative DeepSeek run for unstable networks
-python run.py --data locomo --model deepseek --file smoke50 --sample 26 --max_questions 50 --workers 1 --eaes
-
-# retrieval-only diagnostics with global dense fallback mixed in
-python run.py --data locomo --model deepseek-chat --file retr50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file retr50_q50 --sample conv-26 --eaes
-
-# entity-attribute-memory retrieval diagnostics with adaptive child/parent depths
-python run.py --data locomo --model deepseek-chat --file eaes50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --semantic_hierarchy --eaes_index_mode llm
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file eaes50_q50 --sample conv-26 --eaes --semantic_hierarchy
-
-# semantic-property scoring ablation (rewrite memories must first be regenerated with semantic_properties)
-python run.py --data locomo --model deepseek-chat --file semantic50 --sample 26 --max_questions 50 --workers 1 --retrieval_only --eaes --eaes_semantic_score --semantic_hierarchy --eaes_index_mode llm
-python eval/evaluate_retrieval.py --data locomo --model deepseek-chat --file semantic50_q50 --sample conv-26 --eaes --semantic_score --semantic_hierarchy
-
-# answer-stage ablation: bypass the EAES evidence selector
-python run.py --data locomo --model deepseek-chat --file no_selector --sample 26 --workers 1 --eaes --disable_evidence_selector --semantic_hierarchy --eaes_index_mode llm
-
-# pre-reader S2G controller; up to two rounds of 27 unseen children + 3 unseen parents -> additive LLM Top0-3 supplements
-python run.py --data locomo --model deepseek-chat --file rollback_s41 --sample 41 --workers 1 --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm
-
-# the same S2G/rollback flow in retrieval-only mode; no answer reader is called
-python run.py --data locomo --model deepseek-chat --file rollback_retrieval_s41 --sample 41 --workers 1 --retrieval_only --eaes --semantic_hierarchy --disable_evidence_selector --eaes_rollback_check --eaes_index_mode llm
-
-# local selector with bounded parent-to-child supplemental routing
-python run.py --data locomo --model deepseek-pro --file parent_route_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend local --selector_model_path /root/autodl-tmp/models/Qwen3-Reranker-4B --eaes_parent_child_routing --eaes_parent_child_route_limit 30
-python eval/evaluate_retrieval.py --data locomo --model deepseek-pro --file parent_route_s42 --sample conv-42 --eaes --semantic_hierarchy --evidence_selector_backend local --eaes_parent_child_routing
-
-# per-level setwise zero-marginal pruning; the local instruction model reads real node IDs
-python run.py --data locomo --model deepseek-pro --file setwise_s42 --sample 42 --workers 1 --retrieval_only --eaes --semantic_hierarchy --evidence_selector_backend setwise --selector_model_path /path/to/local-4B-instruct-model --eaes_parent_child_routing
-
+python run.py \
+  --data locomo \
+  --model deepseek-pro \
+  --file unified_utility \
+  --workers 1 \
+  --eaes \
+  --semantic_hierarchy
 ```
 
-### 5.3 LongMemEval (LM)
-
-`--ca` selects the question category (one run per category):
+Retrieval-only run and evaluation:
 
 ```bash
-python run.py --data LM --model gemini --file myrun --ca 0 --lm_batch 10 --eaes   # multi-session
-python run.py --data LM --model gemini --file myrun --ca 1 --lm_batch 10 --eaes   # single-session-user
-python run.py --data LM --model gemini --file myrun --ca 2 --lm_batch 10 --eaes   # temporal-reasoning
+python run.py \
+  --data locomo \
+  --model deepseek-pro \
+  --file unified_retrieval \
+  --workers 1 \
+  --retrieval_only \
+  --eaes \
+  --semantic_hierarchy
+
+python eval/evaluate_retrieval.py \
+  --data locomo \
+  --model deepseek-pro \
+  --file unified_retrieval \
+  --allfile \
+  --eaes \
+  --semantic_hierarchy
 ```
 
-`--lm_batch` controls rewrite granularity. `--lm_batch 1` (default) rewrites one
-session per LLM call and produces per-session records compatible with all downstream
-readers. Values `>1` merge multiple sessions per call (range-keyed records, handled by
-the robust readers and the origin-prefixed graph store).
-
-Each question is answered concurrently (10 worker threads); predictions stream to the
-`result/<dataset>/` files and runs are resumable (already-answered questions are
-skipped on restart).
-
----
-
-## 6. Evaluation
+Reasoning evaluation after the full answer run:
 
 ```bash
-# F1 + LLM-as-judge accuracy (writes result_judge_<data>_<model>_<file>.jsonl)
-python eval/evaluate_reasoning.py --data locomo --model gemini --file myrun --allfile
+python eval/evaluate_reasoning.py \
+  --data locomo \
+  --model deepseek-pro \
+  --file unified_utility_eaes_hierarchy \
+  --allfile
 ```
 
-The LLM judge (`eval/judge.py`) grades a prediction `CORRECT`/`WRONG` against the gold
-answer with `gpt-4o-mini`, using lenient matching (topic overlap; date equivalence for
-temporal questions).
-
-The same command also reports `P(wrong | Hit@20)` overall and by category. Here
-`Hit@20` means that the first 20 memory-node entries in `prediction_context` cover all
-gold `evidence` origins. A Hit@20 row with LLM-judge score `0` remains in the conditional
-denominator and contributes to the numerator. A higher value indicates that more
-questions remain wrong after complete evidence reaches the reader context. Rows without
-normalized gold evidence do not enter this metric.
-
----
-
-## 7. Notes
-
-- The proposed `setwise` selector reads the complete Child set and complete Parent set in two independent calls, using real memory IDs and no extra embedding prefilter or candidate-pair construction. Redundancy is judged only within the same hierarchy level, so a Parent cannot cause a Child to be removed or vice versa; retained nodes from both levels are sent to the reader. It removes only IDs judged to have zero query-conditioned marginal value: irrelevant nodes or nodes whose useful answer information is fully covered by retained same-level nodes. Distinct events, times, entities, causal links, and complementary facts must be preserved. The iterative `local` selector remains as a budgeted baseline; `llm` remains the legacy default. All local model loading is offline and real-weight inference must be validated on the experiment machine.
-
-- The pipeline is **cache-based**: delete the corresponding `rewrite` / `keyword` /
-  `embedding` files to force regeneration of a sample.
-- Per-sample reasoning traces are logged under `log/<dataset>/`.
-- `run.py` rejects invocations without `--eaes`; the former non-EAES keyword graph and tool loop have been removed.
-- With semantic hierarchy enabled, every child memory has one to four tags. Each tag independently generates a prefix and facet, and code stores the complete `prefix.facet` string. The prompt asks each prefix to start with the supported person's name and end in `activity`, `plan`, `profile`, `possession`, or `relationship`. Code still requires a capitalized explicit person name and a storage-safe prefix structure, but no longer rejects a prefix solely because its final word is outside those five canonical heads. Each facet may contain at most five whitespace-separated words, while the prefix has no word-count limit. Facet and composite-tag structure remain validated. Any malformed validated structure receives exactly one error-aware repair attempt before the child window fails. No session prefix pool is generated or stored.
-- Normal EAES retrieval generates six ordinary query phrases of at most ten whitespace-separated words; query phrases do not follow the child `prefix.facet` schema. Child and Parent channels share the phrase pool. For each phrase-node pair, geometric question/phrase relevance gating is multiplied by phrase fidelity and a normalized reciprocal-rank discount. Every phrase probes Child Top-30 and Parent Top-10, all six views are fused, and only fixed child/parent safety caps are applied. There is no phrase-view MEG, cumulative-mass prefix, or query-only LLM reranker. Selected Parents never boost direct Child scores.
-- Every child `origin` stores all and only the source turns used by that node in dialogue order. Its `id` uses the earliest of those turns plus a session-global collision suffix (`D1:1-1`, `D1:1-2`, ...); Parent `child_ids` are attached only after this final numbering pass.
-- Child rewrites first retry an invalid persistence classification normally. If retries still leave zero or multiple persistence properties, the invalid persistence values are replaced by the single neutral value `unknown`, content properties are retained, and the complete child rewrite is validated again.
-- With semantic hierarchy enabled, Child and Parent pools are independently bounded by `--eaes_child_candidate_limit` and `--parent_top_k`. Retrieval-only reports all-view probes, fused pools, final children, selected parents, and selector pre/post stages separately.
+Use `--sample 42` for one LoCoMo conversation and `--max_questions 50` for a
+short run. Delete that sample's rewrite and embedding caches before regenerating
+memories with a changed construction pipeline.

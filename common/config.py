@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import argparse
 from dotenv import load_dotenv
@@ -15,91 +14,39 @@ parser.add_argument("--exclude_categories", type=str, default=os.getenv("EXCLUDE
 parser.add_argument("--qu", type=int, default=0, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--re_model", type=str, default=None, help="Dataset name, e.g., AR / LM / locomo")
 parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=multi-session,1=single-session-user,2=temporal-reasoning,3=single-session-preference,4=knowledge-update,5=single-session-assistant")
-parser.add_argument("--lm_batch", type=int, default=1, help="LM: sessions merged per rewrite call. 1=per-session (key=session_i, compatible with existing files/per-session readers); >1=merged (key=session_first-session_last)")
-parser.add_argument("--rewrite_window_size", type=int, default=int(os.getenv("REWRITE_WINDOW_SIZE", "40")), help="Current dialogue turns per session-local rewrite window, excluding previous context.")
-parser.add_argument("--rewrite_overlap_size", type=int, default=int(os.getenv("REWRITE_OVERLAP_SIZE", "2")), help="Tail turns from the preceding window shown as context for cross-window completion.")
-parser.add_argument("--rewrite_previous_limit", type=int, default=int(os.getenv("REWRITE_PREVIOUS_LIMIT", "3")), help="Previous compressed memories shown to the next rewrite window for deduplication.")
-parser.add_argument("--semantic_hierarchy", action="store_true", help="Use independent semantic parent/child plans and EAES parent memories.")
-parser.add_argument("--parent_min_turns", type=int, default=int(os.getenv("PARENT_MIN_TURNS", "4")), help="Hard minimum core turns per semantic parent segment, except the final segment.")
-parser.add_argument("--parent_max_turns", type=int, default=int(os.getenv("PARENT_MAX_TURNS", "10")), help="Hard maximum core turns per semantic parent segment; semantic hierarchy caps this at 10.")
-parser.add_argument("--parent_context_turns", type=int, default=int(os.getenv("PARENT_CONTEXT_TURNS", "2")), help="Previous raw turns supplied as context to a parent rewrite.")
+parser.add_argument("--semantic_hierarchy", action="store_true", help="Build session-local Child memories and end-of-session Parent abstractions.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
-parser.add_argument("--child_rewrite_batch_size", type=int, default=int(os.getenv("CHILD_REWRITE_BATCH_SIZE", "15")), help="Compatibility option retained for existing commands; semantic child windows are rewritten sequentially so each window can reference the preceding two child rewrites.")
 parser.add_argument(
-    "--child_duplicate_similarity_threshold",
-    type=float,
-    default=float(os.getenv("CHILD_DUPLICATE_SIMILARITY_THRESHOLD", "0.55")),
-    help="Fuse adjacent semantic-hierarchy child memories when cosine similarity is strictly above this threshold.",
+    "--utility_model_path",
+    default=os.getenv(
+        "UTILITY_MODEL_PATH",
+        "/root/autodl-tmp/models/Qwen3-4B-Instruct-2507",
+    ),
+    help="Local Qwen3 instruction-model directory used by the unified utility judge.",
 )
-parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "10")), help="Parent-channel safety cap after all-view relevance-aware fusion.")
+parser.add_argument("--utility_device", default=os.getenv("UTILITY_DEVICE", "cuda"))
+parser.add_argument(
+    "--utility_max_length",
+    type=int,
+    default=int(os.getenv("UTILITY_MAX_LENGTH", "32768")),
+)
+parser.add_argument(
+    "--utility_token_budget",
+    type=int,
+    default=int(os.getenv("UTILITY_TOKEN_BUDGET", "2048")),
+    help="Hard token budget for evidence selected by the unified utility judge.",
+)
+parser.add_argument("--parent_top_k", type=int, default=int(os.getenv("PARENT_TOP_K", "10")), help="Direct Parent retrieval count.")
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "10")), help="Concurrent question workers per selected sample.")
-parser.add_argument("--dense_k", type=int, default=int(os.getenv("DENSE_RETRIEVAL_K", "80")), help="Global dense retrieval candidates mixed into retrieval-only diagnostics.")
-parser.add_argument("--eaes_index_mode", choices=["llm", "heuristic"], default=os.getenv("EAES_INDEX_MODE", "llm"), help="EAES memory index construction strategy.")
-parser.add_argument("--eaes_prefilter_limit", type=int, default=int(os.getenv("EAES_PREFILTER_LIMIT", "120")), help="Global child retrieval safety bound.")
-parser.add_argument("--eaes_child_candidate_limit", type=int, default=int(os.getenv("EAES_CHILD_CANDIDATE_LIMIT", "30")), help="Child-channel safety cap after all-view relevance-aware fusion.")
-parser.add_argument("--eaes_phrase_count", type=int, default=int(os.getenv("EAES_PHRASE_COUNT", "6")), help="Number of candidate retrieval views generated per question.")
-parser.add_argument("--eaes_phrase_max_words", type=int, default=int(os.getenv("EAES_PHRASE_MAX_WORDS", "10")), help="Maximum whitespace-separated words allowed in one retrieval phrase.")
-parser.add_argument(
-    "--eaes_strict_phrase_validation",
-    action="store_true",
-    default=os.getenv("EAES_STRICT_PHRASE_VALIDATION", "false").lower()
-    in {"1", "true", "yes", "on"},
-    help=(
-        "Enable experimental duplicate, token-order, and entity/relation "
-        "checks for generated retrieval phrases. Disabled by default."
-    ),
-)
-parser.add_argument("--eaes_phrase_initial_top_k", type=int, default=int(os.getenv("EAES_PHRASE_INITIAL_TOP_K", "30")), help="Child candidates probed per retrieval phrase before all-view fusion.")
-parser.add_argument("--eaes_parent_phrase_top_k", type=int, default=int(os.getenv("EAES_PARENT_PHRASE_TOP_K", "10")), help="Parent candidates probed per retrieval phrase before all-view fusion.")
-parser.add_argument(
-    "--eaes_parent_child_routing",
-    action="store_true",
-    default=os.getenv("EAES_PARENT_CHILD_ROUTING", "false").lower()
-    in {"1", "true", "yes", "on"},
-    help=(
-        "After rollback, use selected parents as a bounded route to their "
-        "children and add the new children to the evidence-selector pool."
-    ),
-)
+parser.add_argument("--eaes_child_candidate_limit", type=int, default=int(os.getenv("EAES_CHILD_CANDIDATE_LIMIT", "30")), help="Direct Child retrieval count.")
 parser.add_argument(
     "--eaes_parent_child_route_limit",
     type=int,
     default=int(os.getenv("EAES_PARENT_CHILD_ROUTE_LIMIT", "30")),
-    help="Global maximum number of supplemental children recovered through selected parents.",
-)
-parser.add_argument("--eaes_question_relevance_weight", type=float, default=float(os.getenv("EAES_QUESTION_RELEVANCE_WEIGHT", "0.7")), help="Exponent beta in geometric question/phrase relevance gating.")
-parser.add_argument("--eaes_phrase_rrf_k", type=float, default=float(os.getenv("EAES_PHRASE_RRF_K", "10")), help="Reciprocal-rank-fusion denominator constant for child-tag retrieval.")
-parser.add_argument(
-    "--eaes_rollback_check",
-    action="store_true",
-    help=(
-        "Before the final reader, judge evidence sufficiency and run up to two "
-        "gap-focused retrievals. Each round inspects 27 unseen children plus 3 "
-        "unseen parents and may add up to 3 supplemental nodes."
-    ),
+    help="Maximum children recovered through retrieved Parents.",
 )
 parser.add_argument("--eaes", action="store_true", help="Enable the required EAES-Mem retrieval and answer pipeline.")
-parser.add_argument(
-    "--eaes_semantic_score",
-    action="store_true",
-    help="Enable query-required semantic-property bonuses in EAES candidate scoring.",
-)
-parser.add_argument(
-    "--disable_evidence_selector",
-    action="store_true",
-    help="Bypass the EAES evidence selector and pass all retrieved candidates directly to the final answer reader.",
-)
-parser.add_argument("--retrieval_only", action="store_true", help="Only save retrieval evidence and skip the final answer reader. Enabled rollback decisions and supplemental retrievals still run.")
-parser.add_argument("--evidence_selector_backend", choices=["llm", "local", "setwise"], default="llm", help="Legacy LLM selector, iterative local baseline, or one-pass setwise local selector.")
-parser.add_argument("--selector_model_path", default=os.getenv("SELECTOR_MODEL_PATH", ""), help="Existing local selector model directory; never downloaded automatically.")
-parser.add_argument("--selector_device", default="cuda", help="Local selector device, e.g. cuda:0 or cpu.")
-parser.add_argument("--selector_batch_size", type=int, default=2)
-parser.add_argument("--selector_max_length", type=int, default=16384, help="Full local-selector input limit; overlength inputs are rejected, not truncated.")
-parser.add_argument("--selector_token_budget", type=int, default=2048, help="Reader evidence budget measured with the local selector tokenizer.")
-parser.add_argument("--selector_redundancy_weight", type=float, default=0.2)
-parser.add_argument("--selector_cost_weight", type=float, default=0.1)
-parser.add_argument("--selector_min_gain", type=float, default=0.1, help="Stop when the best net gain is at most this threshold.")
-parser.add_argument("--selector_similarity_threshold", type=float, default=0.85, help="Only cosine similarity above this threshold incurs soft redundancy cost.")
+parser.add_argument("--retrieval_only", action="store_true", help="Save retrieval evidence without running the final answer reader.")
 
 # parse_known_args (not parse_args) so importing this module under a foreign argv
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
@@ -218,78 +165,20 @@ K1=80                 # coarse retrieval breadth (embedding similarity)
 K2=20                 # fine retrieval breadth (LLM re-ranking)
 TOPIC_K=8            # select_topic: number of topic candidates
 EAES_MODE = args.eaes
-EAES_SEMANTIC_SCORE = args.eaes_semantic_score
 SEMANTIC_HIERARCHY = args.semantic_hierarchy
-# Each exact query-memory semantic-property match adds this weak positive bonus;
-# the scorer caps the effective match count at three and never subtracts points.
-SEMANTIC_MATCH_WEIGHT = 0.1
 RETRIEVAL_ONLY = args.retrieval_only
-DISABLE_EVIDENCE_SELECTOR = args.disable_evidence_selector
-EVIDENCE_SELECTOR_BACKEND = args.evidence_selector_backend
-SELECTOR_MODEL_PATH = args.selector_model_path
-SELECTOR_DEVICE = args.selector_device
-SELECTOR_BATCH_SIZE = args.selector_batch_size
-SELECTOR_MAX_LENGTH = args.selector_max_length
-SELECTOR_TOKEN_BUDGET = args.selector_token_budget
-SELECTOR_REDUNDANCY_WEIGHT = args.selector_redundancy_weight
-SELECTOR_COST_WEIGHT = args.selector_cost_weight
-SELECTOR_MIN_GAIN = args.selector_min_gain
-SELECTOR_SIMILARITY_THRESHOLD = args.selector_similarity_threshold
-if min(SELECTOR_BATCH_SIZE, SELECTOR_MAX_LENGTH, SELECTOR_TOKEN_BUDGET) <= 0:
-    raise ValueError("Selector batch size, input length and evidence budget must be positive.")
-if any(not math.isfinite(value) or value < 0 for value in (
-        SELECTOR_REDUNDANCY_WEIGHT, SELECTOR_COST_WEIGHT, SELECTOR_MIN_GAIN)):
-    raise ValueError("Selector weights and minimum gain must be finite and nonnegative.")
-if not 0 <= SELECTOR_SIMILARITY_THRESHOLD < 1:
-    raise ValueError("--selector_similarity_threshold must be in [0, 1).")
-if DISABLE_EVIDENCE_SELECTOR and not EAES_MODE:
-    raise ValueError("--disable_evidence_selector requires --eaes.")
-if EAES_SEMANTIC_SCORE and not EAES_MODE:
-    raise ValueError("--eaes_semantic_score requires --eaes.")
+UTILITY_MODEL_PATH = args.utility_model_path
+UTILITY_DEVICE = args.utility_device
+UTILITY_MAX_LENGTH = args.utility_max_length
+UTILITY_TOKEN_BUDGET = args.utility_token_budget
+if min(UTILITY_MAX_LENGTH, UTILITY_TOKEN_BUDGET) <= 0:
+    raise ValueError("Utility input length and evidence budget must be positive.")
 if SEMANTIC_HIERARCHY and not EAES_MODE:
     raise ValueError("--semantic_hierarchy requires --eaes.")
-EAES_CANDIDATE_LIMIT = args.eaes_prefilter_limit
-if EAES_CANDIDATE_LIMIT <= 0:
-    raise ValueError("--eaes_prefilter_limit must be a positive integer.")
 EAES_CHILD_CANDIDATE_LIMIT = args.eaes_child_candidate_limit
-if EAES_CHILD_CANDIDATE_LIMIT <= 0 or EAES_CHILD_CANDIDATE_LIMIT > EAES_CANDIDATE_LIMIT:
-    raise ValueError("--eaes_child_candidate_limit must be positive and no larger than --eaes_prefilter_limit.")
-EAES_PHRASE_COUNT = args.eaes_phrase_count
-EAES_PHRASE_MAX_WORDS = args.eaes_phrase_max_words
-EAES_STRICT_PHRASE_VALIDATION = args.eaes_strict_phrase_validation
-EAES_PHRASE_INITIAL_TOP_K = args.eaes_phrase_initial_top_k
-EAES_PARENT_PHRASE_TOP_K = args.eaes_parent_phrase_top_k
-EAES_PARENT_CHILD_ROUTING = args.eaes_parent_child_routing
 EAES_PARENT_CHILD_ROUTE_LIMIT = args.eaes_parent_child_route_limit
-EAES_QUESTION_RELEVANCE_WEIGHT = args.eaes_question_relevance_weight
-EAES_PHRASE_RRF_K = args.eaes_phrase_rrf_k
-if EAES_PHRASE_COUNT <= 0:
-    raise ValueError("--eaes_phrase_count must be positive.")
-if EAES_PHRASE_MAX_WORDS <= 0:
-    raise ValueError("--eaes_phrase_max_words must be positive.")
-if EAES_PHRASE_INITIAL_TOP_K <= 0:
-    raise ValueError("--eaes_phrase_initial_top_k must be positive.")
-if EAES_PARENT_PHRASE_TOP_K <= 0:
-    raise ValueError("--eaes_parent_phrase_top_k must be positive.")
-if EAES_PARENT_CHILD_ROUTE_LIMIT <= 0:
-    raise ValueError("--eaes_parent_child_route_limit must be positive.")
-if EAES_PARENT_CHILD_ROUTING and not SEMANTIC_HIERARCHY:
-    raise ValueError(
-        "--eaes_parent_child_routing requires --semantic_hierarchy."
-    )
-if not 0.0 < EAES_QUESTION_RELEVANCE_WEIGHT < 1.0:
-    raise ValueError("--eaes_question_relevance_weight must be strictly between 0 and 1.")
-if EAES_PHRASE_RRF_K <= 0:
-    raise ValueError("--eaes_phrase_rrf_k must be positive.")
-EAES_ROLLBACK_CHECK = args.eaes_rollback_check
-EAES_ROLLBACK_CHILD_PREFILTER_LIMIT = 27
-EAES_ROLLBACK_PARENT_PREFILTER_LIMIT = 3
-EAES_ROLLBACK_SUPPLEMENT_LIMIT = 3
-if EAES_ROLLBACK_CHECK and not EAES_MODE:
-    raise ValueError("--eaes_rollback_check requires --eaes.")
-if EAES_ROLLBACK_CHECK and not SEMANTIC_HIERARCHY:
-    raise ValueError("--eaes_rollback_check requires --semantic_hierarchy.")
-EAES_RAW_EXPANSION_LIMIT = 3
+if min(EAES_CHILD_CANDIDATE_LIMIT, EAES_PARENT_CHILD_ROUTE_LIMIT) <= 0:
+    raise ValueError("EAES Child retrieval limits must be positive.")
 sample_id = args.sample
 MAX_QUESTIONS = args.max_questions
 if MAX_QUESTIONS is not None and MAX_QUESTIONS <= 0:
@@ -300,50 +189,14 @@ EXCLUDED_CATEGORIES = {
 QUESTION_WORKERS = args.workers
 if QUESTION_WORKERS <= 0:
     raise ValueError("--workers must be a positive integer.")
-DENSE_RETRIEVAL_K = args.dense_k
-if DENSE_RETRIEVAL_K <= 0:
-    raise ValueError("--dense_k must be a positive integer.")
-EAES_INDEX_MODE = args.eaes_index_mode
 qu = args.qu
 ca = args.ca
-LM_REWRITE_BATCH = args.lm_batch  # sessions merged per LM rewrite call
-REWRITE_WINDOW_SIZE = args.rewrite_window_size
-if REWRITE_WINDOW_SIZE <= 0:
-    raise ValueError("--rewrite_window_size must be a positive integer.")
-REWRITE_OVERLAP_SIZE = args.rewrite_overlap_size
-if REWRITE_OVERLAP_SIZE < 0 or REWRITE_OVERLAP_SIZE >= REWRITE_WINDOW_SIZE:
-    raise ValueError("--rewrite_overlap_size must be >= 0 and smaller than --rewrite_window_size.")
-REWRITE_PREVIOUS_LIMIT = args.rewrite_previous_limit
-if REWRITE_PREVIOUS_LIMIT < 0:
-    raise ValueError("--rewrite_previous_limit must be non-negative.")
-PARENT_MIN_TURNS = args.parent_min_turns
-PARENT_MAX_TURNS = args.parent_max_turns
-PARENT_CONTEXT_TURNS = args.parent_context_turns
 CHILD_MAX_TURNS = args.child_max_turns
-CHILD_REWRITE_BATCH_SIZE = args.child_rewrite_batch_size
-CHILD_DUPLICATE_SIMILARITY_THRESHOLD = args.child_duplicate_similarity_threshold
 PARENT_TOP_K = args.parent_top_k
-if PARENT_MIN_TURNS <= 0 or PARENT_MAX_TURNS < PARENT_MIN_TURNS:
-    raise ValueError("parent turn limits must satisfy 0 < min <= max.")
-if SEMANTIC_HIERARCHY and PARENT_MAX_TURNS > 10:
-    raise ValueError(
-        "--parent_max_turns cannot exceed 10 when --semantic_hierarchy is enabled."
-    )
-if PARENT_CONTEXT_TURNS < 0:
-    raise ValueError("--parent_context_turns must be non-negative.")
 if CHILD_MAX_TURNS <= 0:
     raise ValueError("--child_max_turns must be positive.")
-if CHILD_REWRITE_BATCH_SIZE <= 0 or CHILD_REWRITE_BATCH_SIZE > 15:
-    raise ValueError("--child_rewrite_batch_size must be between 1 and 15.")
-if not 0.0 <= CHILD_DUPLICATE_SIMILARITY_THRESHOLD <= 1.0:
-    raise ValueError(
-        "--child_duplicate_similarity_threshold must be between 0 and 1."
-    )
-if PARENT_TOP_K <= 0 or PARENT_TOP_K > EAES_CANDIDATE_LIMIT:
-    raise ValueError(
-        "--parent_top_k must be positive and no larger than "
-        "--eaes_prefilter_limit."
-    )
+if PARENT_TOP_K <= 0:
+    raise ValueError("--parent_top_k must be positive.")
 dataset = args.data
 DATASET = dataset
 datapath = f"data/dataset_{dataset}.json"
@@ -360,25 +213,17 @@ ADDITIONAL_RE = (
     f"{'_q' + str(MAX_QUESTIONS) if MAX_QUESTIONS is not None else ''}"
     f"{'_xcat' + '-'.join(sorted(EXCLUDED_CATEGORIES)) if EXCLUDED_CATEGORIES else ''}"
     f"{'_eaes' if EAES_MODE else ''}"
-    f"{'_semantic' if EAES_SEMANTIC_SCORE else ''}"
     f"{HIERARCHY_SUFFIX}"
-    f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
-    f"{'_local_selector' if EVIDENCE_SELECTOR_BACKEND == 'local' and not DISABLE_EVIDENCE_SELECTOR else ''}"
-    f"{'_setwise_selector' if EVIDENCE_SELECTOR_BACKEND == 'setwise' and not DISABLE_EVIDENCE_SELECTOR else ''}"
-    f"{'_parent_route' if EAES_PARENT_CHILD_ROUTING else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"
-base_dir_k = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/"
 base_dir_emb = f"data/{{dataset}}/embedding/gpt{ADDITIONAL_EM}/"
 # auto-create all output dirs so a fresh checkout runs without manual mkdir
 os.makedirs(base_dir_t.format(dataset=dataset), exist_ok=True)      # data/<ds>/rewrite_<model>/
-os.makedirs(base_dir_k.format(dataset=dataset), exist_ok=True)      # data/<ds>/keyword_<model>/
 os.makedirs(base_dir_emb.format(dataset=dataset), exist_ok=True)    # data/<ds>/embedding/gpt_<model>/
 os.makedirs(f"result/{dataset}", exist_ok=True)                    # prediction outputs
 os.makedirs(f"log/{dataset}", exist_ok=True)                       # logs (also creates log/ for the run-level handler)
 
 rewrite_template = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/{{sample_id}}_rewrite.json"
-keyword_template = f"data/{{dataset}}/keyword{ADDITIONAL_TK}/{{sample_id}}_keyword.json"
 embedding_template = f"data/{{dataset}}/embedding/gpt{ADDITIONAL_EM}/{{sample_id}}_embedding.pkl"
 result_template = f"result/{{dataset}}/{{sample_id}}_result{ADDITIONAL_RE}.jsonl"

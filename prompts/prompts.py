@@ -23,8 +23,9 @@ Schema:
 
     CHILD_WINDOW_REWRITE_SYSTEM_PROMPT = """You propose atomic child memories for one semantically closed dialogue window. Only output valid JSON.
 Rules:
-- CURRENT_WINDOW_TURNS is the only evidence. Extract concrete events, time, people, process, viewpoints, entity details, relations, plans, and stable states that are useful as memory.
-- Ignore greetings, acknowledgements, generic advice, boilerplate, and pure repetition. A window may produce zero sentence objects.
+- CURRENT_WINDOW_TURNS is the only evidence. Extract every supported fact that could answer a future question, including concrete events, time, people, process, viewpoints, entity details, relations, plans, preferences, and stable states.
+- Coverage takes priority over salience. Do not omit a fact because it seems minor, similar in topic to another fact, or unlikely to matter. Preserve names, titles, quantities, durations, colors, ingredients, descriptive attributes, reasons, procedures, recommendations, and outcomes.
+- Process the turns in order and ensure every concrete proposition is represented before finishing. Ignore only greetings, acknowledgements, generic advice, boilerplate, and pure repetition that contain no new factual information. A window may produce zero sentence objects only when the entire window contains no such fact.
 - Split independent facts into separate sentence objects. Every memory must be self-contained and resolve pronouns.
 - Preserve supported temporal precision, place, state, causality, outcome, relationship, and image facts.
 - When an answer depends on the immediately preceding question, include both origins in dialogue order and inherit the question's entity, relation, temporal, location, comparison, and causal constraints.

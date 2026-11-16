@@ -475,7 +475,7 @@ def _utility_child(memory):
     }
 
 
-def _keep_new_children(candidates, kept_children):
+def _keep_new_children(candidates, kept_children, logger=None):
     from llm.unified_utility_judge import get_unified_utility_judge
 
     judge = get_unified_utility_judge()
@@ -485,14 +485,29 @@ def _keep_new_children(candidates, kept_children):
             "WRITE",
             {
                 "scope": "current session only",
-                "criterion": (
-                    "new event/state, time/stage, or concrete detail relative "
-                    "to already kept children"
+                "task": "strict duplicate detection only",
+                "default": "KEEP",
+                "drop_only_if": (
+                    "the candidate describes the same event or state at the "
+                    "same time or stage and every factual proposition is "
+                    "already present in the kept children"
+                ),
+                "keep_if": (
+                    "it adds any new entity, attribute, value, time, stage, "
+                    "reason, result, opinion, relation, process, or detail; "
+                    "sharing a person or broad topic is not duplication"
                 ),
             },
             [_utility_child(memory) for memory in kept_children],
             _utility_child(candidate),
         )
+        if logger:
+            logger.info(
+                "[write-utility] decision=%s selected=%d candidate=%s",
+                "KEEP" if keep else "DROP",
+                len(kept_children),
+                json.dumps(_utility_child(candidate), ensure_ascii=False),
+            )
         if keep:
             kept_children.append(candidate)
             accepted.append(candidate)
@@ -697,8 +712,18 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             previous_rewrites=previous_rewrites,
             logger=logger,
         )
+        if logger:
+            logger.info(
+                "[child-candidates] window=%s..%s candidates=%s",
+                window.start_origin,
+                window.end_origin,
+                json.dumps(
+                    [_utility_child(item) for item in _as_list(output.get("sentence"))],
+                    ensure_ascii=False,
+                ),
+            )
         output["sentence"] = _keep_new_children(
-            _as_list(output.get("sentence")), generated_memories
+            _as_list(output.get("sentence")), generated_memories, logger=logger
         )
         window_outputs.append(output)
 

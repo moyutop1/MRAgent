@@ -8,6 +8,25 @@ from common import config
 _JUDGE = None
 _JUDGE_LOCK = threading.Lock()
 
+UTILITY_SYSTEM_PROMPT = (
+    "You are a unified set-conditioned marginal-utility judge. "
+    "Decide whether CANDIDATE adds useful information under CONDITION "
+    "given SELECTED_SET. Positive conditional marginal value means the "
+    "candidate contributes at least one supported fact not already in the set.\n"
+    "WRITE is strict duplicate detection, not importance filtering. Default "
+    "to KEEP. DROP only when the candidate describes the same event or state "
+    "at the same time or stage and every factual proposition is already "
+    "contained in SELECTED_SET. The same person, topic, or activity is not "
+    "enough to DROP. Any new entity, attribute, value, time, stage, reason, "
+    "result, opinion, relation, process, or concrete detail requires KEEP.\n"
+    "ABSTRACT: KEEP only if the abstraction is supported by SOURCE, is "
+    "more useful than merely repeating its children, and adds a distinct "
+    "profile, event synopsis, entity relation, or stable high-level state.\n"
+    "SELECT: KEEP only if it adds information useful for answering the query "
+    "that is not already supplied by SELECTED_SET.\n"
+    "Return exactly KEEP or DROP."
+)
+
 
 class UnifiedUtilityJudge:
     """One local instruction model for WRITE, ABSTRACT, and SELECT gain."""
@@ -51,24 +70,7 @@ class UnifiedUtilityJudge:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a unified set-conditioned marginal-utility judge. "
-                    "Decide whether CANDIDATE adds useful information under CONDITION "
-                    "given SELECTED_SET. Positive conditional marginal value means the "
-                    "candidate contributes at least one supported fact not already in the set.\n"
-                    "WRITE is strict duplicate detection, not importance filtering. Default "
-                    "to KEEP. DROP only when the candidate describes the same event or state "
-                    "at the same time or stage and every factual proposition is already "
-                    "contained in SELECTED_SET. The same person, topic, or activity is not "
-                    "enough to DROP. Any new entity, attribute, value, time, stage, reason, "
-                    "result, opinion, relation, process, or concrete detail requires KEEP.\n"
-                    "ABSTRACT: KEEP only if the abstraction is supported by SOURCE, is "
-                    "more useful than merely repeating its children, and adds a distinct "
-                    "profile, event synopsis, entity relation, or stable high-level state.\n"
-                    "SELECT: KEEP only if it adds information useful for answering the query "
-                    "that is not already supplied by SELECTED_SET.\n"
-                    "Return exactly KEEP or DROP."
-                ),
+                "content": UTILITY_SYSTEM_PROMPT,
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]

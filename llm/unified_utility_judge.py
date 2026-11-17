@@ -1,9 +1,7 @@
 import json
-import re
 import threading
 
 from common import config
-from prompts.schema import check_composite_tag
 
 
 _JUDGE = None
@@ -28,20 +26,9 @@ UTILITY_SYSTEM_PROMPT = (
     "Return exactly KEEP or DROP."
 )
 
-CUE_SYSTEM_PROMPT = """You generate one main retrieval cue for a question using exactly the same grammar as a child memory tag. Return only valid JSON:
-{"prefix": "Person description", "facet": "concrete noun phrase"}
-Rules:
-- Output exactly one prefix and one facet.
-- prefix starts with an explicit person's name from the question, followed by a concise activity, plan, profile, possession, or relationship description.
-- facet is a concrete noun phrase of at most five words.
-- Do not place periods inside either field.
-- Describe the information being requested; never guess the answer.
-- Preserve named entities, relation direction, event, and temporal constraints from the question.
-- For list or aggregate questions, describe the shared relation broadly enough to retrieve all supporting memories."""
-
 
 class UnifiedUtilityJudge:
-    """Use DeepSeek Flash for the main Cue and unified utility decisions."""
+    """Use DeepSeek Flash for WRITE, ABSTRACT, and SELECT utility."""
 
     def __init__(self):
         from openai import OpenAI
@@ -86,27 +73,6 @@ class UnifiedUtilityJudge:
         if answer.startswith("DROP"):
             return False
         raise ValueError(f"invalid utility decision: {answer!r}")
-
-    def generate_cue(self, question):
-        response = self.client.chat.completions.create(
-            model=config.UTILITY_MODEL,
-            messages=[
-                {"role": "system", "content": CUE_SYSTEM_PROMPT},
-                {"role": "user", "content": str(question).strip()},
-            ],
-            temperature=0.0,
-            max_tokens=96,
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        data = json.loads(response.choices[0].message.content)
-        prefix = re.sub(r"\s+", " ", str(data.get("prefix") or "")).strip()
-        facet = re.sub(r"\s+", " ", str(data.get("facet") or "")).strip()
-        cue = f"{prefix}.{facet}"
-        valid, error = check_composite_tag(cue)
-        if not valid:
-            raise ValueError(f"invalid retrieval cue {cue!r}: {error}")
-        return cue
 
 
 def get_unified_utility_judge():

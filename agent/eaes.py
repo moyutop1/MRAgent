@@ -260,12 +260,8 @@ class EAESMixin:
         return result
 
     def _retrieve_eaes_first_pass(self, question, question_emb=None):
-        from llm.unified_utility_judge import get_unified_utility_judge
-
         query = self._eaes_query_question(question)
-        cue = get_unified_utility_judge().generate_cue(query)
         children = self.memory_controller.retrieve_eaes_candidates(
-            cue_text=cue,
             question_emb=question_emb,
             question_text=query,
             limit=config.EAES_CHILD_CANDIDATE_LIMIT,
@@ -276,7 +272,7 @@ class EAESMixin:
             limit=config.PARENT_TOP_K,
         )
         return {
-            "query_plan": {"query": query, "cue": cue},
+            "query_plan": {"query": query},
             "child_probe_candidates": children,
             "parent_probe_candidates": parents,
             "prefilter_children": children,

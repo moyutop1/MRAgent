@@ -41,35 +41,29 @@ class MemoryController:
             clean_tags.append(clean)
         return clean_tags
 
+    def _eaes_retrieval_text(self, note):
+        tags = "\n".join(self._eaes_child_tags(note))
+        return f"TAGS:\n{tags}\nMEMORY:\n{note.rewrite_content}".strip()
+
     def prepare_eaes_retrieval_embeddings(self):
         pending = [
             note for note in self.memory.eaes_notes.values()
-            if note.tag_embeddings is None or note.content_embedding is None
+            if note.retrieval_embedding is None
         ]
         if not pending:
             return
         with _EAES_EMBEDDING_LOCK:
             pending = [
                 note for note in self.memory.eaes_notes.values()
-                if note.tag_embeddings is None or note.content_embedding is None
+                if note.retrieval_embedding is None
             ]
             if not pending:
                 return
-            tag_counts = [len(self._eaes_child_tags(note)) for note in pending]
-            tag_texts = [
-                tag for note in pending for tag in self._eaes_child_tags(note)
-            ]
             vectors = self._normalize_embedding_rows(
-                get_embedding(
-                    tag_texts + [note.rewrite_content for note in pending]
-                )
+                get_embedding([self._eaes_retrieval_text(note) for note in pending])
             )
-            offset = 0
-            for note, count in zip(pending, tag_counts):
-                note.tag_embeddings = vectors[offset:offset + count]
-                offset += count
-            for note, vector in zip(pending, vectors[offset:]):
-                note.content_embedding = vector
+            for note, vector in zip(pending, vectors):
+                note.retrieval_embedding = vector
 
     def prepare_eaes_parent_embeddings(self):
         pending = [
@@ -94,68 +88,30 @@ class MemoryController:
     def _eaes_question_vector(self, question_emb=None, question_text=None):
         if question_emb is not None:
             return self._normalize_embedding_rows(question_emb)[0]
-        # SentenceTransformer is shared by concurrent question workers.
-        with _EAES_EMBEDDING_LOCK:
-            return self._normalize_embedding_rows(
-                get_embedding([question_text])
-            )[0]
+        return self._normalize_embedding_rows(get_embedding([question_text]))[0]
 
     def retrieve_eaes_candidates(
-            self, cue_text, question_emb=None, question_text=None, limit=None,
+            self, question_emb=None, question_text=None, limit=None,
             exclude_memory_ids=None
     ):
-        """Retrieve mostly by Cue-to-tag similarity plus a small content channel."""
+        """Direct Child Top-K using the raw question and tag+rewrite embeddings."""
         self.prepare_eaes_retrieval_embeddings()
         question = self._eaes_question_vector(question_emb, question_text)
-        cue = self._eaes_question_vector(question_text=cue_text)
         excluded = set(exclude_memory_ids or [])
         ranked = []
         for note in self.memory.eaes_notes.values():
             if note.memory_id in excluded:
                 continue
-            tag_score = float(np.max(note.tag_embeddings @ cue))
-            content_score = float(np.dot(note.content_embedding, question))
+            vector = self._normalize_embedding_rows(note.retrieval_embedding)[0]
+            score = float(np.dot(vector, question))
             ranked.append({
                 **note.to_dict(),
                 "tag": self._eaes_child_tags(note),
-                "tag_score": tag_score,
-                "content_score": content_score,
+                "score": score,
+                "retrieval_source": "direct_child",
             })
-
-        retrieval_limit = limit or config.EAES_CHILD_CANDIDATE_LIMIT
-        tag_limit = max(1, retrieval_limit * 4 // 5)
-        content_limit = max(1, retrieval_limit - tag_limit)
-        tag_ranked = sorted(
-            ranked, key=lambda item: (-item["tag_score"], item["memory_id"])
-        )
-        content_ranked = sorted(
-            ranked, key=lambda item: (-item["content_score"], item["memory_id"])
-        )
-        selected_by_id = {}
-        for item in tag_ranked[:tag_limit]:
-            selected_by_id[item["memory_id"]] = (item, {"cue_tag"})
-        for item in content_ranked[:content_limit]:
-            memory_id = item["memory_id"]
-            if memory_id in selected_by_id:
-                selected_by_id[memory_id][1].add("raw_content")
-            else:
-                selected_by_id[memory_id] = (item, {"raw_content"})
-        for item in tag_ranked:
-            if len(selected_by_id) >= retrieval_limit:
-                break
-            selected_by_id.setdefault(
-                item["memory_id"], (item, {"cue_tag"})
-            )
-
-        selected = []
-        for item, sources in selected_by_id.values():
-            item["score"] = max(
-                item["tag_score"] if "cue_tag" in sources else -1.0,
-                item["content_score"] if "raw_content" in sources else -1.0,
-            )
-            item["retrieval_source"] = "+".join(sorted(sources))
-            selected.append(item)
-        selected.sort(key=lambda item: (-item["score"], item["memory_id"]))
+        ranked.sort(key=lambda item: (-item["score"], item["memory_id"]))
+        selected = ranked[:limit or config.EAES_CHILD_CANDIDATE_LIMIT]
         for rank, item in enumerate(selected, start=1):
             item["rank"] = rank
         return selected
@@ -188,7 +144,7 @@ class MemoryController:
             self, parent_candidates, question_emb=None, question_text=None,
             exclude_memory_ids=None, limit=None
     ):
-        """Expand Parent links and rescore routed Children by content cosine."""
+        """Expand Parent links and rescore every routed Child by query cosine."""
         self.prepare_eaes_retrieval_embeddings()
         question = self._eaes_question_vector(question_emb, question_text)
         excluded = set(exclude_memory_ids or [])
@@ -205,7 +161,8 @@ class MemoryController:
                 if memory_id in excluded:
                     continue
                 note = self.memory.eaes_notes[memory_id]
-                score = float(np.dot(note.content_embedding, question))
+                vector = self._normalize_embedding_rows(note.retrieval_embedding)[0]
+                score = float(np.dot(vector, question))
                 previous = routed.get(memory_id)
                 if previous is None or score > previous["score"]:
                     routed[memory_id] = {

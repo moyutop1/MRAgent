@@ -70,7 +70,6 @@ class EAESMemoryNote:
             origin: str,
             tag_embeddings=None,
             content_embedding=None,
-            retrieval_embedding=None,
             parent_id: str = None,
     ):
         self.memory_id = memory_id
@@ -80,7 +79,6 @@ class EAESMemoryNote:
         self.origin = origin
         self.tag_embeddings = tag_embeddings
         self.content_embedding = content_embedding
-        self.retrieval_embedding = retrieval_embedding
         self.parent_id = parent_id
 
     def to_dict(self):

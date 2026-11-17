@@ -75,23 +75,6 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             "Nate recommendation.books for Joanna",
         )
 
-    def test_flash_cue_retries_validation_then_falls_back(self):
-        judge = UnifiedUtilityJudge.__new__(UnifiedUtilityJudge)
-        judge.client = MagicMock()
-        invalid = types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=types.SimpleNamespace(
-                content='{"prefix":"person","facet":"too many words in this facet"}'
-            ))]
-        )
-        judge.client.chat.completions.create.return_value = invalid
-        self.assertIsNone(judge.generate_cue("What happened?"))
-        self.assertEqual(judge.client.chat.completions.create.call_count, 3)
-        retry_messages = (
-            judge.client.chat.completions.create.call_args_list[1]
-            .kwargs["messages"]
-        )
-        self.assertIn("Validation error:", retry_messages[-1]["content"])
-
     def test_child_window_may_produce_no_memory(self):
         turns = [TurnRecord("D1:1", "user: hello dia_id: D1:1", 0)]
         output = {

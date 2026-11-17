@@ -41,10 +41,6 @@ class MemoryController:
             clean_tags.append(clean)
         return clean_tags
 
-    def _eaes_retrieval_text(self, note):
-        tags = "\n".join(self._eaes_child_tags(note))
-        return f"TAGS:\n{tags}\nMEMORY:\n{note.rewrite_content}".strip()
-
     def prepare_eaes_retrieval_embeddings(self):
         pending = [
             note for note in self.memory.eaes_notes.values()
@@ -74,26 +70,6 @@ class MemoryController:
                 offset += count
             for note, vector in zip(pending, vectors[offset:]):
                 note.content_embedding = vector
-
-    def prepare_eaes_fallback_embeddings(self):
-        pending = [
-            note for note in self.memory.eaes_notes.values()
-            if note.retrieval_embedding is None
-        ]
-        if not pending:
-            return
-        with _EAES_EMBEDDING_LOCK:
-            pending = [
-                note for note in self.memory.eaes_notes.values()
-                if note.retrieval_embedding is None
-            ]
-            if not pending:
-                return
-            vectors = self._normalize_embedding_rows(
-                get_embedding([self._eaes_retrieval_text(note) for note in pending])
-            )
-            for note, vector in zip(pending, vectors):
-                note.retrieval_embedding = vector
 
     def prepare_eaes_parent_embeddings(self):
         pending = [
@@ -129,28 +105,10 @@ class MemoryController:
             exclude_memory_ids=None
     ):
         """Retrieve mostly by Cue-to-tag similarity plus a small content channel."""
-        question = self._eaes_question_vector(question_emb, question_text)
-        excluded = set(exclude_memory_ids or [])
-        retrieval_limit = limit or config.EAES_CHILD_CANDIDATE_LIMIT
-        if not cue_text:
-            self.prepare_eaes_fallback_embeddings()
-            ranked = []
-            for note in self.memory.eaes_notes.values():
-                if note.memory_id in excluded:
-                    continue
-                ranked.append({
-                    **note.to_dict(),
-                    "tag": self._eaes_child_tags(note),
-                    "score": float(np.dot(note.retrieval_embedding, question)),
-                    "retrieval_source": "raw_query_fallback",
-                })
-            ranked.sort(key=lambda item: (-item["score"], item["memory_id"]))
-            for rank, item in enumerate(ranked[:retrieval_limit], start=1):
-                item["rank"] = rank
-            return ranked[:retrieval_limit]
-
         self.prepare_eaes_retrieval_embeddings()
+        question = self._eaes_question_vector(question_emb, question_text)
         cue = self._eaes_question_vector(question_text=cue_text)
+        excluded = set(exclude_memory_ids or [])
         ranked = []
         for note in self.memory.eaes_notes.values():
             if note.memory_id in excluded:
@@ -164,6 +122,7 @@ class MemoryController:
                 "content_score": content_score,
             })
 
+        retrieval_limit = limit or config.EAES_CHILD_CANDIDATE_LIMIT
         tag_limit = max(1, retrieval_limit * 4 // 5)
         content_limit = max(1, retrieval_limit - tag_limit)
         tag_ranked = sorted(

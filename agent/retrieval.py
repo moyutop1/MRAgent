@@ -8,7 +8,8 @@ def compact_eaes_retrieval(retrieval):
     """Keep retrieval-only artifacts compact but fully auditable."""
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
-        "rewrite_content", "score", "rank", "retrieval_source",
+        "rewrite_content", "score", "tag_score", "content_score", "rank",
+        "retrieval_source",
         "routed_parent_id",
     )
     parent_fields = ("parent_id", "rewrite_content", "score", "rank")
@@ -22,6 +23,7 @@ def compact_eaes_retrieval(retrieval):
     return {
         "mode": "eaes",
         "query": (retrieval.get("query_plan") or {}).get("query"),
+        "cue": (retrieval.get("query_plan") or {}).get("cue"),
         "direct_children": project(
             retrieval.get("initial_candidates"), child_fields
         ),

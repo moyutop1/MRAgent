@@ -68,7 +68,8 @@ class EAESMemoryNote:
             rewrite_content: str,
             conversation_time: str,
             origin: str,
-            retrieval_embedding=None,
+            tag_embeddings=None,
+            content_embedding=None,
             parent_id: str = None,
     ):
         self.memory_id = memory_id
@@ -76,7 +77,8 @@ class EAESMemoryNote:
         self.rewrite_content = rewrite_content
         self.conversation_time = conversation_time
         self.origin = origin
-        self.retrieval_embedding = retrieval_embedding
+        self.tag_embeddings = tag_embeddings
+        self.content_embedding = content_embedding
         self.parent_id = parent_id
 
     def to_dict(self):

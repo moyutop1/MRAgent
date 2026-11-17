@@ -15,8 +15,8 @@ def embed_sample(qa_list, FILE_EMBEDDING):
     question_embeddings = embed_question(qa_list)
     embedding_dim = question_embeddings.shape[1] if len(question_embeddings.shape) > 1 else 0
 
-    # Child retrieval embeddings are built once from tag + rewrite_content by
-    # MemoryController. This cache only needs the raw-question embeddings.
+    # Child tag/content embeddings and Flash Cues are prepared at retrieval time.
+    # This cache only needs the raw-question embeddings.
     database = {'embeddings': np.empty((0, embedding_dim)),
                 'topic': np.empty((0, embedding_dim)),
                 'sentence_id': [],

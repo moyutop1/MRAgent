@@ -1,7 +1,7 @@
 import unittest
 import sys
 import types
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import common
 
@@ -42,6 +42,7 @@ from agent.eaes import EAESMixin
 from agent.rewrite_memory import _keep_new_children
 from agent.semantic_segmentation import ChildWindow, TurnRecord
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
+from llm.unified_utility_judge import UnifiedUtilityJudge
 from prompts.schema import check_child_window_rewrite_json
 
 
@@ -60,6 +61,20 @@ class _Judge:
 
 
 class UnifiedUtilityPipelineTests(unittest.TestCase):
+    def test_flash_cue_uses_child_tag_schema(self):
+        judge = UnifiedUtilityJudge.__new__(UnifiedUtilityJudge)
+        judge.client = MagicMock()
+        judge.client.chat.completions.create.return_value = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+                content='{"prefix":"Nate recommendation",'
+                        '"facet":"books for Joanna"}'
+            ))]
+        )
+        self.assertEqual(
+            judge.generate_cue("What books did Nate recommend to Joanna?"),
+            "Nate recommendation.books for Joanna",
+        )
+
     def test_child_window_may_produce_no_memory(self):
         turns = [TurnRecord("D1:1", "user: hello dia_id: D1:1", 0)]
         output = {

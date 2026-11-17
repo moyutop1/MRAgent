@@ -1,7 +1,7 @@
 import unittest
 import sys
 import types
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import common
 
@@ -42,6 +42,7 @@ from agent.eaes import EAESMixin
 from agent.rewrite_memory import _keep_new_children
 from agent.semantic_segmentation import ChildWindow, TurnRecord
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
+from llm.unified_utility_judge import UnifiedUtilityJudge
 from prompts.schema import check_child_window_rewrite_json
 
 
@@ -54,12 +55,37 @@ class _Judge:
         self.calls.append((operation, len(selected_set), candidate))
         return next(self.decisions)
 
+    def select(self, query, selected_set, candidate):
+        self.calls.append(("SELECT", len(selected_set), candidate))
+        keep = next(self.decisions)
+        return {
+            "new_answer_unit": keep,
+            "necessary_constraint": False,
+            "marginal_utility": int(keep),
+            "keep": keep,
+        }
+
     @staticmethod
     def count_tokens(value):
         return len(str(value).split())
 
 
 class UnifiedUtilityPipelineTests(unittest.TestCase):
+    def test_select_utility_is_computed_from_structured_components(self):
+        judge = UnifiedUtilityJudge.__new__(UnifiedUtilityJudge)
+        judge.client = MagicMock()
+        judge.client.chat.completions.create.return_value = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+                content=(
+                    '{"new_answer_unit":false,'
+                    '"necessary_constraint":true}'
+                )
+            ))]
+        )
+        utility = judge.select("when?", [], {"rewrite_content": "May 2"})
+        self.assertEqual(utility["marginal_utility"], 1)
+        self.assertTrue(utility["keep"])
+
     def test_child_window_may_produce_no_memory(self):
         turns = [TurnRecord("D1:1", "user: hello dia_id: D1:1", 0)]
         output = {

@@ -17,20 +17,6 @@ parser.add_argument("--ca", type=int, default=1, help="LM category index: 0=mult
 parser.add_argument("--semantic_hierarchy", action="store_true", help="Build session-local Child memories and end-of-session Parent abstractions.")
 parser.add_argument("--child_max_turns", type=int, default=int(os.getenv("CHILD_MAX_TURNS", "8")), help="Maximum raw turns in one semantic child segment.")
 parser.add_argument(
-    "--utility_model_path",
-    default=os.getenv(
-        "UTILITY_MODEL_PATH",
-        "/root/autodl-tmp/models/Qwen3.5-9B",
-    ),
-    help="Local Qwen3.5 model directory used by the unified utility judge.",
-)
-parser.add_argument("--utility_device", default=os.getenv("UTILITY_DEVICE", "cuda"))
-parser.add_argument(
-    "--utility_max_length",
-    type=int,
-    default=int(os.getenv("UTILITY_MAX_LENGTH", "32768")),
-)
-parser.add_argument(
     "--utility_token_budget",
     type=int,
     default=int(os.getenv("UTILITY_TOKEN_BUDGET", "2048")),
@@ -96,7 +82,7 @@ elif args.model == "gemini":
 elif args.model == "deepseek":
     API_PROVIDER = "deepseek"
     CHAT_BASE_URL = DEEPSEEK_URL
-    MODEL = "deepseek-v4-flash"
+    MODEL = "deepseek-flash"
 elif args.model == "deepseek-pro":
     API_PROVIDER = "deepseek"
     CHAT_BASE_URL = DEEPSEEK_URL
@@ -133,7 +119,7 @@ if args.re_model:
     elif args.re_model == "gemini":
         RE_MODEL = "google/gemini-2.5-flash"
     elif args.re_model == "deepseek":
-        RE_MODEL = "deepseek-v4-flash"
+        RE_MODEL = "deepseek-flash"
     elif args.re_model == "deepseek-pro":
         RE_MODEL = "deepseek-v4-pro"
     elif args.re_model == "deepseek-chat":
@@ -160,6 +146,10 @@ LLM_CLIENT_MAX_RETRIES = int(os.getenv("LLM_CLIENT_MAX_RETRIES", "3"))
 LLM_REQUEST_MAX_RETRIES = int(os.getenv("LLM_REQUEST_MAX_RETRIES", "8" if API_PROVIDER == "deepseek" else "3"))
 LLM_BACKOFF = float(os.getenv("LLM_BACKOFF", "1.8" if API_PROVIDER == "deepseek" else "1.5"))
 DEEPSEEK_THINKING_MODE = os.getenv("DEEPSEEK_THINKING_MODE", "disabled").lower()
+UTILITY_MODEL = os.getenv("UTILITY_MODEL", "deepseek-flash")
+UTILITY_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+UTILITY_BASE_URL = DEEPSEEK_URL
+UTILITY_TIMEOUT = float(os.getenv("UTILITY_TIMEOUT", "300"))
 MODEL_SORT = MODEL #"anthropic/claude-sonnet-4.5"
 K1=80                 # coarse retrieval breadth (embedding similarity)
 K2=20                 # fine retrieval breadth (LLM re-ranking)
@@ -167,12 +157,9 @@ TOPIC_K=8            # select_topic: number of topic candidates
 EAES_MODE = args.eaes
 SEMANTIC_HIERARCHY = args.semantic_hierarchy
 RETRIEVAL_ONLY = args.retrieval_only
-UTILITY_MODEL_PATH = args.utility_model_path
-UTILITY_DEVICE = args.utility_device
-UTILITY_MAX_LENGTH = args.utility_max_length
 UTILITY_TOKEN_BUDGET = args.utility_token_budget
-if min(UTILITY_MAX_LENGTH, UTILITY_TOKEN_BUDGET) <= 0:
-    raise ValueError("Utility input length and evidence budget must be positive.")
+if UTILITY_TOKEN_BUDGET <= 0:
+    raise ValueError("Utility evidence budget must be positive.")
 if SEMANTIC_HIERARCHY and not EAES_MODE:
     raise ValueError("--semantic_hierarchy requires --eaes.")
 EAES_CHILD_CANDIDATE_LIMIT = args.eaes_child_candidate_limit

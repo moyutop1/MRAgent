@@ -5,8 +5,8 @@ Code for hierarchical conversational memory on LoCoMo and LongMemEval.
 ## Core pipeline
 
 The implementation uses one set-conditioned marginal-utility rule in memory
-construction and retrieval. The same local instruction model returns only
-`KEEP` or `DROP` for three operations:
+construction and retrieval. DeepSeek Flash returns only `KEEP` or `DROP` for
+three operations:
 
 - `WRITE`: inside the current session, retain a proposed Child only when it adds
   a new event/state, time/stage, or concrete detail.
@@ -39,18 +39,10 @@ Set at least:
 
 ```dotenv
 DEEPSEEK_API_KEY=...
-UTILITY_MODEL_PATH=/root/autodl-tmp/models/Qwen3.5-9B
-UTILITY_DEVICE=cuda
-UTILITY_MAX_LENGTH=32768
+UTILITY_MODEL=deepseek-flash
+UTILITY_TIMEOUT=300
 UTILITY_TOKEN_BUDGET=2048
 LOCAL_EMBEDDING_MODEL=/autodl-pub/models/bge-large-en-v1.5
-```
-
-The utility model is loaded from local files only. Download it before running:
-
-```bash
-hf download Qwen/Qwen3.5-9B \
-  --local-dir /root/autodl-tmp/models/Qwen3.5-9B
 ```
 
 ## Run
@@ -62,7 +54,7 @@ python run.py \
   --data locomo \
   --model deepseek-pro \
   --file unified_utility \
-  --workers 1 \
+  --workers 8 \
   --eaes \
   --semantic_hierarchy
 ```
@@ -74,7 +66,7 @@ python run.py \
   --data locomo \
   --model deepseek-pro \
   --file unified_retrieval \
-  --workers 1 \
+  --workers 8 \
   --retrieval_only \
   --eaes \
   --semantic_hierarchy

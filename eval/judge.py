@@ -22,7 +22,7 @@ if JUDGE_PROVIDER == "ofox":
     JUDGE_BASE_URL = os.getenv("OFOX_BASE_URL", "").rstrip("/")
 elif JUDGE_PROVIDER == "deepseek":
     API_KEY = os.getenv("DEEPSEEK_API_KEY")
-    JUDGE_MODEL = os.getenv("DEEPSEEK_JUDGE_MODEL", "deepseek-v4-flash")
+    JUDGE_MODEL = os.getenv("DEEPSEEK_JUDGE_MODEL", "deepseek-flash")
     JUDGE_BASE_URL = "https://api.deepseek.com"
 else:
     API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -123,7 +123,11 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
         ],
         "temperature": 0.0,
     }
-    if JUDGE_PROVIDER == "deepseek" and JUDGE_MODEL.startswith("deepseek-v4") and DEEPSEEK_THINKING_MODE == "disabled":
+    if (
+        JUDGE_PROVIDER == "deepseek"
+        and JUDGE_MODEL in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"}
+        and DEEPSEEK_THINKING_MODE == "disabled"
+    ):
         req["extra_body"] = {"thinking": {"type": "disabled"}}
     last_content = ""
     for _ in range(2):

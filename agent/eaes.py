@@ -178,6 +178,7 @@ class EAESMixin:
             "selector_diagnostics": {
                 "enabled": True,
                 "backend": "unified_utility",
+                "model": config.UTILITY_MODEL,
                 "operation": "SELECT",
                 "token_budget": config.UTILITY_TOKEN_BUDGET,
                 "candidate_count": len(nodes),

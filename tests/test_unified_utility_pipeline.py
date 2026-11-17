@@ -9,6 +9,7 @@ import common
 test_config = types.SimpleNamespace(
     CHILD_MAX_TURNS=8,
     UTILITY_TOKEN_BUDGET=2048,
+    UTILITY_MODEL="test-utility",
     SEMANTIC_HIERARCHY=True,
     EAES_CHILD_CANDIDATE_LIMIT=30,
     EAES_PARENT_CHILD_ROUTE_LIMIT=30,

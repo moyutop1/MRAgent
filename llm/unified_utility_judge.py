@@ -1,6 +1,5 @@
 import json
 import threading
-from pathlib import Path
 
 from common import config
 
@@ -29,34 +28,25 @@ UTILITY_SYSTEM_PROMPT = (
 
 
 class UnifiedUtilityJudge:
-    """One local instruction model for WRITE, ABSTRACT, and SELECT gain."""
+    """Use DeepSeek Flash for WRITE, ABSTRACT, and SELECT utility."""
 
     def __init__(self):
-        from transformers import AutoTokenizer, Qwen3_5ForCausalLM
-        import torch
+        from openai import OpenAI
 
-        model_path = Path(config.UTILITY_MODEL_PATH).expanduser().resolve()
-        if not model_path.is_dir():
-            raise ValueError(
-                f"UTILITY_MODEL_PATH must be a local model directory: {model_path}"
-            )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, local_files_only=True
+        if not config.UTILITY_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY is required by the utility judge")
+        self.client = OpenAI(
+            api_key=config.UTILITY_API_KEY,
+            base_url=config.UTILITY_BASE_URL,
+            timeout=config.UTILITY_TIMEOUT,
+            max_retries=config.LLM_REQUEST_MAX_RETRIES,
         )
-        self.model = Qwen3_5ForCausalLM.from_pretrained(
-            model_path,
-            dtype=torch.bfloat16 if config.UTILITY_DEVICE != "cpu" else torch.float32,
-            device_map="auto" if config.UTILITY_DEVICE != "cpu" else None,
-            local_files_only=True,
-        )
-        if config.UTILITY_DEVICE == "cpu":
-            self.model.to("cpu")
-        self.model.eval()
-        self._generation_lock = threading.Lock()
 
-    def count_tokens(self, value):
+    @staticmethod
+    def count_tokens(value):
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
+        # Stable local proxy for the evidence budget; API billing uses server tokens.
+        return max(1, (len(text) + 3) // 4)
 
     def keep(self, operation, condition, selected_set, candidate, source=None):
         payload = {
@@ -67,37 +57,22 @@ class UnifiedUtilityJudge:
         }
         if source is not None:
             payload["source"] = source
-        messages = [
-            {
-                "role": "system",
-                "content": UTILITY_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ]
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
+        response = self.client.chat.completions.create(
+            model=config.UTILITY_MODEL,
+            messages=[
+                {"role": "system", "content": UTILITY_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.0,
+            max_tokens=8,
+            extra_body={"thinking": {"type": "disabled"}},
         )
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        if inputs.input_ids.shape[1] > config.UTILITY_MAX_LENGTH:
-            raise ValueError(
-                f"utility input has {inputs.input_ids.shape[1]} tokens; "
-                f"maximum is {config.UTILITY_MAX_LENGTH}"
-            )
-        inputs = {key: value.to(self.model.device) for key, value in inputs.items()}
-        with self._generation_lock:
-            output = self.model.generate(
-                **inputs,
-                max_new_tokens=8,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-        answer = self.tokenizer.decode(
-            output[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip().upper()
-        return answer.startswith("KEEP")
+        answer = str(response.choices[0].message.content or "").strip().upper()
+        if answer.startswith("KEEP"):
+            return True
+        if answer.startswith("DROP"):
+            return False
+        raise ValueError(f"invalid utility decision: {answer!r}")
 
 
 def get_unified_utility_judge():

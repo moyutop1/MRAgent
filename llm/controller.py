@@ -22,7 +22,9 @@ def _format_exception_chain(exc: Exception) -> str:
 
 
 def _is_deepseek_v4_model(model: str) -> bool:
-    return config.API_PROVIDER == "deepseek" and str(model).startswith("deepseek-v4")
+    return config.API_PROVIDER == "deepseek" and str(model) in {
+        "deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"
+    }
 
 
 def _add_deepseek_defaults(req: Dict[str, Any], model: str) -> None:

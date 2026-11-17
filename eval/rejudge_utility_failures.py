@@ -32,7 +32,7 @@ WRITE_CONDITION = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Rejudge Gold-related utility failures with the main or local model."
+        description="Rejudge Gold-related utility failures with a selected judge."
     )
     parser.add_argument("--model", default="deepseek-pro", help="Main model alias")
     parser.add_argument("--rewrite", required=True, type=Path)
@@ -40,9 +40,9 @@ def parse_args():
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--local_judge",
+        "--utility_judge",
         action="store_true",
-        help="Use the configured local unified utility model instead of the main API model.",
+        help="Use the configured unified utility model instead of --model.",
     )
     parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
@@ -224,11 +224,11 @@ def main():
         return
 
     from common import config
-    if args.local_judge:
+    if args.utility_judge:
         from llm.unified_utility_judge import get_unified_utility_judge
 
         judge = get_unified_utility_judge()
-        judge_model = str(config.UTILITY_MODEL_PATH)
+        judge_model = config.UTILITY_MODEL
     else:
         from llm.controller import LLM
         from llm.unified_utility_judge import UTILITY_SYSTEM_PROMPT
@@ -238,7 +238,7 @@ def main():
         judge = LLM()
         judge_model = config.MODEL
     output_path = args.output or args.retrieval.with_name(
-        f"{args.retrieval.stem}_{'local_' if args.local_judge else ''}utility_rejudge.jsonl"
+        f"{args.retrieval.stem}_utility_rejudge.jsonl"
     )
     keep_count = 0
     with output_path.open("w", encoding="utf-8") as output:
@@ -249,7 +249,7 @@ def main():
                 "selected_set": case["selected_set"],
                 "candidate": case["candidate"],
             }
-            if args.local_judge:
+            if args.utility_judge:
                 decision = "KEEP" if judge.keep(**payload) else "DROP"
             else:
                 response = judge.chat_with_tool(
@@ -277,15 +277,15 @@ def main():
                 "selected_count": len(case["selected_set"]),
                 "candidate": case["candidate"],
             })
-            if args.local_judge:
-                result.update({"local_model": judge_model, "local_decision": decision})
+            if args.utility_judge:
+                result.update({"utility_model": judge_model, "utility_decision": decision})
             else:
                 result.update({"main_model": judge_model, "main_decision": decision})
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
             output.flush()
             print(f"[{index}/{len(cases)}] {case['case_id']} -> {decision}")
     print(
-        f"saved {output_path} | {'local' if args.local_judge else 'main'} "
+        f"saved {output_path} | {'utility' if args.utility_judge else 'main'} "
         f"KEEP={keep_count}/{len(cases)} ({keep_count / len(cases):.1%})"
     )
 

@@ -181,8 +181,11 @@ def get_question(dataset, agent, question_list, sample_id, memory, result_path, 
 
 
 def get_question_retrieval(dataset, agent, question_list, sample_id, result_path, question_embeddings=None):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     logger.info(f"---------------retrieval-only {sample_id}-------------------")
     question_rows = _select_question_rows(question_list, sample_id)
+    memory_system = agent.memory
 
     done_count = 0
     if os.path.exists(result_path):
@@ -194,8 +197,7 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
     if done_count > 0:
         logger.info(f"Resuming retrieval {sample_id} from question {done_count + 1} (already done: {done_count})")
 
-    metric_rows = []
-    for i, qa in question_rows[done_count:]:
+    def _run_one_question(i, qa):
         category = qa.get("category")
         question = Agent.question_format(dataset, qa)
         override_question_time = None
@@ -205,12 +207,15 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
             if qdr:
                 lm_current_date = qdr.split(" ")[0].replace("/", "-")
         try:
+            q_llm = LLM()
+            q_mc = MemoryController(memory_system, q_llm)
+            q_agent = Agent(q_llm, memory_system, q_mc)
             question_emb = question_embeddings[i - 1]
-            retrieval = agent.retrieve_question_evidence(
+            retrieval = q_agent.retrieve_question_evidence(
                 question, category, question_emb, override_question_time, lm_current_date)
             gold_memory_diagnostics = None
             if retrieval.get("mode") == "eaes":
-                gold_memory_diagnostics = agent.diagnose_eaes_gold_memories(
+                gold_memory_diagnostics = q_agent.diagnose_eaes_gold_memories(
                     qa.get("evidence"), retrieval, question_emb)
             stage_metrics = {}
             raw_stage_metrics = {}
@@ -242,7 +247,6 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "gold_memory_diagnostics": gold_memory_diagnostics,
                 "retrieval": compact_eaes_retrieval(retrieval),
             }
-            metric_rows.append(row)
         except Exception as e:
             logger.error(f"retrieval question{i} failed: {e}", exc_info=True)
             row = {
@@ -254,7 +258,29 @@ def get_question_retrieval(dataset, agent, question_list, sample_id, result_path
                 "evidence": qa.get("evidence"),
                 "error": str(e),
             }
+        return row
 
+    remaining = question_rows[done_count:]
+    results = {}
+    with ThreadPoolExecutor(max_workers=config.QUESTION_WORKERS) as executor:
+        futures = {
+            executor.submit(_run_one_question, i, qa): i
+            for i, qa in remaining
+        }
+        for future in as_completed(futures):
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                logger.error(f"retrieval question{i} future raised: {e}", exc_info=True)
+
+    metric_rows = []
+    for i, _qa in remaining:
+        row = results.get(i)
+        if row is None:
+            continue
+        if "metrics" in row:
+            metric_rows.append(row)
         with open(result_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False, default=list) + "\n")
 

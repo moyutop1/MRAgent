@@ -51,15 +51,13 @@ class _Judge:
         self.decisions = iter(decisions)
         self.calls = []
 
-    def keep(self, operation, condition, selected_set, candidate, source=None):
+    def estimate(
+            self, operation, source, selected_set, candidate, context=None
+    ):
         self.calls.append((operation, len(selected_set), candidate))
-        return next(self.decisions)
-
-    def select(self, query, selected_set, candidate):
-        self.calls.append(("SELECT", len(selected_set), candidate))
         keep = next(self.decisions)
         return {
-            "new_answer_unit": keep,
+            "new_target_unit": keep,
             "necessary_constraint": False,
             "marginal_utility": int(keep),
             "keep": keep,
@@ -77,12 +75,18 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
         judge.client.chat.completions.create.return_value = types.SimpleNamespace(
             choices=[types.SimpleNamespace(message=types.SimpleNamespace(
                 content=(
-                    '{"new_answer_unit":false,'
+                    '{"new_target_unit":false,'
                     '"necessary_constraint":true}'
                 )
             ))]
         )
-        utility = judge.select("when?", [], {"rewrite_content": "May 2"})
+        utility = judge.estimate(
+            "SELECT",
+            {"rewrite_content": "May 2"},
+            [],
+            {"rewrite_content": "May 2"},
+            {"query": "when?"},
+        )
         self.assertEqual(utility["marginal_utility"], 1)
         self.assertTrue(utility["keep"])
 
@@ -112,7 +116,7 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             "llm.unified_utility_judge.get_unified_utility_judge",
             return_value=judge,
         ):
-            accepted = _keep_new_children(candidates, kept)
+            accepted = _keep_new_children(candidates, kept, "source dialogue")
         self.assertEqual(accepted, candidates[:1])
         self.assertEqual([call[:2] for call in judge.calls], [("WRITE", 0), ("WRITE", 1)])
 

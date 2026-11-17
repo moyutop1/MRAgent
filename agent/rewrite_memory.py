@@ -475,40 +475,27 @@ def _utility_child(memory):
     }
 
 
-def _keep_new_children(candidates, kept_children, logger=None):
+def _keep_new_children(candidates, kept_children, source, logger=None):
     from llm.unified_utility_judge import get_unified_utility_judge
 
     judge = get_unified_utility_judge()
     accepted = []
     for candidate in candidates:
-        keep = judge.keep(
-            "WRITE",
-            {
-                "scope": "current session only",
-                "task": "strict duplicate detection only",
-                "default": "KEEP",
-                "drop_only_if": (
-                    "the candidate describes the same event or state at the "
-                    "same time or stage and every factual proposition is "
-                    "already present in the kept children"
-                ),
-                "keep_if": (
-                    "it adds any new entity, attribute, value, time, stage, "
-                    "reason, result, opinion, relation, process, or detail; "
-                    "sharing a person or broad topic is not duplication"
-                ),
-            },
-            [_utility_child(memory) for memory in kept_children],
-            _utility_child(candidate),
+        utility = judge.estimate(
+            operation="WRITE",
+            source=source,
+            selected_set=[_utility_child(memory) for memory in kept_children],
+            candidate=_utility_child(candidate),
         )
         if logger:
             logger.info(
-                "[write-utility] decision=%s selected=%d candidate=%s",
-                "KEEP" if keep else "DROP",
+                "[write-utility] decision=%s utility=%s selected=%d candidate=%s",
+                "KEEP" if utility["keep"] else "DROP",
+                json.dumps(utility, ensure_ascii=False),
                 len(kept_children),
                 json.dumps(_utility_child(candidate), ensure_ascii=False),
             )
-        if keep:
+        if utility["keep"]:
             kept_children.append(candidate)
             accepted.append(candidate)
     return accepted
@@ -588,22 +575,22 @@ def _build_session_parents(llm, turns, children):
             "rewrite_content": rewrite_content,
             "child_ids": child_ids,
         }
-        if not judge.keep(
-            "ABSTRACT",
-            {
-                "scope": "current session only",
-                "criterion": "supported, distinct, useful high-level abstraction",
+        utility = judge.estimate(
+            operation="ABSTRACT",
+            source={
+                "complete_raw_session": raw_session,
+                "child_group": payload["child_group"],
             },
-            [
+            selected_set=[
                 {
                     "parent_id": parent["parent_id"],
                     "rewrite_content": parent["rewrite_content"],
                 }
                 for parent in parents
             ],
-            candidate,
-            {"complete_raw_session": raw_session, "child_group": payload["child_group"]},
-        ):
+            candidate=candidate,
+        )
+        if not utility["keep"]:
             continue
         parents.append(candidate)
         for child in group:
@@ -723,7 +710,10 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
                 ),
             )
         output["sentence"] = _keep_new_children(
-            _as_list(output.get("sentence")), generated_memories, logger=logger
+            _as_list(output.get("sentence")),
+            generated_memories,
+            _child_window_source_text(window, turns, conversation_time),
+            logger=logger,
         )
         window_outputs.append(output)
 

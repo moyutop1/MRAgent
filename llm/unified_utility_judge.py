@@ -7,36 +7,40 @@ from common import config
 _JUDGE = None
 _JUDGE_LOCK = threading.Lock()
 
-UTILITY_SYSTEM_PROMPT = (
-    "You are a unified set-conditioned marginal-utility judge. "
-    "Decide whether CANDIDATE adds useful information under CONDITION "
-    "given SELECTED_SET. Positive conditional marginal value means the "
-    "candidate contributes at least one supported fact not already in the set.\n"
-    "WRITE is strict duplicate detection, not importance filtering. Default "
-    "to KEEP. DROP only when the candidate describes the same event or state "
-    "at the same time or stage and every factual proposition is already "
-    "contained in SELECTED_SET. The same person, topic, or activity is not "
-    "enough to DROP. Any new entity, attribute, value, time, stage, reason, "
-    "result, opinion, relation, process, or concrete detail requires KEEP.\n"
-    "ABSTRACT: KEEP only if the abstraction is supported by SOURCE, is "
-    "more useful than merely repeating its children, and adds a distinct "
-    "profile, event synopsis, entity relation, or stable high-level state.\n"
-    "Return exactly KEEP or DROP."
-)
+UTILITY_SYSTEM_PROMPT = """You are a shared set-conditioned marginal-utility estimator. Use CONDITION to identify the operation's target semantic units. Compare CANDIDATE with SELECTED_SET and use SOURCE as the only factual authority. Return only valid JSON:
+{"new_target_unit": true, "necessary_constraint": false}
 
-SELECT_SYSTEM_PROMPT = """You estimate two binary components of a candidate memory's set-conditioned marginal answer utility. Return only valid JSON:
-{"new_answer_unit": true, "necessary_constraint": false}
-
-Definitions:
-- new_answer_unit is true only when CANDIDATE supplies a query-requested answer value or event instance that SELECTED_SET does not already supply.
-- For list, "what/which things", and multi-event questions, each distinct requested value or event is one answer unit.
-- For count questions, only a distinct countable event instance is a new answer unit. Extra details about an already represented event are not new units.
-- For a single-fact question, a candidate is a new answer unit only when it fills the requested answer slot and that slot is not already filled.
-- necessary_constraint is true only when CANDIDATE supplies a missing entity, relation direction, time, quantity, cause, update, conflict resolution, or disambiguating fact required to derive or verify an answer unit.
-- A related detail, explanation, emotion, example, paraphrase, or Parent/Child restatement is not necessary unless the query explicitly asks for it.
-- The same session or topic does not imply duplication, and different sessions do not imply diversity. Judge query-dependent answer units, not surface topic diversity.
-- Both fields must be false when the candidate is merely relevant but adds no new answer unit or required constraint.
+Rules:
+- new_target_unit is true only when CANDIDATE adds a SOURCE-supported target unit defined by CONDITION that SELECTED_SET does not already contain.
+- necessary_constraint is true only when CANDIDATE adds a SOURCE-supported entity, relation direction, time, quantity, cause, update, or disambiguating fact required to construct or verify a target unit.
+- A related detail, explanation, emotion, example, paraphrase, or restatement has no marginal utility unless CONDITION explicitly makes it a target or required constraint.
+- The same topic does not imply duplication, and a different session does not imply a new target unit.
+- Both fields are false when CANDIDATE is unsupported, redundant, or merely relevant.
 Do not output KEEP/DROP, scores, explanations, or extra fields."""
+
+UTILITY_CONDITIONS = {
+    "WRITE": {
+        "goal": "preserve supported atomic facts without exact repetition",
+        "target_unit": (
+            "an atomic factual proposition distinguished by its entity, event "
+            "or state, time or stage, attribute, value, relation, reason, "
+            "process, result, or opinion"
+        ),
+    },
+    "ABSTRACT": {
+        "goal": "retain supported nonredundant high-level abstractions",
+        "target_unit": (
+            "a person profile, event synopsis, entity relation, or stable "
+            "high-level state that is not a paraphrase of its source children"
+        ),
+    },
+    "SELECT": {
+        "goal": "construct a minimal sufficient evidence set for the query",
+        "target_unit": (
+            "a query-requested answer value or distinct countable event instance"
+        ),
+    },
+}
 
 
 class UnifiedUtilityJudge:
@@ -60,42 +64,22 @@ class UnifiedUtilityJudge:
         # Stable local proxy for the evidence budget; API billing uses server tokens.
         return max(1, (len(text) + 3) // 4)
 
-    def keep(self, operation, condition, selected_set, candidate, source=None):
+    def estimate(
+            self, operation, source, selected_set, candidate, context=None
+    ):
+        condition = {"operation": operation, **UTILITY_CONDITIONS[operation]}
+        if context:
+            condition["context"] = context
         payload = {
-            "operation": operation,
             "condition": condition,
+            "source": source,
             "selected_set": selected_set,
             "candidate": candidate,
         }
-        if source is not None:
-            payload["source"] = source
         response = self.client.chat.completions.create(
             model=config.UTILITY_MODEL,
             messages=[
                 {"role": "system", "content": UTILITY_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.0,
-            max_tokens=8,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        answer = str(response.choices[0].message.content or "").strip().upper()
-        if answer.startswith("KEEP"):
-            return True
-        if answer.startswith("DROP"):
-            return False
-        raise ValueError(f"invalid utility decision: {answer!r}")
-
-    def select(self, query, selected_set, candidate):
-        payload = {
-            "query": query,
-            "selected_set": selected_set,
-            "candidate": candidate,
-        }
-        response = self.client.chat.completions.create(
-            model=config.UTILITY_MODEL,
-            messages=[
-                {"role": "system", "content": SELECT_SYSTEM_PROMPT},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             temperature=0.0,
@@ -104,15 +88,15 @@ class UnifiedUtilityJudge:
             extra_body={"thinking": {"type": "disabled"}},
         )
         result = json.loads(response.choices[0].message.content)
-        for field in ("new_answer_unit", "necessary_constraint"):
+        for field in ("new_target_unit", "necessary_constraint"):
             if not isinstance(result.get(field), bool):
-                raise ValueError(f"invalid SELECT utility component: {field}")
-        marginal_utility = (
-            int(result["new_answer_unit"])
-            + int(result["necessary_constraint"])
+                raise ValueError(f"invalid utility component: {field}")
+        marginal_utility = int(
+            result["new_target_unit"] or result["necessary_constraint"]
         )
         return {
-            **result,
+            "new_target_unit": result["new_target_unit"],
+            "necessary_constraint": result["necessary_constraint"],
             "marginal_utility": marginal_utility,
             "keep": marginal_utility > 0,
         }

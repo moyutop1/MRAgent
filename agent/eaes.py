@@ -153,16 +153,18 @@ class EAESMixin:
                     "decision": "DROP", "reason": "token_budget",
                 })
                 continue
-            utility = judge.select(
-                self._eaes_query_question(question),
-                [item["payload"] for item in selected],
-                node["payload"],
+            utility = judge.estimate(
+                operation="SELECT",
+                source=node["payload"],
+                selected_set=[item["payload"] for item in selected],
+                candidate=node["payload"],
+                context={"query": self._eaes_query_question(question)},
             )
             decisions.append({
                 "kind": node["kind"], "id": node["id"],
                 "decision": "KEEP" if utility["keep"] else "DROP",
                 "score": node["score"],
-                "new_answer_unit": utility["new_answer_unit"],
+                "new_target_unit": utility["new_target_unit"],
                 "necessary_constraint": utility["necessary_constraint"],
                 "marginal_utility": utility["marginal_utility"],
             })
@@ -179,10 +181,8 @@ class EAESMixin:
                 "backend": "unified_utility",
                 "model": config.UTILITY_MODEL,
                 "operation": "SELECT",
-                "utility_definition": "answer_unit_v1",
-                "utility_formula": (
-                    "I(new_answer_unit) + I(necessary_constraint)"
-                ),
+                "utility_definition": "unified_target_unit_v1",
+                "utility_formula": "I(new_target_unit OR necessary_constraint)",
                 "token_budget": config.UTILITY_TOKEN_BUDGET,
                 "candidate_count": len(nodes),
                 "selected_count": len(selected),

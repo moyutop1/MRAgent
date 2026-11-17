@@ -39,7 +39,7 @@ Set at least:
 
 ```dotenv
 DEEPSEEK_API_KEY=...
-UTILITY_MODEL_PATH=/root/autodl-tmp/models/Qwen3-4B-Instruct-2507
+UTILITY_MODEL_PATH=/root/autodl-tmp/models/Qwen3.5-9B
 UTILITY_DEVICE=cuda
 UTILITY_MAX_LENGTH=32768
 UTILITY_TOKEN_BUDGET=2048
@@ -49,8 +49,8 @@ LOCAL_EMBEDDING_MODEL=/autodl-pub/models/bge-large-en-v1.5
 The utility model is loaded from local files only. Download it before running:
 
 ```bash
-hf download Qwen/Qwen3-4B-Instruct-2507 \
-  --local-dir /root/autodl-tmp/models/Qwen3-4B-Instruct-2507
+hf download Qwen/Qwen3.5-9B \
+  --local-dir /root/autodl-tmp/models/Qwen3.5-9B
 ```
 
 ## Run

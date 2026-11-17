@@ -32,13 +32,18 @@ WRITE_CONDITION = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Rejudge Gold-related Qwen utility failures with the main model."
+        description="Rejudge Gold-related utility failures with the main or local model."
     )
-    parser.add_argument("--model", required=True, help="Main model alias, e.g. deepseek-pro")
+    parser.add_argument("--model", default="deepseek-pro", help="Main model alias")
     parser.add_argument("--rewrite", required=True, type=Path)
     parser.add_argument("--retrieval", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--local_judge",
+        action="store_true",
+        help="Use the configured local unified utility model instead of the main API model.",
+    )
     parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 
@@ -219,16 +224,23 @@ def main():
         return
 
     from common import config
-    from llm.controller import LLM
-    from llm.unified_utility_judge import UTILITY_SYSTEM_PROMPT
+    if args.local_judge:
+        from llm.unified_utility_judge import get_unified_utility_judge
 
-    if not config.API_KEY:
-        raise RuntimeError(f"API key is empty for model {args.model}")
-    llm = LLM()
+        judge = get_unified_utility_judge()
+        judge_model = str(config.UTILITY_MODEL_PATH)
+    else:
+        from llm.controller import LLM
+        from llm.unified_utility_judge import UTILITY_SYSTEM_PROMPT
+
+        if not config.API_KEY:
+            raise RuntimeError(f"API key is empty for model {args.model}")
+        judge = LLM()
+        judge_model = config.MODEL
     output_path = args.output or args.retrieval.with_name(
-        f"{args.retrieval.stem}_utility_rejudge.jsonl"
+        f"{args.retrieval.stem}_{'local_' if args.local_judge else ''}utility_rejudge.jsonl"
     )
-    main_keep = 0
+    keep_count = 0
     with output_path.open("w", encoding="utf-8") as output:
         for index, case in enumerate(cases, start=1):
             payload = {
@@ -237,37 +249,44 @@ def main():
                 "selected_set": case["selected_set"],
                 "candidate": case["candidate"],
             }
-            response = llm.chat_with_tool(
-                messages=[
-                    {"role": "system", "content": UTILITY_SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                model=config.MODEL,
-                use_tool=False,
-                temperature=0.0,
-                max_tokens=8,
-            )
-            answer = str(response.choices[0].message.content or "").strip().upper()
-            if not answer.startswith(("KEEP", "DROP")):
-                raise ValueError(f"invalid utility decision for {case['case_id']}: {answer!r}")
-            decision = "KEEP" if answer.startswith("KEEP") else "DROP"
-            main_keep += decision == "KEEP"
+            if args.local_judge:
+                decision = "KEEP" if judge.keep(**payload) else "DROP"
+            else:
+                response = judge.chat_with_tool(
+                    messages=[
+                        {"role": "system", "content": UTILITY_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    ],
+                    model=config.MODEL,
+                    use_tool=False,
+                    temperature=0.0,
+                    max_tokens=8,
+                )
+                answer = str(response.choices[0].message.content or "").strip().upper()
+                if not answer.startswith(("KEEP", "DROP")):
+                    raise ValueError(
+                        f"invalid utility decision for {case['case_id']}: {answer!r}"
+                    )
+                decision = "KEEP" if answer.startswith("KEEP") else "DROP"
+            keep_count += decision == "KEEP"
             result = {
                 key: value for key, value in case.items()
                 if key not in {"condition", "selected_set", "candidate"}
             }
             result.update({
-                "main_model": config.MODEL,
-                "main_decision": decision,
                 "selected_count": len(case["selected_set"]),
                 "candidate": case["candidate"],
             })
+            if args.local_judge:
+                result.update({"local_model": judge_model, "local_decision": decision})
+            else:
+                result.update({"main_model": judge_model, "main_decision": decision})
             output.write(json.dumps(result, ensure_ascii=False) + "\n")
             output.flush()
             print(f"[{index}/{len(cases)}] {case['case_id']} -> {decision}")
     print(
-        f"saved {output_path} | main KEEP={main_keep}/{len(cases)} "
-        f"({main_keep / len(cases):.1%})"
+        f"saved {output_path} | {'local' if args.local_judge else 'main'} "
+        f"KEEP={keep_count}/{len(cases)} ({keep_count / len(cases):.1%})"
     )
 
 

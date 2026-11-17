@@ -1,3 +1,2 @@
-# Optional; install on the AutoDL machine only. Reuse its existing CUDA torch.
-# Qwen3 requires transformers >= 4.51.0. No sentence-transformers upgrade needed.
-transformers>=4.51.0,<5
+# Optional selector dependencies reuse the Qwen3.5-compatible main environment.
+transformers==5.20.2

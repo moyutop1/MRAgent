@@ -20,9 +20,9 @@ parser.add_argument(
     "--utility_model_path",
     default=os.getenv(
         "UTILITY_MODEL_PATH",
-        "/root/autodl-tmp/models/Qwen3-4B-Instruct-2507",
+        "/root/autodl-tmp/models/Qwen3.5-9B",
     ),
-    help="Local Qwen3 instruction-model directory used by the unified utility judge.",
+    help="Local Qwen3.5 model directory used by the unified utility judge.",
 )
 parser.add_argument("--utility_device", default=os.getenv("UTILITY_DEVICE", "cuda"))
 parser.add_argument(

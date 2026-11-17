@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import threading
 
@@ -8,6 +9,7 @@ from prompts.schema import check_composite_tag
 
 _JUDGE = None
 _JUDGE_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 
 UTILITY_SYSTEM_PROMPT = (
     "You are a unified set-conditioned marginal-utility judge. "
@@ -88,25 +90,62 @@ class UnifiedUtilityJudge:
         raise ValueError(f"invalid utility decision: {answer!r}")
 
     def generate_cue(self, question):
-        response = self.client.chat.completions.create(
-            model=config.UTILITY_MODEL,
-            messages=[
-                {"role": "system", "content": CUE_SYSTEM_PROMPT},
-                {"role": "user", "content": str(question).strip()},
-            ],
-            temperature=0.0,
-            max_tokens=96,
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        data = json.loads(response.choices[0].message.content)
-        prefix = re.sub(r"\s+", " ", str(data.get("prefix") or "")).strip()
-        facet = re.sub(r"\s+", " ", str(data.get("facet") or "")).strip()
-        cue = f"{prefix}.{facet}"
-        valid, error = check_composite_tag(cue)
-        if not valid:
-            raise ValueError(f"invalid retrieval cue {cue!r}: {error}")
-        return cue
+        messages = [
+            {"role": "system", "content": CUE_SYSTEM_PROMPT},
+            {"role": "user", "content": str(question).strip()},
+        ]
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(
+                    model=config.UTILITY_MODEL,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=96,
+                    response_format={"type": "json_object"},
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+            except Exception as error:
+                logger.error(
+                    "Cue API retries exhausted; using raw-query fallback: %s",
+                    error,
+                )
+                return None
+
+            output = str(response.choices[0].message.content or "").strip()
+            try:
+                data = json.loads(output)
+                if not isinstance(data, dict):
+                    raise ValueError("Cue output must be a JSON object")
+                prefix = re.sub(
+                    r"\s+", " ", str(data.get("prefix") or "")
+                ).strip()
+                facet = re.sub(
+                    r"\s+", " ", str(data.get("facet") or "")
+                ).strip()
+                cue = f"{prefix}.{facet}"
+                valid, error = check_composite_tag(cue)
+                if valid:
+                    return cue
+                raise ValueError(error)
+            except (json.JSONDecodeError, ValueError) as error:
+                logger.warning(
+                    "Invalid Cue on attempt %d/3: %s", attempt + 1, error
+                )
+                if attempt == 2:
+                    break
+                messages.extend([
+                    {"role": "assistant", "content": output},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous Cue was invalid. "
+                            f"Validation error: {error}. "
+                            "Correct it and return only the required JSON."
+                        ),
+                    },
+                ])
+        logger.error("Cue correction retries exhausted; using raw-query fallback")
+        return None
 
 
 def get_unified_utility_judge():

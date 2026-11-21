@@ -7,7 +7,7 @@ from common import config
 _JUDGE = None
 _JUDGE_LOCK = threading.Lock()
 
-UTILITY_SYSTEM_PROMPT = """You are a shared set-conditioned marginal-utility estimator. Use CONDITION to identify the operation's target semantic units. Compare CANDIDATE with SELECTED_SET and use SOURCE as the only factual authority. Return only valid JSON:
+UTILITY_SYSTEM_PROMPT = """You are a shared set-conditioned marginal-utility estimator. Use CONDITION to identify the operation's target semantic units. Compare CANDIDATE with SELECTED_SET and use SOURCE to verify CANDIDATE. For SELECT, CANDIDATE and SELECTED_SET are retrieved factual evidence. Return only valid JSON:
 {"new_target_unit": true, "necessary_support": false}
 
 Rules:
@@ -38,6 +38,10 @@ UTILITY_CONDITIONS = {
         "goal": "construct a minimal sufficient evidence set for the query",
         "target_unit": (
             "a query-requested answer value or distinct countable event instance"
+        ),
+        "comparison": (
+            "candidate is tested for removal from the active evidence set; "
+            "selected_set contains all other active evidence"
         ),
     },
 }

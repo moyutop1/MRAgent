@@ -114,7 +114,7 @@ class EAESMixin:
     def select_eaes_evidence(
             self, question, _query_plan, candidates, parent_candidates=None
     ):
-        """Apply SELECT utility in retrieval-score order under a hard budget."""
+        """Remove candidates whose absence does not reduce answer utility."""
         from llm.unified_utility_judge import get_unified_utility_judge
 
         judge = get_unified_utility_judge()
@@ -143,22 +143,20 @@ class EAESMixin:
                 })
         nodes.sort(key=lambda node: (-node["score"], node["kind"], node["id"]))
 
-        selected = []
+        selected = nodes.copy()
         decisions = []
-        for node in nodes:
-            proposed = [item["payload"] for item in selected] + [node["payload"]]
-            if judge.count_tokens(proposed) > config.UTILITY_TOKEN_BUDGET:
-                decisions.append({
-                    "kind": node["kind"], "id": node["id"],
-                    "decision": "DROP", "reason": "token_budget",
-                })
-                continue
+        # Test low-score candidates first so the stronger copy survives redundancy.
+        for node in reversed(nodes):
+            remaining = [item for item in selected if item is not node]
             utility = judge.estimate(
                 operation="SELECT",
                 source=node["payload"],
-                selected_set=[item["payload"] for item in selected],
+                selected_set=[item["payload"] for item in remaining],
                 candidate=node["payload"],
-                context={"query": self._eaes_query_question(question)},
+                context={
+                    "query": self._eaes_query_question(question),
+                    "selection_mode": "backward_elimination",
+                },
             )
             decisions.append({
                 "kind": node["kind"], "id": node["id"],
@@ -168,11 +166,14 @@ class EAESMixin:
                 "necessary_support": utility["necessary_support"],
                 "marginal_utility": utility["marginal_utility"],
             })
-            if utility["keep"]:
-                selected.append(node)
+            if not utility["keep"]:
+                selected.remove(node)
 
         children = [node["candidate"] for node in selected if node["kind"] == "child"]
         parents = [node["candidate"] for node in selected if node["kind"] == "parent"]
+        selected_tokens = judge.count_tokens(
+            [node["payload"] for node in selected]
+        )
         return {
             "answer_items": [{"evidence": [child]} for child in children],
             "selected_parent_memories": parents,
@@ -183,12 +184,13 @@ class EAESMixin:
                 "operation": "SELECT",
                 "utility_definition": "unified_target_support_v1",
                 "utility_formula": "I(new_target_unit OR necessary_support)",
+                "selection_direction": "backward_elimination",
                 "token_budget": config.UTILITY_TOKEN_BUDGET,
+                "budget_enforced": False,
+                "budget_exceeded": selected_tokens > config.UTILITY_TOKEN_BUDGET,
                 "candidate_count": len(nodes),
                 "selected_count": len(selected),
-                "selected_tokens": judge.count_tokens(
-                    [node["payload"] for node in selected]
-                ),
+                "selected_tokens": selected_tokens,
                 "decisions": decisions,
             },
         }

@@ -132,8 +132,8 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
         self.assertIs(session["children"][child.memory_id], memory.eaes_notes[child.memory_id])
         self.assertIs(session["parents"][parent.parent_id], memory.eaes_parent_nodes[parent.parent_id])
 
-    def test_select_uses_one_ordered_marginal_utility_pass(self):
-        judge = _Judge([True, False])
+    def test_select_uses_backward_marginal_elimination(self):
+        judge = _Judge([False, True])
         mixin = EAESMixin()
         children = [{
             "memory_id": "M1", "score": 0.9,
@@ -147,7 +147,11 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             selected = mixin.select_eaes_evidence("query", {}, children, parents)
         self.assertEqual(len(selected["answer_items"]), 1)
         self.assertEqual(selected["selected_parent_memories"], [])
-        self.assertEqual([call[:2] for call in judge.calls], [("SELECT", 0), ("SELECT", 1)])
+        self.assertEqual([call[:2] for call in judge.calls], [("SELECT", 1), ("SELECT", 0)])
+        self.assertEqual(
+            selected["selector_diagnostics"]["selection_direction"],
+            "backward_elimination",
+        )
 
 
 if __name__ == "__main__":

@@ -163,7 +163,7 @@ class EAESMixin:
                 "decision": "KEEP" if utility["keep"] else "DROP",
                 "score": node["score"],
                 "new_target_unit": utility["new_target_unit"],
-                "necessary_support": utility["necessary_support"],
+                "necessary_constraint": utility["necessary_constraint"],
                 "marginal_utility": utility["marginal_utility"],
             })
             if not utility["keep"]:
@@ -182,8 +182,8 @@ class EAESMixin:
                 "backend": "unified_utility",
                 "model": config.UTILITY_MODEL,
                 "operation": "SELECT",
-                "utility_definition": "unified_target_support_v1",
-                "utility_formula": "I(new_target_unit OR necessary_support)",
+                "utility_definition": "unified_target_unit_v1",
+                "utility_formula": "I(new_target_unit OR necessary_constraint)",
                 "selection_direction": "backward_elimination",
                 "token_budget": config.UTILITY_TOKEN_BUDGET,
                 "budget_enforced": False,

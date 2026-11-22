@@ -58,7 +58,7 @@ class _Judge:
         keep = next(self.decisions)
         return {
             "new_target_unit": keep,
-            "necessary_support": False,
+            "necessary_constraint": False,
             "marginal_utility": int(keep),
             "keep": keep,
         }
@@ -76,7 +76,7 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             choices=[types.SimpleNamespace(message=types.SimpleNamespace(
                 content=(
                     '{"new_target_unit":false,'
-                    '"necessary_support":true}'
+                    '"necessary_constraint":true}'
                 )
             ))]
         )

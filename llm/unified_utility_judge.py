@@ -8,12 +8,12 @@ _JUDGE = None
 _JUDGE_LOCK = threading.Lock()
 
 UTILITY_SYSTEM_PROMPT = """You are a shared set-conditioned marginal-utility estimator. Use CONDITION to identify the operation's target semantic units. Compare CANDIDATE with SELECTED_SET and use SOURCE to verify CANDIDATE. For SELECT, CANDIDATE and SELECTED_SET are retrieved factual evidence. Return only valid JSON:
-{"new_target_unit": true, "necessary_support": false}
+{"new_target_unit": true, "necessary_constraint": false}
 
 Rules:
 - new_target_unit is true only when CANDIDATE adds a SOURCE-supported target unit defined by CONDITION that SELECTED_SET does not already contain.
-- necessary_support is true only when new_target_unit is false and CANDIDATE adds a SOURCE-supported, nonredundant premise that belongs to a minimal derivation of a concrete target unit. Removing this premise would make that target impossible to derive, distinguish, count, or verify. CANDIDATE does not need to complete the answer by itself.
-- A related detail, explanation, emotion, example, paraphrase, or restatement has no marginal utility unless CONDITION explicitly makes it a target or necessary support.
+- necessary_constraint is true only when CANDIDATE adds a SOURCE-supported entity, relation direction, time, quantity, cause, update, or disambiguating fact required to construct or verify a target unit.
+- A related detail, explanation, emotion, example, paraphrase, or restatement has no marginal utility unless CONDITION explicitly makes it a target or required constraint.
 - The same topic does not imply duplication, and a different session does not imply a new target unit.
 - Both fields are false when CANDIDATE is unsupported, redundant, or merely relevant.
 Do not output KEEP/DROP, scores, explanations, or extra fields."""
@@ -92,15 +92,15 @@ class UnifiedUtilityJudge:
             extra_body={"thinking": {"type": "disabled"}},
         )
         result = json.loads(response.choices[0].message.content)
-        for field in ("new_target_unit", "necessary_support"):
+        for field in ("new_target_unit", "necessary_constraint"):
             if not isinstance(result.get(field), bool):
                 raise ValueError(f"invalid utility component: {field}")
         marginal_utility = int(
-            result["new_target_unit"] or result["necessary_support"]
+            result["new_target_unit"] or result["necessary_constraint"]
         )
         return {
             "new_target_unit": result["new_target_unit"],
-            "necessary_support": result["necessary_support"],
+            "necessary_constraint": result["necessary_constraint"],
             "marginal_utility": marginal_utility,
             "keep": marginal_utility > 0,
         }

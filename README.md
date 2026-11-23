@@ -59,6 +59,23 @@ python run.py \
   --semantic_hierarchy
 ```
 
+No-selector answer baseline using the same retrieval and Parent routing but
+passing every pre-selector Child and Parent directly to the final reader:
+
+```bash
+python run.py \
+  --data locomo \
+  --model deepseek-pro \
+  --file unified_utility \
+  --workers 8 \
+  --eaes \
+  --semantic_hierarchy \
+  --disable_evidence_selector
+```
+
+The ablation adds `_no_selector` to result and log filenames. Do not add
+`--retrieval_only` when measuring answer quality.
+
 Retrieval-only run and evaluation:
 
 ```bash

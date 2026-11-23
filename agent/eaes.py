@@ -115,6 +115,44 @@ class EAESMixin:
             self, question, _query_plan, candidates, parent_candidates=None
     ):
         """Remove candidates whose absence does not reduce answer utility."""
+        if getattr(config, "DISABLE_EVIDENCE_SELECTOR", False):
+            children = list(candidates or [])
+            parents = list(parent_candidates or [])
+            payloads = [
+                self._eaes_reader_child_memory(candidate)
+                for candidate in children
+            ] + [
+                self._eaes_reader_parent_memory(candidate)
+                for candidate in parents
+            ]
+            if payloads:
+                payload_text = json.dumps(
+                    payloads, ensure_ascii=False, separators=(",", ":")
+                )
+                selected_tokens = max(1, (len(payload_text) + 3) // 4)
+            else:
+                selected_tokens = 0
+            return {
+                "answer_items": [
+                    {"evidence": [candidate]} for candidate in children
+                ],
+                "selected_parent_memories": parents,
+                "selector_diagnostics": {
+                    "enabled": False,
+                    "backend": "none",
+                    "operation": "SELECT",
+                    "selection_direction": "passthrough",
+                    "stop_reason": "disabled",
+                    "token_budget": None,
+                    "budget_enforced": False,
+                    "budget_exceeded": False,
+                    "candidate_count": len(children) + len(parents),
+                    "selected_count": len(children) + len(parents),
+                    "selected_tokens": selected_tokens,
+                    "decisions": [],
+                },
+            }
+
         from llm.unified_utility_judge import get_unified_utility_judge
 
         judge = get_unified_utility_judge()
@@ -313,9 +351,12 @@ class EAESMixin:
         )
         if not children and not parents:
             result = ("no information available", [])
+            selector_disabled = getattr(
+                config, "DISABLE_EVIDENCE_SELECTOR", False
+            )
             details = {
-                "enabled": True,
-                "backend": "unified_utility",
+                "enabled": not selector_disabled,
+                "backend": "none" if selector_disabled else "unified_utility",
                 "stop_reason": "no_candidates",
             }
             return result + (details,) if return_details else result

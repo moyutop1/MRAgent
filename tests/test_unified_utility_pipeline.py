@@ -10,6 +10,7 @@ test_config = types.SimpleNamespace(
     CHILD_MAX_TURNS=8,
     UTILITY_TOKEN_BUDGET=2048,
     UTILITY_MODEL="test-utility",
+    DISABLE_EVIDENCE_SELECTOR=False,
     SEMANTIC_HIERARCHY=True,
     EAES_CHILD_CANDIDATE_LIMIT=30,
     EAES_PARENT_CHILD_ROUTE_LIMIT=30,
@@ -152,6 +153,43 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             selected["selector_diagnostics"]["selection_direction"],
             "backward_elimination",
         )
+
+    def test_disabled_selector_passes_every_child_and_parent_without_judge(self):
+        mixin = EAESMixin()
+        children = [
+            {
+                "memory_id": "M1", "score": 0.9,
+                "rewrite_content": "first child",
+                "conversation_time": "2025-01-01",
+            },
+            {
+                "memory_id": "M2", "score": 0.8,
+                "rewrite_content": "second child",
+                "conversation_time": "2025-01-02",
+            },
+        ]
+        parents = [
+            {"parent_id": "P1", "score": 0.7, "rewrite_content": "parent"}
+        ]
+        with patch.object(test_config, "DISABLE_EVIDENCE_SELECTOR", True), patch(
+            "llm.unified_utility_judge.get_unified_utility_judge"
+        ) as get_judge:
+            selected = mixin.select_eaes_evidence(
+                "query", {}, children, parents
+            )
+
+        get_judge.assert_not_called()
+        self.assertEqual(
+            [item["evidence"][0] for item in selected["answer_items"]],
+            children,
+        )
+        self.assertEqual(selected["selected_parent_memories"], parents)
+        diagnostics = selected["selector_diagnostics"]
+        self.assertFalse(diagnostics["enabled"])
+        self.assertEqual(diagnostics["selection_direction"], "passthrough")
+        self.assertEqual(diagnostics["candidate_count"], 3)
+        self.assertEqual(diagnostics["selected_count"], 3)
+        self.assertEqual(diagnostics["decisions"], [])
 
 
 if __name__ == "__main__":

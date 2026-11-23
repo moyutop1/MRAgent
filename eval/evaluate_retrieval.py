@@ -29,6 +29,7 @@ def parse_args():
     p.add_argument("--sample", type=str, default=None, help="Single sample id when --allfile is not set")
     p.add_argument("--evidence_selector_backend", choices=["llm", "local"], default="llm")
     p.add_argument("--disable_evidence_selector", action="store_true")
+    p.add_argument("--parent_reader_passthrough", action="store_true")
     p.add_argument("--max_questions", type=int, default=None)
     p.add_argument("--exclude_categories", default="")
     return p.parse_args()
@@ -49,6 +50,7 @@ def load_rows(args):
         f"{'_semantic' if args.semantic_score else ''}"
         f"{'_hierarchy' if args.semantic_hierarchy else ''}"
         f"{'_no_selector' if disabled else ''}"
+        f"{'_parent_passthrough' if args.parent_reader_passthrough else ''}"
         f"{'_local_selector' if local else ''}"
         f"{'_parent_route' if args.eaes_parent_child_routing else ''}"
         "_retrieval"

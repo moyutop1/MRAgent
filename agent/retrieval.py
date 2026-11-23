@@ -8,7 +8,7 @@ def compact_eaes_retrieval(retrieval):
     """Keep retrieval-only artifacts compact but fully auditable."""
     child_fields = (
         "memory_id", "event_id", "parent_id", "origin", "tag",
-        "rewrite_content", "score", "rank", "retrieval_source",
+        "rewrite_content", "conversation_time", "score", "rank", "retrieval_source",
         "routed_parent_id",
     )
     parent_fields = ("parent_id", "rewrite_content", "score", "rank")

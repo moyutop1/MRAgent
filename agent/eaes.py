@@ -153,14 +153,15 @@ class EAESMixin:
                 },
             }
 
-        from llm.unified_utility_judge import get_unified_utility_judge
+        from llm.unified_utility_judge import UnifiedUtilityJudge, get_unified_utility_judge
 
-        judge = get_unified_utility_judge()
+        parent_passthrough = getattr(config, "PARENT_READER_PASSTHROUGH", False)
+        bypassed_parents = list(parent_candidates or []) if parent_passthrough else []
         nodes = []
         seen = set()
         for kind, values in (
                 ("child", candidates or []),
-                ("parent", parent_candidates or [])):
+                ("parent", [] if parent_passthrough else parent_candidates or [])):
             id_key = "memory_id" if kind == "child" else "parent_id"
             for candidate in values:
                 node_id = candidate.get(id_key)
@@ -181,8 +182,11 @@ class EAESMixin:
                 })
         nodes.sort(key=lambda node: (-node["score"], node["kind"], node["id"]))
 
+        judge = get_unified_utility_judge() if nodes else None
         selected = nodes.copy()
         decisions = []
+        trace_deletions = getattr(config, "RETRIEVAL_ONLY", False)
+        deletion_order = []
         # Test low-score candidates first so the stronger copy survives redundancy.
         for node in reversed(nodes):
             remaining = [item for item in selected if item is not node]
@@ -196,20 +200,33 @@ class EAESMixin:
                     "selection_mode": "backward_elimination",
                 },
             )
-            decisions.append({
+            decision = {
                 "kind": node["kind"], "id": node["id"],
                 "decision": "KEEP" if utility["keep"] else "DROP",
                 "score": node["score"],
                 "new_target_unit": utility["new_target_unit"],
                 "necessary_constraint": utility["necessary_constraint"],
                 "marginal_utility": utility["marginal_utility"],
-            })
+            }
+            if trace_deletions:
+                decision["step"] = len(decisions) + 1
+                decision["comparison_set"] = [
+                    {"kind": item["kind"], "id": item["id"]}
+                    for item in remaining
+                ]
+                if not utility["keep"]:
+                    deletion_order.append({
+                        "step": decision["step"], "kind": node["kind"], "id": node["id"],
+                    })
+            decisions.append(decision)
             if not utility["keep"]:
                 selected.remove(node)
 
         children = [node["candidate"] for node in selected if node["kind"] == "child"]
-        parents = [node["candidate"] for node in selected if node["kind"] == "parent"]
-        selected_tokens = judge.count_tokens(
+        parents = bypassed_parents + [
+            node["candidate"] for node in selected if node["kind"] == "parent"
+        ]
+        selected_tokens = UnifiedUtilityJudge.count_tokens(
             [node["payload"] for node in selected]
         )
         return {
@@ -229,7 +246,9 @@ class EAESMixin:
                 "candidate_count": len(nodes),
                 "selected_count": len(selected),
                 "selected_tokens": selected_tokens,
+                "bypassed_parent_count": len(bypassed_parents),
                 "decisions": decisions,
+                **({"deletion_order": deletion_order} if trace_deletions else {}),
             },
         }
 

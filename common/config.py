@@ -38,7 +38,11 @@ parser.add_argument(
     help="Bypass SELECT and pass every pre-selector Child and Parent candidate directly to the final reader.",
 )
 parser.add_argument("--retrieval_only", action="store_true", help="Save retrieval evidence without running the final answer reader.")
-
+parser.add_argument(
+    "--parent_reader_passthrough",
+    action="store_true",
+    help="Pass recalled Parents directly to the reader and run SELECT on Children only.",
+)
 # parse_known_args (not parse_args) so importing this module under a foreign argv
 # (pytest, notebooks, helper scripts) does not crash on unrecognized arguments.
 args, _ = parser.parse_known_args()
@@ -163,6 +167,7 @@ EAES_MODE = args.eaes
 SEMANTIC_HIERARCHY = args.semantic_hierarchy
 RETRIEVAL_ONLY = args.retrieval_only
 DISABLE_EVIDENCE_SELECTOR = args.disable_evidence_selector
+PARENT_READER_PASSTHROUGH = args.parent_reader_passthrough
 UTILITY_TOKEN_BUDGET = args.utility_token_budget
 if UTILITY_TOKEN_BUDGET <= 0:
     raise ValueError("Utility evidence budget must be positive.")
@@ -210,6 +215,7 @@ ADDITIONAL_RE = (
     f"{'_eaes' if EAES_MODE else ''}"
     f"{HIERARCHY_SUFFIX}"
     f"{'_no_selector' if DISABLE_EVIDENCE_SELECTOR else ''}"
+    f"{'_parent_passthrough' if PARENT_READER_PASSTHROUGH else ''}"
     f"{'_retrieval' if RETRIEVAL_ONLY else ''}"
 ) #"_gpt4o-mini"
 base_dir_t = f"data/{{dataset}}/rewrite{ADDITIONAL_TK}/"

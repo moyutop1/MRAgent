@@ -1,3 +1,4 @@
+import json
 import unittest
 import sys
 import types
@@ -141,7 +142,7 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             "rewrite_content": "child", "conversation_time": "2025-01-01",
         }]
         parents = [{"parent_id": "P1", "score": 0.8, "rewrite_content": "parent"}]
-        with patch(
+        with patch.object(test_config, "RETRIEVAL_ONLY", True, create=True), patch(
             "llm.unified_utility_judge.get_unified_utility_judge",
             return_value=judge,
         ):
@@ -149,10 +150,38 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
         self.assertEqual(len(selected["answer_items"]), 1)
         self.assertEqual(selected["selected_parent_memories"], [])
         self.assertEqual([call[:2] for call in judge.calls], [("SELECT", 1), ("SELECT", 0)])
-        self.assertEqual(
-            selected["selector_diagnostics"]["selection_direction"],
-            "backward_elimination",
-        )
+        trace = selected["selector_diagnostics"]
+        self.assertEqual(trace["selection_direction"], "backward_elimination")
+        self.assertEqual(trace["deletion_order"], [
+            {"step": 1, "kind": "parent", "id": "P1"},
+        ])
+        self.assertEqual(trace["decisions"][0]["comparison_set"], [
+            {"kind": "child", "id": "M1"},
+        ])
+        self.assertEqual(trace["decisions"][1]["comparison_set"], [])
+
+    def test_parent_bypasses_child_selector_and_reaches_reader(self):
+        judge = _Judge([True])
+        mixin = EAESMixin()
+        mixin.llm = MagicMock()
+        mixin.llm.chat_text.return_value = {"answer": "answer"}
+        children = [{"memory_id": "M1", "rewrite_content": "child evidence"}]
+        parents = [{"parent_id": "P1", "rewrite_content": "parent summary"}]
+        with patch.object(
+            test_config, "PARENT_READER_PASSTHROUGH", True, create=True
+        ), patch(
+            "llm.unified_utility_judge.get_unified_utility_judge", return_value=judge
+        ), patch.object(mixin, "_eaes_prediction_context", return_value=[]):
+            _, _, _, trace = mixin._read_eaes_candidates(
+                "query", {}, children, parents, return_details=True
+            )
+
+        self.assertEqual(judge.calls, [
+            ("SELECT", 0, mixin._eaes_reader_child_memory(children[0])),
+        ])
+        self.assertEqual(trace["bypassed_parent_count"], 1)
+        messages = mixin.llm.chat_text.call_args.kwargs["messages"]
+        self.assertEqual(json.loads(messages[-1]["content"])["parent_memories"], parents)
 
     def test_disabled_selector_passes_every_child_and_parent_without_judge(self):
         mixin = EAESMixin()

@@ -306,7 +306,7 @@ def _shift_month(anchor: date, offset: int):
 
 
 def _relative_time_rendering(cue: str, conversation_time: str):
-    """Return (display text, normalized index start) for supported relative cues."""
+    """Render a supported relative cue against the session date."""
     try:
         anchor = date.fromisoformat(str(conversation_time or "")[:10])
     except (TypeError, ValueError):
@@ -322,25 +322,8 @@ def _relative_time_rendering(cue: str, conversation_time: str):
     if named:
         direction, unit = named.groups()
         relation = "before" if direction == "last" else "after"
-        if unit in _WEEKDAY_NAMES:
-            display_unit, weekday = _WEEKDAY_NAMES[unit]
-            if direction == "last":
-                days = (anchor.weekday() - weekday) % 7 or 7
-                index_start = anchor - timedelta(days=days)
-            else:
-                days = (weekday - anchor.weekday()) % 7 or 7
-                index_start = anchor + timedelta(days=days)
-        elif unit == "week":
-            display_unit = "week"
-            current_week_start = anchor - timedelta(days=anchor.weekday())
-            index_start = current_week_start + timedelta(
-                days=-7 if direction == "last" else 7)
-        else:
-            display_unit = "weekend"
-            current_week_start = anchor - timedelta(days=anchor.weekday())
-            index_start = current_week_start + timedelta(
-                days=-2 if direction == "last" else 12)
-        return f"the {display_unit} {relation} {anchor_text}", index_start
+        display_unit = _WEEKDAY_NAMES[unit][0] if unit in _WEEKDAY_NAMES else unit
+        return f"the {display_unit} {relation} {anchor_text}"
 
     exact_day = re.fullmatch(
         r"(a|an|one|two|three|four|five|six|seven|\d+)\s+days?\s+"
@@ -354,65 +337,23 @@ def _relative_time_rendering(cue: str, conversation_time: str):
             return None
         index_start = anchor + timedelta(
             days=amount if relation == "after" else -amount)
-        return _human_date(index_start), index_start
+        return _human_date(index_start)
 
     day_offsets = {"yesterday": -1, "today": 0, "tomorrow": 1}
     if normalized_cue in day_offsets:
         index_start = anchor + timedelta(days=day_offsets[normalized_cue])
-        return _human_date(index_start), index_start
+        return _human_date(index_start)
 
     month = re.fullmatch(r"(last|next)\s+month", normalized_cue)
     if month:
         index_start = _shift_month(anchor, -1 if month.group(1) == "last" else 1)
-        return f"{_MONTH_NAMES[index_start.month]} {index_start.year}", index_start
+        return f"{_MONTH_NAMES[index_start.month]} {index_start.year}"
 
     year = re.fullmatch(r"(last|next)\s+year", normalized_cue)
     if year:
         index_start = date(anchor.year + (-1 if year.group(1) == "last" else 1), 1, 1)
-        return str(index_start.year), index_start
+        return str(index_start.year)
     return None
-
-
-def _date_text_variants(value: date):
-    month = _MONTH_NAMES[value.month]
-    return (
-        value.isoformat(),
-        f"{value.day} {month} {value.year}",
-        f"{month} {value.day}, {value.year}",
-        f"{month} {value.day} {value.year}",
-    )
-
-
-def _replace_or_append_time(text: str, cue: str, display: str, index_start: date):
-    value = str(text or "").strip()
-    if not value:
-        return value
-    if re.fullmatch(r"\d{4}", display):
-        already_rendered = re.search(
-            rf"\b{re.escape(display)}\b(?!-\d{{2}}-\d{{2}})", value)
-    else:
-        already_rendered = display.lower() in value.lower()
-    if already_rendered:
-        return value
-    replaced, count = re.subn(
-        re.escape(cue), display, value, count=1, flags=re.IGNORECASE)
-    if count:
-        return replaced
-    for variant in _date_text_variants(index_start):
-        replaced, count = re.subn(
-            rf"\b{re.escape(variant)}\b", display, value, count=1,
-            flags=re.IGNORECASE,
-        )
-        if count:
-            return replaced
-    if re.fullmatch(r"(?:last|next)\s+year", cue, re.IGNORECASE):
-        replaced, count = re.subn(
-            rf"\b{index_start.year}\b", display, value, count=1)
-        if count:
-            return replaced
-    suffix = value[-1] if value[-1] in ".!?" else ""
-    body = value[:-1].rstrip() if suffix else value
-    return f"{body} ({display}){suffix}"
 
 
 def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
@@ -450,12 +391,13 @@ def normalize_rewrite_temporal_granularity(rewrite_out, dialogue_text: str):
         if len(unique_cues) != 1:
             continue
         cue = matches[0].group(0)
-        rendering = _relative_time_rendering(cue, conversation_time)
-        if not rendering:
+        display = _relative_time_rendering(cue, conversation_time)
+        if not display:
             continue
-        display, index_start = rendering
-        sentence["text"] = _replace_or_append_time(
-            sentence.get("text"), cue, display, index_start)
+        # Replace only a cue already in the Child, in its original clause.
+        sentence["text"] = re.sub(
+            rf"\b{re.escape(cue)}\b", display, sentence["text"], flags=re.IGNORECASE
+        )
 
 
 def _empty_rewrite(conversation_time=None):
@@ -621,7 +563,7 @@ def _rewrite_child_window(
         turns,
         conversation_time,
         previous_rewrites=None,
-        logger=None,
+        fact_inventory=False,
 ):
     current_turns = child_window_turns(window, turns)
     user_prompt = Prompts.extract_child_window_rewrite_prompt(
@@ -639,6 +581,14 @@ def _rewrite_child_window(
     last_error = ""
     for attempt in range(2):
         system_prompt = Prompts.CHILD_WINDOW_REWRITE_SYSTEM_PROMPT
+        if fact_inventory:
+            system_prompt += (
+                "\nInventory the raw facts independently. List each fact once. "
+                "Keep explicit forms of address as facts (e.g. Nate calls Joanna 'Jo'), "
+                "even inside a greeting. Separate each feeling and its cause. "
+                "Keep each time qualifier attached to its own event or plan. "
+                "Each fact must already be formatted as a valid Child."
+            )
         if attempt:
             system_prompt += (
                 f"\nRepair the complete JSON. Validation error: {last_error}"
@@ -684,10 +634,17 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
         empty["parent_nodes"] = []
         return empty
 
+    from llm.unified_utility_judge import get_unified_utility_judge
+
     child_windows = plan_child_windows(llm, turns, conversation_time)
+    judge = get_unified_utility_judge()
     window_outputs = []
     generated_memories = []
     for window in child_windows:
+        source = _child_window_source_text(window, turns, conversation_time)
+        facts = _rewrite_child_window(
+            llm, window, turns, conversation_time, fact_inventory=True
+        )["sentence"]
         previous_rewrites = _previous_child_rewrite_context(
             generated_memories, limit=2
         )
@@ -697,7 +654,6 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
             turns,
             conversation_time,
             previous_rewrites=previous_rewrites,
-            logger=logger,
         )
         if logger:
             logger.info(
@@ -709,12 +665,31 @@ def rewrite_semantic_hierarchy_session(llm, text: str, logger=None):
                     ensure_ascii=False,
                 ),
             )
-        output["sentence"] = _keep_new_children(
-            _as_list(output.get("sentence")),
-            generated_memories,
-            _child_window_source_text(window, turns, conversation_time),
-            logger=logger,
+        drafts = output["sentence"]
+        missing = (
+            judge.missing_fact_indices(facts, drafts)
+            if facts and drafts else range(len(facts))
         )
+        # Freeze the initial WRITE state for all missing-fact comparisons.
+        baseline = [_utility_child(child) for child in generated_memories]
+        output["sentence"] = _keep_new_children(
+            drafts, generated_memories, source, logger=logger,
+        )
+        for index, fact in enumerate(facts):
+            if index not in missing:
+                continue
+            utility = judge.estimate(
+                operation="WRITE", source=source, selected_set=baseline,
+                candidate=_utility_child(fact),
+            )
+            if logger:
+                logger.info(
+                    "[write-coverage] keep=%s fact=%s", utility["keep"],
+                    json.dumps(_utility_child(fact), ensure_ascii=False),
+                )
+            if utility["keep"]:
+                output["sentence"].append(fact)
+                generated_memories.append(fact)
         window_outputs.append(output)
 
     # IDs become stable only after every candidate has passed WRITE utility.

@@ -80,18 +80,7 @@ class UnifiedUtilityJudge:
             "selected_set": selected_set,
             "candidate": candidate,
         }
-        response = self.client.chat.completions.create(
-            model=config.UTILITY_MODEL,
-            messages=[
-                {"role": "system", "content": UTILITY_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.0,
-            max_tokens=48,
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        result = json.loads(response.choices[0].message.content)
+        result = self._request_json(UTILITY_SYSTEM_PROMPT, payload, max_tokens=48)
         for field in ("new_target_unit", "necessary_constraint"):
             if not isinstance(result.get(field), bool):
                 raise ValueError(f"invalid utility component: {field}")
@@ -104,6 +93,39 @@ class UnifiedUtilityJudge:
             "marginal_utility": marginal_utility,
             "keep": marginal_utility > 0,
         }
+
+    def missing_fact_indices(self, facts, drafts):
+        result = self._request_json(
+            "Compare each numbered source fact against the Child drafts. "
+            "A fact is covered only if the drafts express its specific entity, "
+            "event, relation and value. Preserve distinct emotions, exact names "
+            "and nicknames, and temporal scope in this comparison. Sharing an "
+            "origin or topic does not establish coverage. Return only JSON "
+            'with a missing array of 0-based fact indices: {"missing": [0]}.',
+            {
+                "facts": [
+                    {"index": index, "text": fact["text"]}
+                    for index, fact in enumerate(facts)
+                ],
+                "drafts": [draft["text"] for draft in drafts],
+            },
+            max_tokens=16 + 5 * len(facts),
+        )
+        return set(result["missing"])
+
+    def _request_json(self, prompt, payload, max_tokens):
+        response = self.client.chat.completions.create(
+            model=config.UTILITY_MODEL,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            temperature=0.0,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        return json.loads(response.choices[0].message.content)
 
 
 def get_unified_utility_judge():

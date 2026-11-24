@@ -41,7 +41,11 @@ except ModuleNotFoundError:
     sys.modules["jsonschema"] = jsonschema
 
 from agent.eaes import EAESMixin
-from agent.rewrite_memory import _keep_new_children
+from agent.rewrite_memory import (
+    _keep_new_children,
+    normalize_rewrite_temporal_granularity,
+    rewrite_semantic_hierarchy_session,
+)
 from agent.semantic_segmentation import ChildWindow, TurnRecord
 from memory.system import EAESMemoryNote, EAESParentNode, MemorySystem
 from llm.unified_utility_judge import UnifiedUtilityJudge
@@ -121,6 +125,45 @@ class UnifiedUtilityPipelineTests(unittest.TestCase):
             accepted = _keep_new_children(candidates, kept, "source dialogue")
         self.assertEqual(accepted, candidates[:1])
         self.assertEqual([call[:2] for call in judge.calls], [("WRITE", 0), ("WRITE", 1)])
+
+    def test_missing_facts_use_frozen_baseline_and_are_appended_once(self):
+        prior = {"id": "D1:1-1", "origin": "D1:1", "text": "prior fact"}
+        draft = {"id": "D1:2-1", "origin": "D1:2", "text": "Nate dyed his hair."}
+        alias = {"id": "D1:2-1", "origin": "D1:2", "text": "Nate calls Joanna Jo."}
+        repeat = {"id": "D1:2-2", "origin": "D1:2", "text": "prior fact"}
+        judge = _Judge([True, True, True, False])
+        judge.missing_fact_indices = MagicMock(side_effect=[set(), {1, 2}])
+        with patch("agent.rewrite_memory.plan_child_windows", return_value=[
+            ChildWindow("D1:1", "D1:1"), ChildWindow("D1:2", "D1:2"),
+        ]), patch("agent.rewrite_memory._rewrite_child_window", side_effect=[
+            {"sentence": [prior.copy()]}, {"sentence": [prior]},
+            {"sentence": [draft.copy(), alias, repeat]}, {"sentence": [draft]},
+        ]), patch("agent.rewrite_memory._build_session_parents", return_value=[]), patch(
+            "llm.unified_utility_judge.get_unified_utility_judge", return_value=judge
+        ):
+            result = rewrite_semantic_hierarchy_session(
+                None, "time:2022-04-15\ndia_id:D1:1 Nate: Hi.\ndia_id:D1:2 Nate: Hey Jo, I dyed my hair."
+            )
+        self.assertEqual(
+            [(call[1], call[2]["text"]) for call in judge.calls],
+            [(0, "prior fact"), (1, draft["text"]), (1, alias["text"]), (1, repeat["text"])],
+        )
+        self.assertEqual([item["text"] for item in result["sentence"]],
+                         [prior["text"], draft["text"], alias["text"]])
+        self.assertEqual(result["sentence"][-1]["id"], "D1:2-2")
+
+    def test_relative_time_stays_with_the_fact_that_mentions_it(self):
+        output = {"sentence": [
+            {"origin": "D16:6", "text": "Seven people attended the party."},
+            {"origin": "D16:6", "text": "Six wanted to do it again next month."},
+        ]}
+        normalize_rewrite_temporal_granularity(
+            output, "time:2022-06-24\ndia_id:D16:6 Nate: Seven attended. Six would do it again next month."
+        )
+        self.assertEqual([item["text"] for item in output["sentence"]], [
+            "Seven people attended the party.",
+            "Six wanted to do it again July 2022.",
+        ])
 
     def test_session_view_and_global_indices_share_nodes(self):
         memory = MemorySystem()

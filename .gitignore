@@ -6,6 +6,8 @@ data/*.json
 data/LM/
 data/locomo/
 data/AR/
+data/utility/
+checkpoints/
 
 # results / logs / caches
 result/

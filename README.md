@@ -61,6 +61,36 @@ cp .env.example .env
 
 ## Build LoCoMo training data
 
+### Sample 42 from baseline caches
+
+The baseline rewrite and keyword files can be consumed directly; run logs are
+not required. The builder regenerates embeddings, reconstructs the MRAgent
+graph, extracts question cues, expands every fixed route, and creates both a
+human-readable JSONL file and the tensor dataset. Category 5 is excluded by
+default, leaving the same 199 questions used by the retrieval experiments.
+
+```bash
+python -m utility.build_sample42_data \
+  --dataset data/dataset_locomo.json \
+  --baseline_dir data/locomo/MRAgent_baseline \
+  --sample conv-42 \
+  --exclude_categories 5 \
+  --output_dir data/utility/sample42
+
+python -m utility.train \
+  --data data/utility/sample42/conv-42_set_utility.pt \
+  --output checkpoints/sample42_set_utility.pt \
+  --hidden_dim 384 --heads 6 --epochs 12 --accumulate 16
+```
+
+The builder caches question-key extraction in
+`data/utility/sample42/conv-42_question_keys.jsonl`, so an interrupted run
+resumes without repeating completed LLM calls. Questions are stratified by
+category into 70% train, 15% validation, and 15% test partitions. All candidates
+from one question stay in the same partition.
+
+### General LoCoMo construction
+
 First dump fixed retrieval candidates. Candidate-dump mode keeps every raw
 session only to construct the supervised training corpus; normal runs always
 apply WRITE utility.

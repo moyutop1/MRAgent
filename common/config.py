@@ -10,7 +10,7 @@ parser.add_argument("--data", default="locomo")
 parser.add_argument("--model", default="deepseek-pro")
 parser.add_argument("--re_model", default=None)
 parser.add_argument("--file", default="0")
-parser.add_argument("--sample", type=int, default=None)
+parser.add_argument("--sample", default=None)
 parser.add_argument("--max_questions", type=int, default=None)
 parser.add_argument("--exclude_categories", default=os.getenv("EXCLUDE_CATEGORIES", ""))
 parser.add_argument("--workers", type=int, default=int(os.getenv("MRA_WORKERS", "8")))
@@ -55,7 +55,7 @@ UTILITY_CHECKPOINT = args.utility_checkpoint
 UTILITY_DEVICE = os.getenv("UTILITY_DEVICE")
 WRITE_THRESHOLD = args.write_threshold
 RETRIEVE_THRESHOLD = args.retrieve_threshold
-sample_id = args.sample
+sample_id = int(str(args.sample).removeprefix("conv-")) if args.sample else None
 MAX_QUESTIONS = args.max_questions
 EXCLUDED_CATEGORIES = {
     item.strip() for item in args.exclude_categories.split(",") if item.strip()

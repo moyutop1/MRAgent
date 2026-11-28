@@ -85,9 +85,10 @@ python -m utility.train \
 
 The builder caches question-key extraction in
 `data/utility/sample42/conv-42_question_keys.jsonl`, so an interrupted run
-resumes without repeating completed LLM calls. Questions are stratified by
-category into 70% train, 15% validation, and 15% test partitions. All candidates
-from one question stay in the same partition.
+resumes without repeating completed LLM calls. Fixed route results are likewise
+cached in `conv-42_fixed_candidates.jsonl`. Questions are stratified by category
+into 70% train, 15% validation, and 15% test partitions. All candidates from one
+question stay in the same partition.
 
 ### General LoCoMo construction
 

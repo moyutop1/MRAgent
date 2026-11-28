@@ -56,18 +56,22 @@ class Agent:
             key = item["id"]
             tags = self.memory.get_tag_list(key)
             if len(tags) > config.TAG_MAX:
-                result = self.llm.chat_text(
-                    [
-                        {"role": "system", "content": Prompts.EVENT_KEYWORDS_SYSTEM_PROMPT},
-                        {"role": "user", "content": json.dumps({
-                            "question": question, "keyword": key, "tags": tags,
-                        }, ensure_ascii=False)},
-                    ],
-                    model=config.RE_MODEL,
-                )
+                scores = {}
+                for start in range(0, len(tags), config.TAG_SCORE_BATCH):
+                    batch = tags[start:start + config.TAG_SCORE_BATCH]
+                    result = self.llm.chat_text(
+                        [
+                            {"role": "system", "content": Prompts.EVENT_KEYWORDS_SYSTEM_PROMPT},
+                            {"role": "user", "content": json.dumps({
+                                "question": question, "keyword": key, "tags": batch,
+                            }, ensure_ascii=False)},
+                        ],
+                        model=config.RE_MODEL,
+                    )
+                    scores.update(result["tag_scores"])
                 tags = [
                     tag for tag, score in sorted(
-                        result["tag_scores"].items(), key=lambda pair: pair[1], reverse=True
+                        scores.items(), key=lambda pair: pair[1], reverse=True
                     )[:config.TAG_LIMIT]
                     if score > 0
                 ]

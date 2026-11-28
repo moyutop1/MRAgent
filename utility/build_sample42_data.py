@@ -51,6 +51,16 @@ def load_question_keys(cache_path):
         }
 
 
+def load_candidate_routes(cache_path):
+    if not cache_path.exists():
+        return {}
+    with cache_path.open(encoding="utf-8") as source:
+        return {
+            record["qa_index"]: record
+            for record in (json.loads(line) for line in source if line.strip())
+        }
+
+
 def build_memory(agent, raw_text, rewrite_path, keyword_path):
     with rewrite_path.open(encoding="utf-8") as source:
         rewrites = [json.loads(line) for line in source if line.strip()]
@@ -129,7 +139,7 @@ def write_examples(sample_id, sessions, train_questions):
 
 def retrieval_examples(
     agent, sample_id, indexed_questions, question_embeddings, question_keys,
-    splits, negative_ratio, seed,
+    splits, negative_ratio, seed, candidate_routes, candidate_output,
 ):
     rng = random.Random(seed)
     tensors = []
@@ -137,9 +147,24 @@ def retrieval_examples(
     coverage = Counter()
     for qa_index, question in indexed_questions:
         query = Agent.question_format("locomo", question)
-        candidates, coarse_context, personal_routes = agent.retrieve_candidates(
-            query, question_embeddings[qa_index], question_keys[qa_index]
-        )
+        if qa_index in candidate_routes:
+            route_record = candidate_routes[qa_index]
+            candidates = route_record["candidates"]
+            coarse_context = route_record["coarse_context"]
+            personal_routes = route_record["personal_routes"]
+        else:
+            candidates, coarse_context, personal_routes = agent.retrieve_candidates(
+                query, question_embeddings[qa_index], question_keys[qa_index]
+            )
+            route_record = {
+                "qa_index": qa_index,
+                "candidates": candidates,
+                "coarse_context": coarse_context,
+                "personal_routes": personal_routes,
+            }
+            candidate_routes[qa_index] = route_record
+            candidate_output.write(json.dumps(route_record, ensure_ascii=False) + "\n")
+            candidate_output.flush()
         split = splits[qa_index]
         gold = set(question.get("evidence") or [])
         covered = {candidate["origin"] for candidate in candidates} & gold
@@ -305,10 +330,14 @@ def main():
     write_tensors, write_metadata = write_examples(
         args.sample, conversations[args.sample], train_questions
     )
-    retrieve_tensors, retrieve_metadata, coverage = retrieval_examples(
-        agent, args.sample, indexed_questions, question_embeddings,
-        question_keys, splits, args.negative_ratio, args.seed,
-    )
+    candidate_path = output_dir / f"{args.sample}_fixed_candidates.jsonl"
+    candidate_routes = load_candidate_routes(candidate_path)
+    with candidate_path.open("a", encoding="utf-8") as candidate_output:
+        retrieve_tensors, retrieve_metadata, coverage = retrieval_examples(
+            agent, args.sample, indexed_questions, question_embeddings,
+            question_keys, splits, args.negative_ratio, args.seed,
+            candidate_routes, candidate_output,
+        )
     tensors = write_tensors + retrieve_tensors
     metadata_path = output_dir / f"{args.sample}_utility_examples.jsonl"
     with metadata_path.open("w", encoding="utf-8") as output:

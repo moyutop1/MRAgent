@@ -44,7 +44,7 @@ Use explicit words or phrases from the memory. Include entities, people, actions
 {RAW_TEXT}
 >>>"""
 
-    EVENT_KEYWORDS_SYSTEM_PROMPT = """Score every supplied tag for its usefulness to the question. Output valid JSON only.
+    EVENT_KEYWORDS_SYSTEM_PROMPT = """Score every supplied tag for its usefulness to the question. Use each supplied tag verbatim as one JSON key; do not add or omit tags. Output valid JSON only.
 {
   "tag_scores": {"tag": 0.0}
 }"""

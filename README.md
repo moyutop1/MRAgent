@@ -1,32 +1,56 @@
-# MRAgent
+# MRAgent with unified set-conditioned utility
 
-Code for hierarchical conversational memory on LoCoMo and LongMemEval.
+This implementation keeps MRAgent's Cue–Tag, Topic, and Personal memory
+structure, but uses one learned marginal-utility estimator for both memory
+writing and retrieval.
 
-## Core pipeline
+## Mechanism
 
-The implementation uses one set-conditioned marginal-utility rule in memory
-construction and retrieval. DeepSeek Flash returns only `KEEP` or `DROP` for
-three operations:
+### WRITE
 
-- `WRITE`: inside the current session, retain a proposed Child only when it adds
-  a new event/state, time/stage, or concrete detail.
-- `ABSTRACT`: at session end, retain a Parent only when it is a supported and
-  useful high-level abstraction of its Child group and the complete raw session.
-- `SELECT`: for one query, retain a retrieved Child or Parent only when it adds
-  answer-useful information beyond the already selected evidence.
+Each raw session is evaluated once before rewriting:
 
-Construction is isolated by session. Parent nodes are create-only and never
-cross session boundaries. Query-time retrieval sees every stored session.
+```text
+U(raw session | retained sessions, WRITE)
+  -> DROP
+  -> KEEP -> one session rewrite -> keywords/topics/personal memory -> store
+```
 
-Retrieval uses the raw question directly:
+There is no utility decision after rewriting.
 
-1. Child Top-K by cosine over `tag + rewrite_content`.
-2. Parent Top-K by cosine over Parent `rewrite_content`.
-3. Expand retrieved Parents and rescore routed Children only by query-Child
-   cosine; Parent scores never boost Child scores.
-4. Merge Children by ID, sort Child and Parent candidates by query score, and run
-   sequential `SELECT` under a hard evidence-token budget.
-5. Send only selected evidence to the answer model.
+### RETRIEVE
+
+The original coarse routing context contains only:
+
+- `keys_candidates`: question Cue–Tag pairs;
+- `similar_topic`: the eight closest Topic summaries.
+
+`key_sentences` and `key_tag_sentences` are not used. Person–Aspect routes are
+enumerated once from people recalled in the question. Every fixed route is
+expanded exactly once through:
+
+- `edges_by_tag(Cue, Tag)`;
+- `query_topic_events(Topic)`;
+- `query_personal_aspect(Person, Aspect)`.
+
+All returned Content nodes form one fixed candidate set. Accepted nodes do not
+create new routes. There is no second retrieval, pruning, context tool, time
+tool, or keyword-expansion tool.
+
+For every candidate, the estimator sees the question, the current selected
+Content set, all recalled Cue–Tag pairs, all recalled Topic summaries, and the
+candidate/current-set time fields.
+
+## Utility model
+
+`utility/model.py` implements four attention blocks:
+
+1. two self-attention blocks over the current set;
+2. candidate-to-set cross attention;
+3. candidate-to-context cross attention.
+
+The default hidden size is 384 with six heads. The same parameters serve WRITE
+and RETRIEVE; a learned operation embedding distinguishes them.
 
 ## Setup
 
@@ -35,78 +59,60 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set at least:
+## Build LoCoMo training data
 
-```dotenv
-DEEPSEEK_API_KEY=...
-UTILITY_MODEL=deepseek-flash
-UTILITY_TIMEOUT=300
-UTILITY_TOKEN_BUDGET=2048
-LOCAL_EMBEDDING_MODEL=/autodl-pub/models/bge-large-en-v1.5
+First dump fixed retrieval candidates. Candidate-dump mode keeps every raw
+session only to construct the supervised training corpus; normal runs always
+apply WRITE utility.
+
+```bash
+python run.py \
+  --data locomo --model deepseek-pro --file utility_candidates \
+  --dump_candidates
+```
+
+Then build unified WRITE/RETRIEVE records. WRITE labels retain a session when
+it contains at least one LoCoMo gold evidence origin. RETRIEVE labels retain the
+first candidate covering each still-uncovered gold origin; other sampled
+candidates are negatives.
+
+```bash
+python -m utility.build_locomo_data \
+  --candidate_results result/locomo/*_utility_candidates*_candidates.jsonl \
+  --output data/utility/locomo_set_utility.pt
+```
+
+Train the four-block model:
+
+```bash
+python -m utility.train \
+  --data data/utility/locomo_set_utility.pt \
+  --output checkpoints/set_utility.pt
 ```
 
 ## Run
 
-Full LoCoMo answer run with DeepSeek Pro:
+```bash
+python run.py \
+  --data locomo --model deepseek-pro --file set_utility \
+  --utility_checkpoint checkpoints/set_utility.pt \
+  --workers 8
+```
+
+Retrieval-only evaluation uses the same WRITE and RETRIEVE utility path:
 
 ```bash
 python run.py \
-  --data locomo \
-  --model deepseek-pro \
-  --file unified_utility \
-  --workers 8 \
-  --eaes \
-  --semantic_hierarchy
+  --data locomo --model deepseek-pro --file set_utility \
+  --utility_checkpoint checkpoints/set_utility.pt \
+  --retrieval_only
+
+python eval/evaluate_set_retrieval.py \
+  "result/locomo/*_set_utility_retrieval.jsonl"
 ```
 
-No-selector answer baseline using the same retrieval and Parent routing but
-passing every pre-selector Child and Parent directly to the final reader:
+## Tests
 
 ```bash
-python run.py \
-  --data locomo \
-  --model deepseek-pro \
-  --file unified_utility \
-  --workers 8 \
-  --eaes \
-  --semantic_hierarchy \
-  --disable_evidence_selector
+python -m unittest tests.test_set_utility_pipeline -v
 ```
-
-The ablation adds `_no_selector` to result and log filenames. Do not add
-`--retrieval_only` when measuring answer quality.
-
-Retrieval-only run and evaluation:
-
-```bash
-python run.py \
-  --data locomo \
-  --model deepseek-pro \
-  --file unified_retrieval \
-  --workers 8 \
-  --retrieval_only \
-  --eaes \
-  --semantic_hierarchy
-
-python eval/evaluate_retrieval.py \
-  --data locomo \
-  --model deepseek-pro \
-  --file unified_retrieval \
-  --allfile \
-  --eaes \
-  --semantic_hierarchy
-```
-
-Reasoning evaluation after the full answer run:
-
-```bash
-python eval/evaluate_reasoning.py \
-  --data locomo \
-  --model deepseek-pro \
-  --file unified_utility_eaes_hierarchy \
-  --allfile
-```
-
-Use `--sample 42` for one LoCoMo conversation and `--max_questions 50` for a
-short run. Delete that sample's rewrite and embedding caches before regenerating
-memories with a changed construction pipeline.

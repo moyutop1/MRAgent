@@ -25,3 +25,11 @@ result_judge_*.jsonl
 *_backup.json
 compare_*.json
 _b10test.py
+
+# obsolete files retained only when an editor still holds a Windows handle
+/common/openrouter.py
+/eval/diagnose_wrong_cases.py
+/eval/evaluate_retrieval.py
+/llm/embeddings.py
+/try.py
+/version_iterations.md

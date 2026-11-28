@@ -1,422 +1,278 @@
-﻿import sys, os
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 import json
-import random
-import re
-from typing import Dict, Any, List
-import numpy as np
-from prompts import schema as json_scheme
-from prompts.prompts import Prompts
-from common.utils import topk_answers_by_similarity
-from common import config
-from llm.controller import LLM
-from memory.controller import MemoryController
-from memory.system import MemorySystem, EpisodeEvent
-from agent.rewrite_memory import first_origin, normalize_sentence_ids, origin_ids, rewrite_windowed_session
-from agent.eaes import EAESMixin
-from agent.retrieval import RetrievalMixin
 import logging
+import random
+
+import numpy as np
+
+from common import config
+from memory.system import EpisodeEvent, KeyNode, Link
+from prompts import schema
+from prompts.prompts import Prompts
+from utility.evaluator import get_utility_evaluator
+
+
 logger = logging.getLogger(__name__)
-class Agent(EAESMixin, RetrievalMixin):
-    def __init__(self, llm: LLM, memory_system: MemorySystem, memory_controller: MemoryController):
+
+
+class Agent:
+    def __init__(self, llm, memory, memory_controller, utility=None):
         self.llm = llm
-        self.memory = memory_system
+        self.memory = memory
         self.memory_controller = memory_controller
+        self.utility = utility
+        self.episode_link_num = 0
+        self.last_retrieval = None
+
+    def utility_evaluator(self):
+        if self.utility is None:
+            self.utility = get_utility_evaluator()
+        return self.utility
 
     @staticmethod
     def question_format(dataset, qa):
-        if dataset == "locomo":
-            if qa.get("category") == 5:
-                question = qa['question'] + " Select the correct answer: {} or {}. "
-                if random.random() < 0.5:
-                    question = question.format('Not mentioned in the conversation', qa['adversarial_answer'])
-                else:
-                    question = question.format(qa['adversarial_answer'], 'Not mentioned in the conversation')
-            elif qa.get("category") == 2:
-                question = qa['question']
-            elif qa.get("category") == 1:
-                question = qa['question'] + (" No extra explanations. ")
-            elif qa.get("category") == 3:
-                question = qa['question'] + (" Give reasons with original text. ")
-            else:
-                question = qa['question']
-        else:
-            question = qa['question']
-
+        question = qa["question"]
+        if dataset == "locomo" and qa.get("category") == 5:
+            options = ["Not mentioned in the conversation", qa["adversarial_answer"]]
+            random.shuffle(options)
+            return f"{question} Select the correct answer: {options[0]} or {options[1]}."
+        if dataset == "locomo" and qa.get("category") == 1:
+            return question + " No extra explanations."
+        if dataset == "locomo" and qa.get("category") == 3:
+            return question + " Give reasons with original text."
         return question
 
-    def get_time(self,question_time):
-        # 1) "YYYY-MM-DD, YYYY-MM-DD"
-        YMD_RANGE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}, \d{4}-\d{2}-\d{2}$")
-        # 2) "MM-DD, MM-DD"
-        MD_RANGE_RE = re.compile(r"^\d{2}-\d{2}, \d{2}-\d{2}$")
-        qt_str = str(question_time).strip()
-
-        valid = (
-                qt_str == "" or
-                qt_str == "''" or
-                YMD_RANGE_RE.match(qt_str) is not None or
-                MD_RANGE_RE.match(qt_str) is not None
+    def extract_question_keys(self, question):
+        return self.llm.chat_text(
+            [
+                {"role": "system", "content": Prompts.QUESTION_KEY_SYSTEM_PROMPT},
+                {"role": "user", "content": Prompts.extract_question_key_prompt(question)},
+            ],
+            model=config.RE_MODEL,
         )
 
+    def select_key_tags(self, question, question_keys):
+        candidates = []
+        for item in question_keys["keywords"]:
+            key = item["id"]
+            tags = self.memory.get_tag_list(key)
+            if len(tags) > config.TAG_MAX:
+                result = self.llm.chat_text(
+                    [
+                        {"role": "system", "content": Prompts.EVENT_KEYWORDS_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps({
+                            "question": question, "keyword": key, "tags": tags,
+                        }, ensure_ascii=False)},
+                    ],
+                    model=config.RE_MODEL,
+                )
+                tags = [
+                    tag for tag, score in sorted(
+                        result["tag_scores"].items(), key=lambda pair: pair[1], reverse=True
+                    )[:config.TAG_LIMIT]
+                    if score > 0
+                ]
+            if tags:
+                candidates.append({"key": key, "tags": tags})
+        return candidates
+
+    def select_topics(self, question_embedding):
+        if not self.memory.topic_id_list:
+            return []
+        embeddings = np.asarray(self.memory.topic_embeddings)
+        scores = embeddings @ np.asarray(question_embedding)
+        indices = np.argsort(scores)[::-1][:config.TOPIC_K]
+        return [
+            {
+                "topic_id": self.memory.topic_id_list[index],
+                "summary": self.memory.topic_dict[self.memory.topic_id_list[index]].text,
+            }
+            for index in indices
+        ]
+
+    def select_personal_routes(self, question, question_keys):
+        query_terms = {question.lower()}
+        for item in question_keys["keywords"]:
+            query_terms.add(item["id"].lower())
+            query_terms.update(value.lower() for value in item.get("alternatives", []))
+        routes = []
+        for person, persona in self.memory.persona_list.items():
+            if any(person.lower() in term for term in query_terms):
+                routes.extend(
+                    {"person": person, "aspect": aspect}
+                    for aspect in persona.tag_list
+                )
+        return routes
+
+    def retrieve_candidates(self, question, question_embedding, question_keys):
+        keys_candidates = self.select_key_tags(question, question_keys)
+        similar_topic = self.select_topics(question_embedding)
+        personal_routes = self.select_personal_routes(question, question_keys)
+
+        nodes = []
+        for item in keys_candidates:
+            for tag in item["tags"]:
+                nodes.extend(self.memory_controller.edges_by_tag(item["key"], tag))
+        for topic in similar_topic:
+            nodes.extend(self.memory_controller.query_topic_events(topic["topic_id"]))
+        for route in personal_routes:
+            nodes.extend(self.memory_controller.query_personal_aspect(**route))
+
+        unique = {}
+        for node in nodes:
+            if node["node_id"] in unique:
+                unique[node["node_id"]]["routes"].append(node["route"])
+            else:
+                node["routes"] = [node.pop("route")]
+                unique[node["node_id"]] = node
+        coarse_context = {
+            "keys_candidates": keys_candidates,
+            "similar_topic": similar_topic,
+        }
+        return list(unique.values()), coarse_context, personal_routes
+
+    def answer_question(
+        self, question, category=0, question_emb=None,
+        override_question_time=None, lm_current_date=None,
+    ):
+        question_keys = self.extract_question_keys(question)
+        candidates, coarse_context, personal_routes = self.retrieve_candidates(
+            question, question_emb, question_keys
+        )
+        if config.DUMP_CANDIDATES:
+            selected, decisions = [], []
+        else:
+            selected, decisions = self.utility_evaluator().select_retrieval(
+                question, candidates, coarse_context, config.RETRIEVE_THRESHOLD
+            )
+        self.last_retrieval = {
+            "query": question,
+            **coarse_context,
+            "personal_routes": personal_routes,
+            "candidates": candidates,
+            "selected": selected,
+            "decisions": decisions,
+        }
+        origins = list(dict.fromkeys(node["origin"] for node in selected))
+        if config.RETRIEVAL_ONLY or config.DUMP_CANDIDATES:
+            return "", origins
+
+        result = self.llm.chat_text(
+            [
+                {"role": "system", "content": Prompts.FINAL_ANSWER_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "question": question,
+                    "current_date": lm_current_date,
+                    "evidence": selected,
+                }, ensure_ascii=False)},
+            ]
+        )
+        return result["answer"], origins
+
+    def rewrite(self, text):
+        result = self.llm.chat_text(
+            [
+                {"role": "system", "content": Prompts.REWRITE_SYSTEM_PROMPT},
+                {"role": "user", "content": Prompts.extract_rewrite_prompt(text)},
+            ]
+        )
+        valid, error = schema.check_rewrite_json(result, text)
         if not valid:
-            question_time = None
-        return question_time
+            raise ValueError(error)
+        return result
 
-
-    def extract_id_prefixes(self, id_list):
-        """
-        Extract the prefix of an id list (drop the -<number> suffix).
-        e.g. ['D1:1-1', 'D1:1-2', 'D2:3'] -> ['D1:1', 'D1:1', 'D2:3']
-        """
-        prefixes = []
-        pattern = re.compile(r'^(.+)-\d+$')
-        for id_str in id_list:
-            match = pattern.match(id_str)
-            if match:
-                prefixes.append(match.group(1))
-            else:
-                prefixes.append(id_str)
-        return prefixes
-
-    def select_topic(self, question_emb):
-        if not self.memory.topic_id_list or len(self.memory.topic_embeddings) == 0:
-            return []
-        similar_topic_embs = np.vstack(self.memory.topic_embeddings)
-        if similar_topic_embs.shape[0] == 0:
-            return []
-        top_tids, _, top_tembs, top_topic_texts = topk_answers_by_similarity(question_emb, similar_topic_embs,
-                                                                             self.memory.topic_id_list,
-                                                                             k=config.TOPIC_K,
-                                                                             answer_texts=self.memory.topic_sentence_list)
-        return top_topic_texts
-
-    def select_finegrained_sentence(self, question, question_emb, coarse_sentences, coarse_ids, coarse_sentence_embs):
-        sort_ids = []
-        selected_list = []
-        emb_list = []
-        text_list = []
-        # above the number of fine-grained sentence
-        if len(coarse_ids) > config.K2:
-            ans_input2 = {
-                "question": question,
-                "similar_sentence": coarse_sentences,
-            }
-
-            question_out = self.llm.chat_text(
-                messages=[{"role": "system", "content": Prompts.ANSWER_SORT_PROMPT2},
-                          {"role": "user", "content": json.dumps(ans_input2, ensure_ascii=False)}],
-                model=config.RE_MODEL
-            )
-
-
-
-            if question_out is None:
-                pass  # no LLM ranking returned; fall through to the similarity fallback below
-            else:
-                sort_ids = question_out.get("events")
-
-                logger.info(f"[sort] {question_out}")
-
-                text_list = []
-                emb_list = []
-                selected_list = []
-                if sort_ids != None:
-                    for id in sort_ids:
-                        match_idx = None
-                        for i, tid in enumerate(coarse_ids):
-                            # exact match, or tid prefixed by "id-", e.g. id="D32:6", tid="D32:6-2"
-                            if tid == id or tid.startswith(id + "-"):
-                                match_idx = i
-                                break
-                        if match_idx is not None:
-
-                            text_list.append(coarse_sentences[match_idx])
-                            emb_list.append(coarse_sentence_embs[match_idx])
-                            selected_list.append(coarse_ids[match_idx])
-                else:
-                    sort_ids = []
-
-            # if select fails
-            if len(sort_ids) == 0 or len(selected_list) > config.K2:
-                if len(selected_list) != 0:
-                    emb_list = np.vstack(emb_list)
-
-                    selected_list, _, emb_list, text_list = topk_answers_by_similarity(question_emb, emb_list,
-                                                                                 selected_list,
-                                                                                 k=config.K2,
-                                                                                 answer_texts=text_list)
-                elif len(coarse_sentence_embs) != 0:
-                    coarse_sentence_embs = np.vstack(coarse_sentence_embs)
-                    selected_list, _, emb_list, text_list = topk_answers_by_similarity(question_emb, coarse_sentence_embs,
-                                                                                 coarse_ids,
-                                                                                 k=config.K2,
-                                                                                 answer_texts=coarse_sentences)
-        return selected_list, emb_list, text_list
-
-
-
-    def select_finegrained_sentence_sort(self, question, question_emb, coarse_sentences, coarse_ids, coarse_sentence_embs):
-        sort_ids = []
-        selected_list = []
-        emb_list = []
-        text_list = []
-        # above the number of fine-grained sentence
-        if len(coarse_ids) > config.K2:
-            ans_input2 = {
-                "question": question,
-                "similar_sentence": coarse_sentences,
-            }
-
-            question_out = self.llm.chat_text(
-                messages=[{"role": "system", "content": Prompts.ANSWER_SORT_PROMPT},
-                          {"role": "user", "content": json.dumps(ans_input2, ensure_ascii=False)}],
-                model=config.RE_MODEL
-            )
-
-            if question_out is None:
-                pass  # no LLM ranking returned; fall through to the similarity fallback below
-            else:
-                scores = question_out.get("relevance_scores")
-
-                logger.info(f"[sort] {question_out}")
-
-                evidence_dict = sorted(
-                    ((k, v) for k, v in scores.items() if v != 0),
-                    key=lambda kv: kv[1],
-                    reverse=True
-                )[:config.K2]
-
-                sort_ids = [k for k, _ in evidence_dict]
-
-
-                text_list = []
-                emb_list = []
-                selected_list = []
-                if sort_ids != None:
-                    for id in sort_ids:
-                        match_idx = None
-                        # LM ids may carry a speaker suffix (e.g. D27:34-1:Joanna); match tolerantly by stripping the speaker
-                        id_parts = id.rsplit(":", 1)
-                        id_without_speaker = id_parts[0] if len(id_parts) > 1 and not id_parts[1].isdigit() else id
-                        for i, tid in enumerate(coarse_ids):
-                            if config.dataset == "LM":
-                                tid_parts = tid.rsplit(":", 1)
-                                tid_without_speaker = tid_parts[0] if len(tid_parts) > 1 and not tid_parts[1].isdigit() else tid
-                                _match = (tid == id or tid.startswith(id + "-") or
-                                          tid == id_without_speaker or
-                                          tid_without_speaker == id_without_speaker or
-                                          tid.startswith(id_without_speaker + "-"))
-                            else:
-                                # exact match, or tid prefixed by "id-", e.g. id="D32:6", tid="D32:6-2"
-                                _match = (tid == id or tid.startswith(id + "-"))
-                            if _match:
-                                match_idx = i
-                                break
-                        if match_idx is not None:
-                            text_list.append(coarse_sentences[match_idx])
-                            emb_list.append(coarse_sentence_embs[match_idx])
-                            selected_list.append(coarse_ids[match_idx])
-                else:
-                    sort_ids = []
-
-
-            # if select fails
-            if len(sort_ids) == 0 or len(selected_list) > config.K2:
-                if len(selected_list) != 0:
-                    emb_list = np.vstack(emb_list)
-
-                    selected_list, _, emb_list, text_list = topk_answers_by_similarity(question_emb, emb_list,
-                                                                                 selected_list,
-                                                                                 k=config.K2,
-                                                                                 answer_texts=text_list)
-                elif len(coarse_sentence_embs) != 0:
-                    coarse_sentence_embs = np.vstack(coarse_sentence_embs)
-                    selected_list, _, emb_list, text_list = topk_answers_by_similarity(question_emb, coarse_sentence_embs,
-                                                                                 coarse_ids,
-                                                                                 k=config.K2,
-                                                                                 answer_texts=coarse_sentences)
-        return selected_list, emb_list, text_list
-
-
-    @staticmethod
-    def _as_list(value):
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return value
-        if isinstance(value, (tuple, set)):
-            return list(value)
-        return [value]
-
-    @staticmethod
-    def _normalize_sentence_ids(rewrite_out):
-        normalize_sentence_ids(rewrite_out)
-
-    @staticmethod
-    def _origin_ids(origin):
-        return origin_ids(origin)
-
-    @staticmethod
-    def _first_origin(origin):
-        return first_origin(origin)
-
-    def rewrite(self, text:str):
-        return rewrite_windowed_session(self.llm, text, logger=logger)
-
-    def rewrite_sample(self, sample: dict, rewrite_path: str, session_id_ref: int = 0):
-        # Windowed rewrite is always session-local: do not merge D1/D2/... into one compression window.
-        if config.DATASET == "LM":
-            session_items = list(sample.items())
-            i = 1
-            for _, (session_id, session) in enumerate(session_items):
-                if i < session_id_ref:
-                    i += 1
+    def rewrite_sample(self, sample, rewrite_path, session_id_ref=0):
+        selected_sessions = []
+        with open(rewrite_path, "a", encoding="utf-8") as output:
+            for index, (session_id, session) in enumerate(sample.items(), start=1):
+                if index < session_id_ref:
                     continue
-                self.rewrite_sentence(session_id, session, rewrite_path)
-                i += 1
-            return
-        i=1
-        for session_id, session in sample.items():
-            #
-            if i<session_id_ref:
-                i += 1
-                continue
-            self.rewrite_sentence(session_id, session, rewrite_path)
-            i+=1
-
-
-
-
-    def rewrite_sentence(self, session_id: int, text: str, rewrite_path: str):
-        rewritten_sentences = self.rewrite(text)
-        file_name = rewrite_path # "result_rewrite.json"
-        with open(file_name, "a", encoding="utf-8") as f:
-            record = {session_id: rewritten_sentences}
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-    def store_rewrite(self, rewrite_path: str) -> None:
-        """Load session-local Child/Parent records without a keyword index."""
-        with open(rewrite_path, "r", encoding="utf-8") as file:
-            for index, line in enumerate(file, start=1):
-                record = json.loads(line)
-                if not record:
-                    continue
-                session_label, events = next(iter(record.items()))
-                match = re.fullmatch(r"session_(\d+)", str(session_label))
-                self.store_event_new(
-                    events,
-                    session_id=int(match.group(1)) if match else index,
+                if config.DUMP_CANDIDATES:
+                    utility, representation, keep = 1.0, None, True
+                else:
+                    utility, representation = self.utility_evaluator().score_write(
+                        session, selected_sessions
+                    )
+                    keep = utility >= config.WRITE_THRESHOLD
+                logger.info(
+                    "[write-utility] session=%s utility=%.6f decision=%s",
+                    session_id, utility, "KEEP" if keep else "DROP",
                 )
+                rewritten = self.rewrite(session) if keep else None
+                if keep and representation is not None:
+                    selected_sessions.append(representation)
+                output.write(json.dumps({session_id: rewritten}, ensure_ascii=False) + "\n")
 
+    def extract_keys(self, sentences):
+        result = self.llm.chat_text(
+            [
+                {"role": "system", "content": Prompts.KEYWORD_SYSTEM_PROMPT},
+                {"role": "user", "content": Prompts.extract_keyword_prompt(
+                    json.dumps(sentences, ensure_ascii=False), ""
+                )},
+            ]
+        )
+        valid, error = schema.check_key_json(result, sentences)
+        if not valid:
+            raise ValueError(error)
+        return result
 
-    def store_event_new(self, events, session_id):
-        # [guard] skip the whole session only when events (rewrite) is None: no events means no topic/episode, so no misalignment with embeddings
+    def extract_keyword_sample(self, keyword_path, rewrite_path, ref_id=0):
+        with open(rewrite_path, encoding="utf-8") as source:
+            rewrites = [json.loads(line) for line in source if line.strip()]
+        with open(keyword_path, "a", encoding="utf-8") as output:
+            for rewrite in rewrites[ref_id:]:
+                session = next(iter(rewrite.values()))
+                if session is None:
+                    output.write("null\n")
+                    continue
+                sentences = [
+                    {"id": item["id"], "text": item["text"]}
+                    for item in session["sentence"]
+                ]
+                output.write(json.dumps(self.extract_keys(sentences), ensure_ascii=False) + "\n")
+
+    def store_keyword(self, keyword_path, rewrite_path):
+        with open(rewrite_path, encoding="utf-8") as source:
+            rewrites = [json.loads(line) for line in source if line.strip()]
+        with open(keyword_path, encoding="utf-8") as source:
+            keywords = [json.loads(line) for line in source if line.strip()]
+        for session_id, (rewrite, keys) in enumerate(zip(rewrites, keywords), start=1):
+            self.store_event(next(iter(rewrite.values())), keys, session_id)
+
+    def store_event(self, events, keys, session_id):
         if events is None:
-            logging.warning(f"store_event_new: session_{session_id} events is None; skipping this session")
             return
-        conversation_time = events.get("conversation_time")
-        topic_sentences = events.get("topics") or {}
-        uses_composite_tags = bool(config.SEMANTIC_HIERARCHY)
-        # Legacy summaries are not used by the EAES retrieval pipeline.
-        # The keyword cache remains an optional hint for EAES indexing.
+        conversation_time = events["conversation_time"]
+        event_topics = {}
+        for item in events["sentence"]:
+            origin = item["origin"]
+            raw_text = self.memory.raw_text[origin.split(":")[0]][origin]
+            event = EpisodeEvent(
+                item["id"], item["text"], raw_text, origin,
+                self.memory.embeddings[item["id"]], item["time"], conversation_time,
+            )
+            event.tag = item["tag"]
+            self.memory.episode_events[event.event_id] = event
+            event_topics[event.event_id] = item["topic"]
 
-        episode_events = events.get("sentence")
-        eid_topic_dict = {}
+        self.memory.add_topics(events["topics"], event_topics, session_id)
+        for item in events["personal_sentences"]:
+            self.memory.add_personal_information(
+                f"D{session_id}:{item['id']}", item["text"], item["origin"],
+                item["tag"], item["person"], conversation_time,
+            )
 
-        if isinstance(episode_events, list):
-            for ee in episode_events:
-                if not isinstance(ee, dict):
-                    continue
-                id = ee.get("id")
-                origin = ee.get("origin")
-                if not id or not origin:
-                    continue
-                time = ee.get("time")
-                topics = self._as_list(ee.get("topic"))
-                semantic_properties = self._as_list(ee.get("semantic_properties"))
+        for item in keys["sentence"]:
+            event = self.memory.episode_events[item["sentence_id"]]
+            speaker = self.memory.raw_text[event.origin.split(":")[0]][event.origin].split(":", 1)[0]
+            for key in list(dict.fromkeys(item["keyword"] + [speaker])):
+                if key not in self.memory.keys:
+                    self.memory.keys[key] = KeyNode(key)
+                self.memory.keys[key].add_tag(event.tag, event.event_id)
+                link_id = f"el{self.episode_link_num}"
+                self.memory.episode_links[link_id] = Link(key, event.event_id, event.tag)
+                self.memory.event_to_keys[event.event_id].add(key)
+                self.episode_link_num += 1
 
-
-                first_origin = self._first_origin(origin)
-                prefix = first_origin.split(":")[0]  # "D1"
-                # Origin is provenance, not an event ID.  Extract every raw
-                # dialogue origin in order and ignore any accidental event-ID
-                # suffixes when reading legacy caches.
-                ids = list(dict.fromkeys(self._origin_ids(origin)))
-                if len(ids) != 1:
-                    raw_session = self.memory.raw_text.get(prefix, {})
-                    raw_context = "\n".join(
-                        raw_session.get(origin_id) or ""
-                        for origin_id in ids
-                    )
-                else:
-                    raw_context = self.memory.raw_text.get(prefix, {}).get(first_origin)
-                text = ee.get("text") or raw_context
-
-                # [LM] for LM, store only the user's sentences
-                if config.dataset == "LM":
-                    if raw_context is None:
-                        continue
-                    if raw_context.split(":", 1)[0].strip() != "user":
-                        continue
-                # semantic_properties is generated with the rewrite memory and
-                # stored on EpisodeEvent; loading it does not create a new cache
-                # or recompute the already persisted memory embedding.
-                ee_event = EpisodeEvent(
-                    id,
-                    text,
-                    origin,
-                    embedding=None,
-                    time=time,
-                    conv_time=conversation_time,
-                    semantic_properties=semantic_properties,
-                )
-                tags = ee.get("tag")
-                if not isinstance(tags, list) or not 1 <= len(tags) <= 4:
-                    raise ValueError(
-                        f"episode event {id} requires a tag array with 1-4 items"
-                    )
-                if uses_composite_tags:
-                    for tag in tags:
-                        valid_tag, tag_error = json_scheme.check_composite_tag(tag)
-                        if not valid_tag:
-                            raise ValueError(
-                                f"episode event {id} has an invalid composite "
-                                f"tag {tag!r}: {tag_error}"
-                            )
-                ee_event.tag_t = list(tags)
-                self.memory.episode_events[id] = ee_event
-                # New rewrite memories carry source-supported event time in
-                # their text. Keep legacy cached structured times readable,
-                # but do not try to index a missing retired field.
-                if time:
-                    try:
-                        self.memory.add_event_time(id, time)
-                    except Exception as _e:
-                        # guard: some legacy rewrites contain unparseable dates
-                        logging.warning(f"add_event_time skip {id} time={time!r}: {_e}")
-                eid_topic_dict[id] = topics
-
-        self.memory.add_topics(topic_sentences, eid_topic_dict, session_id)
-
-        self._eaes_build_notes_for_session(events, conversation_time, session_id)
-        self._eaes_build_parent_nodes_for_session(events, session_id)
-
-    def store_raw_text(self, raw_text, conv_embeddings=None, topic_id_list=None, topic_embeddings=None):
-        self.memory.store_raw_text(raw_text, conv_embeddings, topic_id_list, topic_embeddings)
-
-def calculate_and(list1, list2):
-    if not list2:
-        return 0.0
-    covered = set(list1) & set(list2)
-    return round(len(covered) / len(list2) * 100, 2)
-
-if __name__ == "__main__":
-
-    list1 = ["D1:12", "D28:20", "D2:5", "D28:15", "D9:2", "D9:2", "D9:2", "D1:10", "D1:2", "D15:17", "D21:16", "D26:11", "D3:3", "D2:29", "D26:3", "D15:12", "D7:12", "D14:15", "D13:6", "D13:6", "D28:33", "D26:9", "D28:12", "D12:19", "D28:16", "D2:9", "D7:6", "D8:12", "D18:2", "D9:9", "D9:1", "D9:1", "D21:19", "D13:2", "D6:13", "D22:15", "D19:4", "D17:3", "D17:3", "D17:3", "D6:4", "D22:13", "D16:2", "D14:23", "D18:7", "D17:20", "D17:20", "D17:20", "D6:12", "D12:16", "D1:1", "D11:1", "D7:9", "D25:1", "D12:2", "D4:2", "D28:6", "D6:6", "D16:15", "D5:20", "D5:20", "D13:10", "D20:19", "D7:10", "D13:22", "D13:22", "D17:2", "D17:2", "D17:2", "D25:3", "D28:7", "D17:4", "D17:4", "D17:4", "D11:19", "D20:16", "D1:8", "D6:2", "D4:9", "D10:14"]
-    list2 = ["D1:10", "D1:11", "D1:12", "D3:4", "D4:9", "D10:9", "D20:2"]
-
-    calculate_and(list1,list2)
-
-
+    def store_raw_text(self, raw_text, embeddings, topic_ids, topic_embeddings):
+        self.memory.store_raw_text(raw_text, embeddings, topic_ids, topic_embeddings)

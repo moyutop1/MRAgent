@@ -5,115 +5,47 @@ import json
 from collections import defaultdict
 
 import numpy as np
+import openai
 from openai import OpenAI
-from common.utils import extract_json_from_content
-from common.openrouter import OPENROUTER_BASE_URL, get_openrouter_headers
 
 from dotenv import load_dotenv
 import os
 load_dotenv()  # read API key from .env
-JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", os.getenv("CHAT_PROVIDER", "openrouter")).lower()
-JUDGE_TIMEOUT = float(os.getenv("JUDGE_TIMEOUT", "300" if JUDGE_PROVIDER == "deepseek" else "60"))
-JUDGE_MAX_RETRIES = int(os.getenv("JUDGE_MAX_RETRIES", "5" if JUDGE_PROVIDER == "deepseek" else "2"))
-DEEPSEEK_THINKING_MODE = os.getenv("DEEPSEEK_THINKING_MODE", "disabled").lower()
-if JUDGE_PROVIDER == "ofox":
-    API_KEY = os.getenv("OFOX_API_KEY")
-    JUDGE_MODEL = os.getenv("OFOX_JUDGE_MODEL", os.getenv("OFOX_MODEL", "gpt-4o-mini"))
-    JUDGE_BASE_URL = os.getenv("OFOX_BASE_URL", "").rstrip("/")
-elif JUDGE_PROVIDER == "deepseek":
-    API_KEY = os.getenv("DEEPSEEK_API_KEY")
-    JUDGE_MODEL = os.getenv("DEEPSEEK_JUDGE_MODEL", "deepseek-flash")
-    JUDGE_BASE_URL = "https://api.deepseek.com"
-else:
-    API_KEY = os.getenv("OPENROUTER_API_KEY")
-    JUDGE_MODEL = os.getenv("OPENROUTER_JUDGE_MODEL", "openai/gpt-4o-mini")
-    JUDGE_BASE_URL = OPENROUTER_BASE_URL
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=JUDGE_BASE_URL,
-    timeout=JUDGE_TIMEOUT,
-    max_retries=JUDGE_MAX_RETRIES,
-    default_headers=get_openrouter_headers() if JUDGE_PROVIDER == "openrouter" else None,
-)
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+client = OpenAI(api_key=API_KEY, base_url="https://openrouter.ai/api/v1")
 
 ACCURACY_PROMPT = """
-Your task is to label a generated answer to a question as CORRECT or WRONG. You will receive:
-    (1) a question posed by one user to another,
-    (2) a gold (ground-truth) answer,
-    (3) a generated answer.
+Your task is to label an answer to a question as ’CORRECT’ or ’WRONG’. You will be given the following data:
+    (1) a question (posed by one user to another user), 
+    (2) a ’gold’ (ground truth) answer, 
+    (3) a generated answer
+which you will score as CORRECT/WRONG.
 
-Judge semantic equivalence, not lexical overlap. First identify the answer-bearing fact or event requested by the question, then compare the meaning expressed by the gold and generated answers.
+The point of the question is to ask about something one user should know about the other user based on their prior conversations.
+The gold answer will usually be a concise and short answer that includes the referenced topic, for example:
+Question: Do you remember what I got the last time I went to Hawaii?
+Gold answer: A shell necklace
+The generated answer might be much longer, but you should be generous with your grading - as long as it touches on the same topic as the gold answer, it should be counted as CORRECT. 
 
-Label CORRECT when the generated answer conveys the same answer-bearing proposition as the gold answer, including when it uses:
-- synonyms or near-synonyms;
-- a paraphrase or different grammatical form;
-- a noun phrase instead of a verb phrase, or vice versa;
-- a longer answer with extra details that do not contradict the gold answer.
+For time related questions, the gold answer will be a specific date, month, year, etc. The generated answer might be much longer or use relative time references (like "last Tuesday" or "next month"), but you should be generous with your grading - as long as it refers to the same date or time period as the gold answer, it should be counted as CORRECT. Even if the format differs (e.g., "May 7th" vs "7 May"), consider it CORRECT if it's the same date.
 
-Use a coverage-first rule. The gold answer is a sufficient reference answer, not necessarily an exhaustive list of everything the generated answer may mention. If the generated answer affirmatively contains or entails every answer-bearing element of the gold answer, label it CORRECT even when it also lists other answers, alternatives, candidates, activities, objects, or details that are absent from the gold answer. Do not require the generated answer to be exclusive or concise, and do not mark it WRONG merely because additional answers are present.
-
-For example:
-- Gold: "painting and pottery"; Generated: "painting, pottery, and photography" -> CORRECT because all gold-answer elements are present.
-- Gold: "gave a school speech"; Generated: "gave a school speech, helped with the raffle, and met several teachers" -> CORRECT because the requested gold fact is fully answered.
-- Gold: "gave a school speech"; Generated: "did not give a school speech and only attended the event" -> WRONG because it explicitly negates the gold fact.
-
-Extra content should change a covered answer to WRONG only when it explicitly denies the gold answer or creates a direct logical contradiction with it. Merely adding another possible answer is not a contradiction. Mentioning the gold words only to deny, question, or quote them does not count as covering the gold answer.
-
-Do not require the same wording or shared keywords. For example:
-- Gold: "school speech"; Generated: "gave a talk at a school event" -> CORRECT. "Speech" and "gave a talk" describe the same action in this context.
-- Gold: "a shell necklace"; Generated: "They brought back a necklace made of shells from Hawaii" -> CORRECT.
-
-However, sharing only a broad topic is not enough. The generated answer must entail the answer-bearing fact requested by the question. For example:
-- Gold: "gave a speech at the school event"; Generated: "attended a school event" -> WRONG. Attendance does not establish that a speech was given.
-
-Label WRONG when the generated answer does not cover the gold answer, contradicts or denies it, omits the requested fact, or is too vague to establish semantic equivalence. A different person/event/object is grounds for WRONG only when the gold answer itself is not also affirmatively and completely covered. Treat differences within the gold-answer content in negation, person, quantity, completion status (planned versus completed), and answer-critical time or place as meaningful. Minor details that the question does not ask for need not match.
-
-For time-related questions, accept different surface forms that identify the same date or time period, including equivalent absolute and relative expressions when they are grounded to the same time. For example, "May 7th" and "7 May" are equivalent. If the gold time is fully present alongside additional times, apply the coverage-first rule and label it CORRECT unless the answer denies the gold time. Label it WRONG for time mismatch only when no gold-equivalent time is affirmatively covered.
-
-Now evaluate the real example:
+Now it’s time for the real question:
 Question: {question}
 Gold answer: {gold_answer}
 Generated answer: {generated_answer}
 
-Return only valid JSON. Do not include explanations, markdown, or extra text.
-The JSON schema is exactly:
-{{"label": "CORRECT"}}
-or
-{{"label": "WRONG"}}
+First, provide a short (one sentence) explanation of your reasoning, then finish with CORRECT or WRONG. 
+Do NOT include both CORRECT and WRONG in your response, or it will break the evaluation script.
+
+Just return the label CORRECT or WRONG in a json format with the key as "label".
 """
-
-
-def _parse_judge_label(content):
-    import re
-    try:
-        label = json.loads(content)["label"]
-    except Exception:
-        try:
-            label = extract_json_from_content(content).get("label")
-        except Exception:
-            text = str(content or "")
-            if re.search(r"\bCORRECT\b", text) and not re.search(r"\bWRONG\b", text):
-                label = "CORRECT"
-            elif re.search(r"\bWRONG\b", text) and not re.search(r"\bCORRECT\b", text):
-                label = "WRONG"
-            else:
-                return None
-    label = str(label or "").strip().upper()
-    return label if label in {"CORRECT", "WRONG"} else None
 
 
 def evaluate_llm_judge(question, gold_answer, generated_answer):
     """Evaluate the generated answer against the gold answer using an LLM judge."""
-    if not API_KEY:
-        raise RuntimeError(
-            "Judge API key is empty. Set OPENROUTER_API_KEY, DEEPSEEK_API_KEY, "
-            "or OFOX_API_KEY in .env before running LLM judge."
-        )
-    if not JUDGE_BASE_URL:
-        raise RuntimeError("Judge base URL is empty. Set OFOX_BASE_URL in .env when JUDGE_PROVIDER=ofox.")
-    req = {
-        "model": JUDGE_MODEL,
-        "messages": [
+    response = client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=[
             {
                 "role": "user",
                 "content": ACCURACY_PROMPT.format(
@@ -121,26 +53,19 @@ def evaluate_llm_judge(question, gold_answer, generated_answer):
                 ),
             }
         ],
-        "temperature": 0.0,
-    }
-    if (
-        JUDGE_PROVIDER == "deepseek"
-        and JUDGE_MODEL in {"deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"}
-        and DEEPSEEK_THINKING_MODE == "disabled"
-    ):
-        req["extra_body"] = {"thinking": {"type": "disabled"}}
-    last_content = ""
-    for _ in range(2):
-        try:
-            response = client.chat.completions.create(**req, response_format={"type": "json_object"})
-        except Exception:
-            response = client.chat.completions.create(**req)
-        last_content = response.choices[0].message.content
-        label = _parse_judge_label(last_content)
-        if label is not None:
-            return 1 if label == "CORRECT" else 0
-    print(f"[judge] Could not parse label; counting WRONG. head={str(last_content)[:120]!r}", file=sys.stderr)
-    return 0
+        response_format={"type": "json_object"},
+        temperature=0.0,
+    )
+    # print([
+    #         {
+    #             "role": "user",
+    #             "content": ACCURACY_PROMPT.format(
+    #             ),
+    #         }
+    #     ])
+    # print(response.choices[0].message.content)
+    label = json.loads(response.choices[0].message.content)["label"]
+    return 1 if label == "CORRECT" else 0
 
 
 # def main():

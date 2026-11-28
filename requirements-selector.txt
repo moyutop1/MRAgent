@@ -1,2 +1,0 @@
-# Optional; install on the AutoDL machine only. Reuse its existing CUDA torch.
-transformers>=4.51.0,<5
